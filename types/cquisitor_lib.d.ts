@@ -85,6 +85,7 @@ export type CborSimpleType =
     | "Break";
 
 export interface CborSimple {
+    type: CborSimpleType;
     position_info: CborPosition;
     struct_position_info?: CborPosition;
     value: any;

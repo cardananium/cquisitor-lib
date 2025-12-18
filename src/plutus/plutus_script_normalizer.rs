@@ -21,6 +21,16 @@ pub fn normalize_plutus_script(
     apply_encoding(&pure_plutus_bytes, encoding)
 }
 
+pub fn normalize_plutus_script_with_core_version(
+    plutus_script: &[u8],
+    encoding: OutputEncoding,
+) -> Result<(Vec<u8>, [u8; 3])> {
+    let pure_plutus_bytes = get_pure_plutus_bytes(plutus_script)?;
+    let encoded_bytes = apply_encoding(&pure_plutus_bytes, encoding)?;
+    let core_version = [pure_plutus_bytes[0], pure_plutus_bytes[1], pure_plutus_bytes[2]];
+    Ok((encoded_bytes, core_version))
+}
+
 fn get_pure_plutus_bytes(plutus_script: &[u8]) -> Result<Vec<u8>> {
     let mut unwrapped_script = plutus_script.to_vec();
 

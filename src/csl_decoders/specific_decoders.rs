@@ -6,7 +6,7 @@ use cardano_serialization_lib::{AddressKind, ByronAddress, RewardAddress};
 use serde_json::Value;
 use crate::js_value::JsValue;
 use crate::js_value::from_serde_json_value;
-use crate::plutus::plutus_script_normalizer::{normalize_plutus_script, OutputEncoding};
+use crate::plutus::plutus_script_normalizer::{normalize_plutus_script_with_core_version, OutputEncoding};
 
 pub fn decode_address(input: &str, is_hex: bool, is_bech32: bool, is_base58: bool) -> Result<JsValue, String> {
     let decoded = decode_address_internal(input, is_hex, is_bech32, is_base58)?;
@@ -235,15 +235,17 @@ pub fn decode_plutus_script(input: &str, version: Option<i32>, is_hex: bool, _is
         Err("Only hex encoding is supported".to_string())?;
     }
     let bytes = hex::decode(input).map_err(|e| format!("Failed to decode hex: {}", e))?;
-    let normalized_script = normalize_plutus_script(&bytes, OutputEncoding::DoubleCBOR)
+    let (normalized_script, core_version) = normalize_plutus_script_with_core_version(&bytes, OutputEncoding::DoubleCBOR)
         .map_err(|e| format!("Failed to normalize Plutus script: {}", e))?;
     let version = version.unwrap_or(1);
+    let core_version_str = format!("{}.{}.{}", core_version[0], core_version[1], core_version[2]);
     match version {
         1 => {
             let script = csl::PlutusScript::from_bytes(normalized_script)
                 .map_err(|e| format!("Failed to decode Plutus script: {:?}", e))?;
             let value =  Ok::<Value, String>(serde_json::json!({
-              "script_hash": script.hash().to_hex(),
+                "script_hash": script.hash().to_hex(),
+                "core_version": core_version_str,
             }))?;
             from_serde_json_value(&value)
                 .map_err(|e| format!("Failed to convert to JsValue: {}", e))
@@ -252,7 +254,8 @@ pub fn decode_plutus_script(input: &str, version: Option<i32>, is_hex: bool, _is
             let script = csl::PlutusScript::from_bytes_v2(normalized_script)
                 .map_err(|e| format!("Failed to decode Plutus script: {:?}", e))?;
             let value =  Ok::<Value, String>(serde_json::json!({
-              "script_hash": script.hash().to_hex(),
+                "script_hash": script.hash().to_hex(),
+                "core_version": core_version_str,
             }))?;
             from_serde_json_value(&value)
                 .map_err(|e| format!("Failed to convert to JsValue: {}", e))
@@ -261,7 +264,8 @@ pub fn decode_plutus_script(input: &str, version: Option<i32>, is_hex: bool, _is
             let script = csl::PlutusScript::from_bytes_v3(normalized_script)
                 .map_err(|e| format!("Failed to decode Plutus script: {:?}", e))?;
             let value =  Ok::<Value, String>(serde_json::json!({
-              "script_hash": script.hash().to_hex(),
+                "script_hash": script.hash().to_hex(),
+                "core_version": core_version_str,
             }))?;
             from_serde_json_value(&value)
                 .map_err(|e| format!("Failed to convert to JsValue: {}", e))

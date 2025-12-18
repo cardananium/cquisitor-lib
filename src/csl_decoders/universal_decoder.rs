@@ -1,7 +1,7 @@
 use crate::bingen::wasm_bindgen;
 use crate::csl_decoders::params::DecodingParams;
 use crate::csl_decoders::specific_decoders::{
-    decode_address, decode_plutus_data, decode_plutus_script, decode_transaction,
+    decode_native_script, decode_address, decode_plutus_data, decode_plutus_script, decode_transaction,
 };
 use crate::js_value::{empty_js_value, from_js_value, from_serde_json_value, JsValue};
 use bech32;
@@ -1614,21 +1614,7 @@ pub fn decode_specific_type(
         }
 
         "NativeScript" => {
-            if is_hex {
-                if let Ok(decoded) = csl::NativeScript::from_hex(input) {
-                    let value = decoded
-                        .to_json()
-                        .map_err(|e| format!("Failed to convert to JSON: {:?}", e))
-                        .and_then(|json| {
-                            serde_json::from_str(&json)
-                                .map_err(|e| format!("Failed to parse JSON: {}", e))
-                        })?;
-                    return from_serde_json_value(&value)
-                        .map_err(|e| format!("Failed to convert to JsValue: {}", e));
-                }
-            }
-
-            Err("Failed to decode".to_string())
+            decode_native_script(input, is_hex, is_bech32, is_base58)
         }
 
         "NativeScripts" => {

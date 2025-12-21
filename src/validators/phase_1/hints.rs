@@ -230,7 +230,8 @@ pub fn get_error_hint(error: &Phase1Error) -> Option<String> {
         ),
         Phase1Error::MissingDatum { .. } => Some(
             "Provide the required datum either: (1) in the witness set (plutus_data field) when using datum hash, or \
-            (2) as inline datum in the spending input itself. Note: datums from reference inputs CANNOT be used for spending validation.".to_string()
+            (2) as inline datum in the spending input itself. Datums from reference inputs CANNOT be used for spending validation. \
+            Also note that PlutusV1 scripts do not support inline datums, so you must use datum hash in utxo.".to_string()
         ),
         Phase1Error::ExtraneousDatumWitnesses { .. } => Some(
             "Remove unnecessary datum witnesses from the transaction. Only include datums that are actually referenced.".to_string()

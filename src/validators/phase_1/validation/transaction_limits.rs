@@ -201,7 +201,7 @@ impl<'a> TransactionLimitsValidator<'a> {
             ));
         }
 
-        for input in self.ref_inputs.iter() {
+        for (i, input) in self.ref_inputs.iter().enumerate() {
             let utxo = self
                 .validation_input_context
                 .find_utxo(input.tx_hash.clone(), input.output_index);
@@ -210,12 +210,12 @@ impl<'a> TransactionLimitsValidator<'a> {
                     Phase1Error::BadInputsUTxO {
                         invalid_input: input.clone(),
                     },
-                    "transaction.body.reference_inputs".to_string(),
+                    format!("transaction.body.reference_inputs.{}", i),
                 ));
             }
         }
 
-        for input in self.collateral_inputs.iter() {
+        for (i, input) in self.collateral_inputs.iter().enumerate() {
             let utxo = self
                 .validation_input_context
                 .find_utxo(input.tx_hash.clone(), input.output_index);
@@ -224,12 +224,12 @@ impl<'a> TransactionLimitsValidator<'a> {
                     Phase1Error::BadInputsUTxO {
                         invalid_input: input.clone(),
                     },
-                    "transaction.body.collateral".to_string(),
+                    format!("transaction.body.collateral.{}", i),
                 ));
             }
         }
 
-        for input in self.inputs.iter() {
+        for (i, input) in self.inputs.iter().enumerate() {
             let utxo = self
                 .validation_input_context
                 .find_utxo(input.tx_hash.clone(), input.output_index);
@@ -238,7 +238,7 @@ impl<'a> TransactionLimitsValidator<'a> {
                     Phase1Error::BadInputsUTxO {
                         invalid_input: input.clone(),
                     },
-                    "transaction.body.inputs".to_string(),
+                    format!("transaction.body.inputs.{}", i),
                 ));
             }
         }

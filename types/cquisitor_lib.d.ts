@@ -57,6 +57,12 @@ export function decode_plutus_program_uplc_json(hex: string): ProgramJson;
  * @returns {string}
  */
 export function decode_plutus_program_pretty_uplc(hex: string): string;
+/**
+ * @param {string} tx_hex
+ * @param {number} output_index
+ * @returns {string}
+ */
+export function get_ref_script_bytes(tx_hex: string, output_index: number): string;
 
 export interface CborPosition {
     offset: number;
@@ -447,672 +453,715 @@ export interface NecessaryInputData {
     lastEnactedGovAction: GovernanceActionType[];
     pools: string[];
     utxos: TxInput[];
-}
-
-/**
- * Phase 1 validation errors
- */
-export type Phase1Error =
+  }
+  
+  /**
+   * Phase 1 validation errors
+   */
+  export type Phase1Error =
     | (
-    | "GenesisKeyDelegationCertificateIsNotSupported"
-    | "MoveInstantaneousRewardsCertificateIsNotSupported"
-    )
+        | "GenesisKeyDelegationCertificateIsNotSupported"
+        | "MoveInstantaneousRewardsCertificateIsNotSupported"
+      )
     | {
-    BadInputsUTxO: {
-        invalid_input: TxInput;
-    };
-}
+        BadInputsUTxO: {
+          invalid_input: TxInput;
+        };
+      }
     | {
-    OutsideValidityIntervalUTxO: {
-        current_slot: bigint;
-        interval_end: bigint;
-        interval_start: bigint;
-    };
-}
+        OutsideValidityIntervalUTxO: {
+          current_slot: bigint;
+          interval_end: bigint;
+          interval_start: bigint;
+        };
+      }
     | {
-    MaxTxSizeUTxO: {
-        actual_size: bigint;
-        max_size: bigint;
-    };
-}
+        MaxTxSizeUTxO: {
+          actual_size: bigint;
+          max_size: bigint;
+        };
+      }
     | "InputSetEmptyUTxO"
     | {
-    FeeTooSmallUTxO: {
-        actual_fee: bigint;
-        fee_decomposition: FeeDecomposition;
-        min_fee: bigint;
-    };
-}
+        FeeTooSmallUTxO: {
+          actual_fee: bigint;
+          fee_decomposition: FeeDecomposition;
+          min_fee: bigint;
+        };
+      }
     | {
-    ValueNotConservedUTxO: {
-        difference: Value;
-        input_sum: Value;
-        output_sum: Value;
-    };
-}
+        ValueNotConservedUTxO: {
+          difference: Value;
+          input_sum: Value;
+          output_sum: Value;
+        };
+      }
     | {
-    WrongNetwork: {
-        wrong_addresses: string[];
-    };
-}
+        WrongNetwork: {
+          wrong_addresses: string[];
+        };
+      }
     | {
-    WrongNetworkWithdrawal: {
-        wrong_addresses: string[];
-    };
-}
+        WrongNetworkWithdrawal: {
+          wrong_addresses: string[];
+        };
+      }
     | {
-    WrongNetworkInTxBody: {
-        actual_network: number;
-        expected_network: number;
-    };
-}
+        WrongNetworkInTxBody: {
+          actual_network: number;
+          expected_network: number;
+        };
+      }
     | {
-    OutputTooSmallUTxO: {
-        min_amount: number;
-        output_amount: number;
-    };
-}
+        OutputTooSmallUTxO: {
+          min_amount: number;
+          output_amount: number;
+        };
+      }
     | {
-    CollateralReturnTooSmall: {
-        min_amount: number;
-        output_amount: number;
-    };
-}
+        CollateralReturnTooSmall: {
+          min_amount: number;
+          output_amount: number;
+        };
+      }
     | {
-    OutputBootAddrAttrsTooBig: {
-        actual_size: bigint;
-        max_size: bigint;
-        output: unknown;
-    };
-}
+        OutputBootAddrAttrsTooBig: {
+          actual_size: bigint;
+          max_size: bigint;
+          output: unknown;
+        };
+      }
     | {
-    OutputTooBigUTxO: {
-        actual_size: bigint;
-        max_size: bigint;
-    };
-}
+        OutputsValueTooBig: {
+          actual_size: bigint;
+          max_size: bigint;
+        };
+      }
     | {
-    InsufficientCollateral: {
-        required_collateral: number;
-        total_collateral: number;
-    };
-}
+        InsufficientCollateral: {
+          required_collateral: number;
+          total_collateral: number;
+        };
+      }
     | {
-    ExUnitsTooBigUTxO: {
-        actual_memory_units: bigint;
-        actual_steps_units: bigint;
-        max_memory_units: bigint;
-        max_steps_units: bigint;
-    };
-}
+        ExUnitsTooBigUTxO: {
+          actual_memory_units: bigint;
+          actual_steps_units: bigint;
+          max_memory_units: bigint;
+          max_steps_units: bigint;
+        };
+      }
     | "CalculatedCollateralContainsNonAdaAssets"
     | {
-    CollateralInputContainsNonAdaAssets: {
-        collateral_input: string;
-    };
-}
+        CollateralInputContainsNonAdaAssets: {
+          collateral_input: string;
+        };
+      }
     | {
-    CollateralIsLockedByScript: {
-        invalid_collateral: string;
-    };
-}
+        CollateralIsLockedByScript: {
+          invalid_collateral: string;
+        };
+      }
     | {
-    TooManyCollateralInputs: {
-        actual_count: number;
-        max_count: number;
-    };
-}
+        TooManyCollateralInputs: {
+          actual_count: number;
+          max_count: number;
+        };
+      }
     | "NoCollateralInputs"
     | {
-    IncorrectTotalCollateralField: {
-        actual_sum: number;
-        declared_total: number;
-    };
-}
+        IncorrectTotalCollateralField: {
+          actual_sum: number;
+          declared_total: number;
+        };
+      }
     | {
-    InvalidSignature: {
-        invalid_signature: string;
-    };
-}
+        InvalidSignature: {
+          invalid_signature: string;
+        };
+      }
     | {
-    ExtraneousSignature: {
-        extraneous_signature: string;
-    };
-}
+        ExtraneousSignature: {
+          extraneous_signature: string;
+        };
+      }
     | {
-    NativeScriptIsUnsuccessful: {
-        native_script_hash: string;
-    };
-}
+        NativeScriptIsUnsuccessful: {
+          native_script_hash: string;
+        };
+      }
     | {
-    PlutusScriptIsUnsuccessful: {
-        plutus_script_hash: string;
-    };
-}
+        PlutusScriptIsUnsuccessful: {
+          plutus_script_hash: string;
+        };
+      }
     | {
-    MissingVKeyWitnesses: {
-        missing_key_hash: string;
-    };
-}
+        MissingVKeyWitnesses: {
+          missing_key_hash: string;
+        };
+      }
     | {
-    MissingScriptWitnesses: {
-        missing_script_hash: string;
-    };
-}
+        MissingScriptWitnesses: {
+          missing_script_hash: string;
+        };
+      }
     | {
-    MissingRedeemer: {
-        index: bigint;
-        tag: string;
-    };
-}
+        MissingRedeemer: {
+          index: bigint;
+          tag: string;
+        };
+      }
     | "MissingTxBodyMetadataHash"
     | "MissingTxMetadata"
     | {
-    ConflictingMetadataHash: {
-        actual_hash: string;
-        expected_hash: string;
-    };
-}
-    | {
-    InvalidMetadata: {
-        message: string;
-    };
-}
-    | {
-    ExtraneousScriptWitnesses: {
-        extraneous_script: string;
-    };
-}
-    | {
-    StakeAlreadyRegistered: {
-        reward_address: string;
-    };
-}
-    | {
-    StakeNotRegistered: {
-        reward_address: string;
-    };
-}
-    | {
-    StakeNonZeroAccountBalance: {
-        remaining_balance: bigint;
-        reward_address: string;
-    };
-}
-    | {
-    RewardAccountNotExisting: {
-        reward_address: string;
-    };
-}
-    | {
-    WrongRequestedWithdrawalAmount: {
-        expected_amount: number;
-        requested_amount: bigint;
-        reward_address: string;
-    };
-}
-    | {
-    StakePoolNotRegistered: {
-        pool_id: string;
-    };
-}
-    | {
-    WrongRetirementEpoch: {
-        current_epoch: bigint;
-        max_epoch: bigint;
-        min_epoch: bigint;
-        specified_epoch: bigint;
-    };
-}
-    | {
-    StakePoolCostTooLow: {
-        min_cost: bigint;
-        specified_cost: bigint;
-    };
-}
-    | {
-    InsufficientFundsForMir: {
-        available_amount: bigint;
-        requested_amount: bigint;
-    };
-}
-    | {
-    InvalidCommitteeVote: {
-        message: string;
-        voter: unknown;
-    };
-}
-    | {
-    DRepIncorrectDeposit: {
-        required_deposit: number;
-        supplied_deposit: number;
-    };
-}
-    | {
-    DRepDeregistrationWrongRefund: {
-        required_refund: number;
-        supplied_refund: number;
-    };
-}
-    | {
-    StakeRegistrationWrongDeposit: {
-        required_deposit: number;
-        supplied_deposit: number;
-    };
-}
-    | {
-    StakeDeregistrationWrongRefund: {
-        required_refund: number;
-        supplied_refund: number;
-    };
-}
-    | {
-    PoolRegistrationWrongDeposit: {
-        required_deposit: number;
-        supplied_deposit: number;
-    };
-}
-    | {
-    CommitteeHasPreviouslyResigned: {
-        committee_credential: LocalCredential;
-    };
-}
-    | {
-    TreasuryValueMismatch: {
-        actual_value: bigint;
-        declared_value: bigint;
-    };
-}
-    | {
-    RefScriptsSizeTooBig: {
-        actual_size: bigint;
-        max_size: bigint;
-    };
-}
-    | {
-    WithdrawalNotAllowedBecauseNotDelegatedToDRep: {
-        reward_address: string;
-    };
-}
-    | {
-    CommitteeIsUnknown: {
-        /**
-         * The committee key hash
-         */
-        committee_key_hash:
-            | {
-            keyHash: number[];
-        }
-            | {
-            scriptHash: number[];
+        ConflictingMetadataHash: {
+          actual_hash: string;
+          expected_hash: string;
         };
-    };
-}
+      }
     | {
-    GovActionsDoNotExist: {
-        /**
-         * The list of invalid governance action IDs
-         */
-        invalid_action_ids: GovernanceActionId[];
-    };
-}
-    | {
-    MalformedProposal: {
-        gov_action: GovernanceActionId;
-    };
-}
-    | {
-    ProposalProcedureNetworkIdMismatch: {
-        /**
-         * The expected network ID
-         */
-        expected_network: number;
-        /**
-         * The reward account
-         */
-        reward_account: string;
-    };
-}
-    | {
-    TreasuryWithdrawalsNetworkIdMismatch: {
-        /**
-         * The expected network ID
-         */
-        expected_network: number;
-        /**
-         * The set of mismatched reward accounts
-         */
-        mismatched_account: string;
-    };
-}
-    | {
-    VotingProposalIncorrectDeposit: {
-        proposal_index: number;
-        /**
-         * The required deposit amount
-         */
-        required_deposit: number;
-        /**
-         * The supplied deposit amount
-         */
-        supplied_deposit: number;
-    };
-}
-    | {
-    DisallowedVoters: {
-        /**
-         * List of disallowed voter and action ID pairs
-         */
-        disallowed_pairs: [unknown, unknown][];
-    };
-}
-    | {
-    ConflictingCommitteeUpdate: {
-        /**
-         * The set of conflicting credentials
-         */
-        conflicting_credentials:
-            | {
-            keyHash: number[];
-        }
-            | {
-            scriptHash: number[];
+        InvalidMetadata: {
+          message: string;
         };
-    };
-}
+      }
     | {
-    ExpirationEpochTooSmall: {
-        /**
-         * Map of credentials to their invalid expiration epochs
-         */
-        invalid_expirations: {
+        ExtraneousScriptWitnesses: {
+          extraneous_script: string;
+        };
+      }
+    | {
+        StakeAlreadyRegistered: {
+          reward_address: string;
+        };
+      }
+    | {
+        StakeNotRegistered: {
+          reward_address: string;
+        };
+      }
+    | {
+        StakeNonZeroAccountBalance: {
+          remaining_balance: bigint;
+          reward_address: string;
+        };
+      }
+    | {
+        RewardAccountNotExisting: {
+          reward_address: string;
+        };
+      }
+    | {
+        WrongRequestedWithdrawalAmount: {
+          expected_amount: number;
+          requested_amount: bigint;
+          reward_address: string;
+        };
+      }
+    | {
+        StakePoolNotRegistered: {
+          pool_id: string;
+        };
+      }
+    | {
+        WrongRetirementEpoch: {
+          current_epoch: bigint;
+          max_epoch: bigint;
+          min_epoch: bigint;
+          specified_epoch: bigint;
+        };
+      }
+    | {
+        StakePoolCostTooLow: {
+          min_cost: bigint;
+          specified_cost: bigint;
+        };
+      }
+    | {
+        InsufficientFundsForMir: {
+          available_amount: bigint;
+          requested_amount: bigint;
+        };
+      }
+    | {
+        InvalidCommitteeVote: {
+          message: string;
+          voter: unknown;
+        };
+      }
+    | {
+        DRepIncorrectDeposit: {
+          required_deposit: number;
+          supplied_deposit: number;
+        };
+      }
+    | {
+        DRepDeregistrationWrongRefund: {
+          required_refund: number;
+          supplied_refund: number;
+        };
+      }
+    | {
+        StakeRegistrationWrongDeposit: {
+          required_deposit: number;
+          supplied_deposit: number;
+        };
+      }
+    | {
+        StakeDeregistrationWrongRefund: {
+          required_refund: number;
+          supplied_refund: number;
+        };
+      }
+    | {
+        PoolRegistrationWrongDeposit: {
+          required_deposit: number;
+          supplied_deposit: number;
+        };
+      }
+    | {
+        CommitteeHasPreviouslyResigned: {
+          committee_credential: LocalCredential;
+        };
+      }
+    | {
+        TreasuryValueMismatch: {
+          actual_value: bigint;
+          declared_value: bigint;
+        };
+      }
+    | {
+        RefScriptsSizeTooBig: {
+          actual_size: bigint;
+          max_size: bigint;
+        };
+      }
+    | {
+        WithdrawalNotAllowedBecauseNotDelegatedToDRep: {
+          reward_address: string;
+        };
+      }
+    | {
+        CommitteeIsUnknown: {
+          /**
+           * The committee key hash
+           */
+          committee_key_hash:
+            | {
+                keyHash: number[];
+              }
+            | {
+                scriptHash: number[];
+              };
+        };
+      }
+    | {
+        GovActionsDoNotExist: {
+          /**
+           * The list of invalid governance action IDs
+           */
+          invalid_action_ids: GovernanceActionId[];
+        };
+      }
+    | {
+        MalformedProposal: {
+          gov_action: GovernanceActionId;
+        };
+      }
+    | {
+        ProposalProcedureNetworkIdMismatch: {
+          /**
+           * The expected network ID
+           */
+          expected_network: number;
+          /**
+           * The reward account
+           */
+          reward_account: string;
+        };
+      }
+    | {
+        TreasuryWithdrawalsNetworkIdMismatch: {
+          /**
+           * The expected network ID
+           */
+          expected_network: number;
+          /**
+           * The set of mismatched reward accounts
+           */
+          mismatched_account: string;
+        };
+      }
+    | {
+        VotingProposalIncorrectDeposit: {
+          proposal_index: number;
+          /**
+           * The required deposit amount
+           */
+          required_deposit: number;
+          /**
+           * The supplied deposit amount
+           */
+          supplied_deposit: number;
+        };
+      }
+    | {
+        DisallowedVoters: {
+          /**
+           * List of disallowed voter and action ID pairs
+           */
+          disallowed_pairs: [unknown, unknown][];
+        };
+      }
+    | {
+        ConflictingCommitteeUpdate: {
+          /**
+           * The set of conflicting credentials
+           */
+          conflicting_credentials:
+            | {
+                keyHash: number[];
+              }
+            | {
+                scriptHash: number[];
+              };
+        };
+      }
+    | {
+        ExpirationEpochTooSmall: {
+          /**
+           * Map of credentials to their invalid expiration epochs
+           */
+          invalid_expirations: {
             [k: string]: number;
+          };
         };
-    };
-}
+      }
     | {
-    InvalidPrevGovActionId: {
-        /**
-         * The invalid proposal
-         */
-        proposal: {
+        InvalidPrevGovActionId: {
+          /**
+           * The invalid proposal
+           */
+          proposal: {
             [k: string]: unknown;
+          };
         };
-    };
-}
+      }
     | {
-    VotingOnExpiredGovAction: {
-        expired_gov_action: GovernanceActionId;
-    };
-}
+        VotingOnExpiredGovAction: {
+          expired_gov_action: GovernanceActionId;
+        };
+      }
     | {
-    ProposalCantFollow: {
-        /**
-         * The expected protocol version
-         */
-        expected_versions: ProtocolVersion[];
-        /**
-         * Previous governance action ID
-         */
-        prev_gov_action_id?: GovernanceActionId | null;
-        supplied_version: ProtocolVersion;
-    };
-}
+        ProposalCantFollow: {
+          /**
+           * The expected protocol version
+           */
+          expected_versions: ProtocolVersion[];
+          /**
+           * Previous governance action ID
+           */
+          prev_gov_action_id?: GovernanceActionId | null;
+          supplied_version: ProtocolVersion;
+        };
+      }
     | {
-    InvalidConstitutionPolicyHash: {
-        /**
-         * The expected policy hash
-         */
-        expected_hash?: string | null;
-        /**
-         * The supplied policy hash
-         */
-        supplied_hash?: string | null;
-    };
-}
+        InvalidConstitutionPolicyHash: {
+          /**
+           * The expected policy hash
+           */
+          expected_hash?: string | null;
+          /**
+           * The supplied policy hash
+           */
+          supplied_hash?: string | null;
+        };
+      }
     | {
-    VoterDoNotExist: {
-        /**
-         * List of non-existent voters
-         */
-        missing_voter: {
+        VoterDoNotExist: {
+          /**
+           * List of non-existent voters
+           */
+          missing_voter: {
             [k: string]: unknown;
+          };
         };
-    };
-}
+      }
     | {
-    ZeroTreasuryWithdrawals: {
-        gov_action: GovernanceActionId;
-    };
-}
+        ZeroTreasuryWithdrawals: {
+          gov_action: GovernanceActionId;
+        };
+      }
     | {
-    ProposalReturnAccountDoesNotExist: {
-        /**
-         * The invalid return account
-         */
-        return_account: string;
-    };
-}
+        ProposalReturnAccountDoesNotExist: {
+          /**
+           * The invalid return account
+           */
+          return_account: string;
+        };
+      }
     | {
-    TreasuryWithdrawalReturnAccountsDoNotExist: {
-        /**
-         * List of non-existent return accounts
-         */
-        missing_account: string;
-    };
-}
+        TreasuryWithdrawalReturnAccountsDoNotExist: {
+          /**
+           * List of non-existent return accounts
+           */
+          missing_account: string;
+        };
+      }
     | {
-    AuxiliaryDataHashMismatch: {
-        /**
-         * The actual auxiliary data hash
-         */
-        actual_hash?: string | null;
-        /**
-         * The expected auxiliary data hash
-         */
-        expected_hash: string;
-    };
-}
+        AuxiliaryDataHashMismatch: {
+          /**
+           * The actual auxiliary data hash
+           */
+          actual_hash?: string | null;
+          /**
+           * The expected auxiliary data hash
+           */
+          expected_hash: string;
+        };
+      }
     | "AuxiliaryDataHashMissing"
     | "AuxiliaryDataHashPresentButNotExpected"
     | {
-    UnknownError: {
-        message: string;
-    };
-}
+        UnknownError: {
+          message: string;
+        };
+      }
     | {
-    MissingDatum: {
-        datum_hash: string;
-    };
-}
+        MissingDatum: {
+          datum_hash: string;
+        };
+      }
     | {
-    ExtraneousDatumWitnesses: {
-        datum_hash: string;
-    };
-}
+        ExtraneousDatumWitnesses: {
+          datum_hash: string;
+        };
+      }
     | {
-    ScriptDataHashMismatch: {
-        /**
-         * The expected script data hash
-         */
-        expected_hash?: string | null;
-        /**
-         * The actual script data hash
-         */
-        provided_hash?: string | null;
-    };
-}
+        ScriptDataHashMismatch: {
+          /**
+           * The expected script data hash
+           */
+          expected_hash?: string | null;
+          /**
+           * The actual script data hash
+           */
+          provided_hash?: string | null;
+        };
+      }
     | {
-    ReferenceInputOverlapsWithInput: {
-        input: TxInput;
-    };
-};
-
-/**
- * Phase 1 validation errors
- */
-export type Phase2Error =
+        ReferenceInputOverlapsWithInput: {
+          input: TxInput;
+        };
+      };
+  
+  /**
+   * Phase 1 validation errors
+   */
+  export type Phase2Error =
     | "NativeScriptIsReferencedByRedeemer"
     | {
-    NoEnoughBudget: {
-        actual_budget: ExUnits;
-        expected_budget: ExUnits;
-    };
-}
+        NoEnoughBudget: {
+          actual_budget: ExUnits;
+          expected_budget: ExUnits;
+        };
+      }
     | {
-    InvalidRedeemerIndex: {
-        index: bigint;
-        tag: string;
-    };
-}
+        InvalidRedeemerIndex: {
+          index: bigint;
+          tag: string;
+        };
+      }
     | {
-    MachineError: {
-        error: string;
-    };
-}
+        MachineError: {
+          error: string;
+        };
+      }
     | {
-    CostModelNotFound: {
-        language: string;
-    };
-}
+        CostModelNotFound: {
+          language: string;
+        };
+      }
     | {
-    ScriptDecodeError: {
-        error: string;
-    };
-}
+        ScriptDecodeError: {
+          error: string;
+        };
+      }
     | {
-    BuildTxContextError: {
-        error: string;
-    };
-}
+        ResolvedInputNotFound: {
+          tx_hash: string;
+          tx_index: bigint;
+        };
+      }
+    | "ByronAddressNotAllowed"
+    | "InlineDatumNotAllowedForPlutusV1"
+    | "ReferenceInputsNotAllowedForPlutusV1"
     | {
-    MissingScriptForRedeemer: {
-        error: string;
-    };
-};
-export type Phase2Warning = {
+        SlotTooFarInThePast: {
+          oldest_allowed: bigint;
+        };
+      }
+    | "NoPaymentCredential"
+    | {
+        ExtraneousRedeemer: {
+          index: bigint;
+          tag: string;
+        };
+      }
+    | {
+        BuildTxContextError: {
+          error: string;
+        };
+      }
+    | {
+        RedeemerIndexOutOfBounds: {
+          index: bigint;
+          max_index?: number | null;
+          tag: string;
+        };
+      }
+    | {
+        MissingRequiredScript: {
+          script_hash: string;
+        };
+      }
+    | {
+        MissingRequiredDatum: {
+          datum_hash: string;
+        };
+      }
+    | "NonScriptWithdrawal"
+    | "NonScriptCredential"
+    | "UnsupportedCertificateType"
+    | "NoGuardrailScriptForProcedure"
+    | "MissingRequiredInlineDatumOrHash"
+    | {
+        ScriptLookupError: {
+          error: string;
+        };
+      };
+  export type Phase2Warning = {
     BudgetIsBiggerThanExpected: {
-        actual_budget: ExUnits;
-        expected_budget: ExUnits;
+      actual_budget: ExUnits;
+      expected_budget: ExUnits;
     };
-};
-export type Phase1Warning =
+  };
+  export type Phase1Warning =
     | ("InputsAreNotSorted" | "CollateralIsUnnecessary" | "TotalCollateralIsNotDeclared")
     | {
-    FeeIsBiggerThanMinFee: {
-        actual_fee: bigint;
-        fee_decomposition: FeeDecomposition;
-        min_fee: bigint;
-    };
-}
+        FeeIsBiggerThanMinFee: {
+          actual_fee: bigint;
+          fee_decomposition: FeeDecomposition;
+          min_fee: bigint;
+        };
+      }
     | {
-    InputUsesRewardAddress: {
-        invalid_input: string;
-    };
-}
+        InputUsesRewardAddress: {
+          invalid_input: string;
+        };
+      }
     | {
-    CollateralInputUsesRewardAddress: {
-        invalid_collateral: string;
-    };
-}
+        CollateralInputUsesRewardAddress: {
+          invalid_collateral: string;
+        };
+      }
     | "CannotCheckStakeDeregistrationRefund"
     | "CannotCheckDRepDeregistrationRefund"
     | {
-    PoolAlreadyRegistered: {
-        pool_id: string;
-    };
-}
+        PoolAlreadyRegistered: {
+          pool_id: string;
+        };
+      }
     | {
-    DRepAlreadyRegistered: {
-        drep_id: string;
-    };
-}
+        DRepAlreadyRegistered: {
+          drep_id: string;
+        };
+      }
     | {
-    CommitteeAlreadyAuthorized: {
-        committee_key: string;
-    };
-}
+        CommitteeAlreadyAuthorized: {
+          committee_key: string;
+        };
+      }
     | {
-    DRepNotRegistered: {
-        cert_index: number;
-    };
-}
+        DRepNotRegistered: {
+          cert_index: number;
+        };
+      }
     | {
-    DuplicateRegistrationInTx: {
-        cert_index: number;
-        entity_id: string;
-        entity_type: string;
-    };
-}
+        DuplicateRegistrationInTx: {
+          cert_index: number;
+          entity_id: string;
+          entity_type: string;
+        };
+      }
     | {
-    DuplicateCommitteeColdResignationInTx: {
-        cert_index: number;
-        committee_credential: LocalCredential;
-    };
-}
+        DuplicateCommitteeColdResignationInTx: {
+          cert_index: number;
+          committee_credential: LocalCredential;
+        };
+      }
     | {
-    DuplicateCommitteeHotRegistrationInTx: {
-        cert_index: number;
-        committee_credential: LocalCredential;
-    };
-};
-
-export interface ValidationResult {
+        DuplicateCommitteeHotRegistrationInTx: {
+          cert_index: number;
+          committee_credential: LocalCredential;
+        };
+      };
+  
+  export interface ValidationResult {
     errors: ValidationPhase1Error[];
     eval_redeemer_results: EvalRedeemerResult[];
     phase2_errors: ValidationPhase2Error[];
     phase2_warnings: ValidationPhase2Warning[];
     warnings: ValidationPhase1Warning[];
-}
-export interface ValidationPhase1Error {
+  }
+  export interface ValidationPhase1Error {
     error: Phase1Error;
     error_message: string;
     hint?: string | null;
     locations: string[];
-}
-/**
- * The invalid input UTxO
- */
-
-export interface FeeDecomposition {
+  }
+  /**
+   * The invalid input UTxO
+   */
+  
+  export interface FeeDecomposition {
     executionUnitsFee: bigint;
     referenceScriptsFee: bigint;
     txSizeFee: bigint;
-}
-export interface Value {
+  }
+  export interface Value {
     assets: MultiAsset;
     coins: number;
-}
-export interface MultiAsset {
+  }
+  export interface MultiAsset {
     assets: ValidatorAsset[];
-}
-export interface ValidatorAsset {
+  }
+  export interface ValidatorAsset {
     asset_name: string;
     policy_id: string;
     quantity: number;
-}
-
-/**
- * The invalid governance action
- */
-
-/**
- * The expired governance action
- */
-
-export interface ProtocolVersion {
+  }
+  
+  /**
+   * The invalid governance action
+   */
+  
+  /**
+   * The expired governance action
+   */
+  
+  export interface ProtocolVersion {
     major: bigint;
     minor: bigint;
-}
-/**
- * The supplied protocol version
- */
-
-/**
- * The governance action with zero withdrawals
- */
-
-export interface EvalRedeemerResult {
+  }
+  /**
+   * The supplied protocol version
+   */
+  
+  /**
+   * The governance action with zero withdrawals
+   */
+  
+  export interface EvalRedeemerResult {
     calculated_ex_units: ExUnits;
     error?: string | null;
     index: bigint;
@@ -1120,33 +1169,33 @@ export interface EvalRedeemerResult {
     provided_ex_units: ExUnits;
     success: boolean;
     tag: RedeemerTag;
-}
-
-export interface ValidationPhase2Error {
+  }
+  
+  export interface ValidationPhase2Error {
     error: Phase2Error;
     error_message: string;
     hint?: string | null;
     locations: string[];
-}
-export interface ValidationPhase2Warning {
+  }
+  export interface ValidationPhase2Warning {
     hint?: string | null;
     locations: string[];
     warning: Phase2Warning;
-}
-export interface ValidationPhase1Warning {
+  }
+  export interface ValidationPhase1Warning {
     hint?: string | null;
     locations: string[];
     warning: Phase1Warning;
-}
-
-export type LocalCredential =
+  }
+  
+  export type LocalCredential =
     | {
-    keyHash: number[];
-}
+        keyHash: number[];
+      }
     | {
-    scriptHash: number[];
-};
-export type GovernanceActionType =
+        scriptHash: number[];
+      };
+  export type GovernanceActionType =
     | "parameterChangeAction"
     | "hardForkInitiationAction"
     | "treasuryWithdrawalsAction"
@@ -1154,9 +1203,9 @@ export type GovernanceActionType =
     | "updateCommitteeAction"
     | "newConstitutionAction"
     | "infoAction";
-export type NetworkType = "mainnet" | "preview" | "preprod";
-
-export interface ValidationInputContext {
+  export type NetworkType = "mainnet" | "preview" | "preprod";
+  
+  export interface ValidationInputContext {
     accountContexts: AccountInputContext[];
     currentCommitteeMembers: CommitteeInputContext[];
     drepContexts: DrepInputContext[];
@@ -1169,40 +1218,40 @@ export interface ValidationInputContext {
     slot: bigint;
     treasuryValue: bigint;
     utxoSet: UtxoInputContext[];
-}
-export interface AccountInputContext {
+  }
+  export interface AccountInputContext {
     balance?: number | null;
     bech32Address: string;
     delegatedToDrep?: string | null;
     delegatedToPool?: string | null;
     isRegistered: boolean;
     payedDeposit?: number | null;
-}
-export interface CommitteeInputContext {
+  }
+  export interface CommitteeInputContext {
     committeeMemberCold: LocalCredential;
     committeeMemberHot?: LocalCredential | null;
     isResigned: boolean;
-}
-export interface DrepInputContext {
+  }
+  export interface DrepInputContext {
     bech32Drep: string;
     isRegistered: boolean;
     payedDeposit?: number | null;
-}
-export interface GovActionInputContext {
+  }
+  export interface GovActionInputContext {
     actionId: GovernanceActionId;
     actionType: GovernanceActionType;
     isActive: boolean;
-}
-export interface GovernanceActionId {
+  }
+  export interface GovernanceActionId {
     index: bigint;
     txHash: number[];
-}
-export interface PoolInputContext {
+  }
+  export interface PoolInputContext {
     isRegistered: boolean;
     poolId: string;
     retirementEpoch?: number | null;
-}
-export interface ProtocolParameters {
+  }
+  export interface ProtocolParameters {
     /**
      * Cost per UTxO byte in lovelace
      */
@@ -1275,20 +1324,36 @@ export interface ProtocolParameters {
      * Deposit amount required for registering a stake pool
      */
     stakePoolDeposit: bigint;
-}
-/**
- * Price of execution units for script execution
- */
-export interface ExUnitPrices {
+  }
+
+  /**
+   * Price of execution units for script execution
+   */
+  export interface ExUnitPrices {
     memPrice: SubCoin;
     stepPrice: SubCoin;
-}
-export interface SubCoin {
+  }
+  export interface SubCoin {
     denominator: bigint;
     numerator: bigint;
-}
+  }
 
-export interface UtxoInputContext {
+  
+  export interface UtxoInputContext {
     isSpent: boolean;
     utxo: UTxO;
-}
+  }
+  export interface UTxO {
+    input: TxInput;
+    output: TxOutput;
+  }
+  export interface TxInput {
+    outputIndex: number;
+    txHash: string;
+  }
+
+  export interface Asset {
+    quantity: string;
+    unit: string;
+  }
+  

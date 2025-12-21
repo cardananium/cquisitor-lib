@@ -229,7 +229,8 @@ pub fn get_error_hint(error: &Phase1Error) -> Option<String> {
             "An unexpected error occurred. Check the transaction format and ensure all fields are properly constructed.".to_string()
         ),
         Phase1Error::MissingDatum { .. } => Some(
-            "Provide the required datum in the witness set or ensure the datum is available in the UTxO being spent.".to_string()
+            "Provide the required datum either: (1) in the witness set (plutus_data field) when using datum hash, or \
+            (2) as inline datum in the spending input itself. Note: datums from reference inputs CANNOT be used for spending validation.".to_string()
         ),
         Phase1Error::ExtraneousDatumWitnesses { .. } => Some(
             "Remove unnecessary datum witnesses from the transaction. Only include datums that are actually referenced.".to_string()

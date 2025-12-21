@@ -830,7 +830,7 @@ impl Phase1Error {
                 format!("Unknown error. Seems something went wrong. Message: {}", message)
             },
             Self::MissingDatum { datum_hash } => {
-                format!("Missing datum: {}", datum_hash)
+                format!("Datum {} not found in witness set or as inline datum in the spending input", datum_hash)
             },
             Self::ExtraneousDatumWitnesses { datum_hash } => {
                 format!("Extraneous datum witnesses provided: {}", datum_hash)

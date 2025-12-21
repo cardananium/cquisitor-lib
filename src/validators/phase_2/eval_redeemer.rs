@@ -119,9 +119,7 @@ pub fn eval_redeemer(
     };
 
     let redeemers_script = find_script(redeemer, tx, utxos, lookup_table).map_err(|e| {
-        Phase2Error::MissingScriptForRedeemer {
-            error: e.to_string(),
-        }
+        parse_script_lookup_error(e, redeemer)
     });
 
     (|| -> Result<(EvalRedeemerResult, Option<Phase2Error>), Phase2Error> {
@@ -146,9 +144,7 @@ pub fn eval_redeemer(
                 datum,
                 redeemer,
                 TxInfoV1::from_transaction(tx, utxos, slot_config).map_err(|err| {
-                    Phase2Error::BuildTxContextError {
-                        error: err.to_string(),
-                    }
+                    parse_build_context_error(err, redeemer)
                 })?,
                 program(script.0).map_err(|err| Phase2Error::ScriptDecodeError {
                     error: err.to_string(),
@@ -171,9 +167,7 @@ pub fn eval_redeemer(
                 datum,
                 redeemer,
                 TxInfoV2::from_transaction(tx, utxos, slot_config).map_err(|err| {
-                    Phase2Error::BuildTxContextError {
-                        error: err.to_string(),
-                    }
+                    parse_build_context_error(err, redeemer)
                 })?,
                 program(script.0).map_err(|err| Phase2Error::ScriptDecodeError {
                     error: err.to_string(),
@@ -196,9 +190,7 @@ pub fn eval_redeemer(
                 datum,
                 redeemer,
                 TxInfoV3::from_transaction(tx, utxos, slot_config).map_err(|err| {
-                    Phase2Error::BuildTxContextError {
-                        error: err.to_string(),
-                    }
+                    parse_build_context_error(err, redeemer)
                 })?,
                 program(script.0).map_err(|err| Phase2Error::ScriptDecodeError {
                     error: err.to_string(),
@@ -235,6 +227,169 @@ fn language_to_string(language: &Language) -> String {
         Language::PlutusV2 => "PlutusV2".to_string(),
         Language::PlutusV3 => "PlutusV3".to_string(),
     }
+}
+
+/// Parse error from uplc's find_script and map to specific Phase2Error variants
+fn parse_script_lookup_error<E: std::fmt::Display>(error: E, redeemer: &Redeemer) -> Phase2Error {
+    let error_str = error.to_string();
+    
+    // "missing script for redeemer" - index out of bounds
+    if error_str.contains("missing script for redeemer") {
+        return Phase2Error::RedeemerIndexOutOfBounds {
+            tag: redeemer_tag_to_string(&redeemer.tag),
+            index: redeemer.index as u64,
+            max_index: None, // We don't have this info from the error message
+        };
+    }
+    
+    // "missing required script" with hash
+    if error_str.contains("missing required script") {
+        // Try to extract script hash from error message
+        // Format: "missing required script\n       Script <hash>"
+        let script_hash = error_str
+            .lines()
+            .find(|line| line.contains("Script"))
+            .and_then(|line| line.split_whitespace().last())
+            .unwrap_or("unknown")
+            .to_string();
+        return Phase2Error::MissingRequiredScript { script_hash };
+    }
+    
+    // "missing required datum" with hash
+    if error_str.contains("missing required datum") {
+        // Try to extract datum hash from error message
+        // Format: "missing required datum\n       Datum <hash>"
+        let datum_hash = error_str
+            .lines()
+            .find(|line| line.contains("Datum"))
+            .and_then(|line| line.split_whitespace().last())
+            .unwrap_or("unknown")
+            .to_string();
+        return Phase2Error::MissingRequiredDatum { datum_hash };
+    }
+    
+    // "redeemer points to a non-script withdrawal"
+    if error_str.contains("non-script withdrawal") {
+        return Phase2Error::NonScriptWithdrawal;
+    }
+    
+    // "stake credential points to a non-script" or "non-script stake credential"
+    if error_str.contains("non-script") && (error_str.contains("stake credential") || error_str.contains("credential")) {
+        return Phase2Error::NonScriptCredential;
+    }
+    
+    // "unsupported certificate type"
+    if error_str.contains("unsupported certificate type") {
+        return Phase2Error::UnsupportedCertificateType;
+    }
+    
+    // "no guardrail script" or "designate procedure defines no guardrail"
+    if error_str.contains("guardrail") {
+        return Phase2Error::NoGuardrailScriptForProcedure;
+    }
+    
+    // "missing required inline datum or datum hash"
+    if error_str.contains("inline datum") || error_str.contains("datum hash") {
+        return Phase2Error::MissingRequiredInlineDatumOrHash;
+    }
+    
+    // Fallback for any other errors
+    Phase2Error::ScriptLookupError { error: error_str }
+}
+
+fn redeemer_tag_to_string(tag: &RedeemerTag) -> String {
+    match tag {
+        RedeemerTag::Mint => "Mint".to_string(),
+        RedeemerTag::Spend => "Spend".to_string(),
+        RedeemerTag::Cert => "Cert".to_string(),
+        RedeemerTag::Reward => "Reward".to_string(),
+        RedeemerTag::Vote => "Vote".to_string(),
+        RedeemerTag::Propose => "Propose".to_string(),
+    }
+}
+
+/// Parse error from uplc's TxInfo::from_transaction and map to specific Phase2Error variants
+fn parse_build_context_error<E: std::fmt::Display>(error: E, redeemer: &Redeemer) -> Phase2Error {
+    let error_str = error.to_string();
+    
+    // "resolved Input not found" - input not in UTxO set
+    // The error message contains the TransactionInput debug repr
+    if error_str.contains("resolved") && error_str.contains("not found") {
+        // Try to extract tx hash and index from error message
+        // The TransactionInput is printed as debug, try to parse it
+        let (tx_hash, tx_index) = extract_tx_input_from_error(&error_str);
+        return Phase2Error::ResolvedInputNotFound { tx_hash, tx_index };
+    }
+    
+    // "byron address not allowed when PlutusV2 scripts are present"
+    if error_str.contains("byron address") || error_str.contains("Byron") {
+        return Phase2Error::ByronAddressNotAllowed;
+    }
+    
+    // "inline datum not allowed when PlutusV1 scripts are present"
+    if error_str.contains("inline datum not allowed") {
+        return Phase2Error::InlineDatumNotAllowedForPlutusV1;
+    }
+    
+    // "script and input reference not allowed in PlutusV1"
+    if error_str.contains("reference not allowed") || error_str.contains("input reference") {
+        return Phase2Error::ReferenceInputsNotAllowedForPlutusV1;
+    }
+    
+    // "validity start or end too far in the past"
+    if error_str.contains("too far in the past") || error_str.contains("SlotTooFar") {
+        // Try to extract oldest_allowed from error message
+        let oldest_allowed = error_str
+            .split_whitespace()
+            .filter_map(|s| s.parse::<u64>().ok())
+            .next()
+            .unwrap_or(0);
+        return Phase2Error::SlotTooFarInThePast { oldest_allowed };
+    }
+    
+    // "address doesn't contain a payment credential"
+    if error_str.contains("payment credential") {
+        return Phase2Error::NoPaymentCredential;
+    }
+    
+    // "extraneous redeemer"
+    if error_str.contains("extraneous redeemer") {
+        return Phase2Error::ExtraneousRedeemer {
+            tag: redeemer_tag_to_string(&redeemer.tag),
+            index: redeemer.index as u64,
+        };
+    }
+    
+    // Fallback for any other errors
+    Phase2Error::BuildTxContextError { error: error_str }
+}
+
+/// Try to extract transaction hash and index from error message containing TransactionInput
+fn extract_tx_input_from_error(error_str: &str) -> (String, u64) {
+    // TransactionInput is usually printed as:
+    // "TransactionInput { transaction_id: Hash<32>(0x...), index: N }"
+    // or similar debug format
+    
+    // Try to find hex hash (64 chars)
+    let tx_hash = error_str
+        .split(|c: char| !c.is_ascii_hexdigit())
+        .filter(|s| s.len() == 64)
+        .next()
+        .unwrap_or("unknown")
+        .to_string();
+    
+    // Try to find index after "index:" or similar
+    let tx_index = if let Some(idx_pos) = error_str.find("index") {
+        error_str[idx_pos..]
+            .split_whitespace()
+            .filter_map(|s| s.trim_matches(|c: char| !c.is_ascii_digit()).parse::<u64>().ok())
+            .next()
+            .unwrap_or(0)
+    } else {
+        0
+    };
+    
+    (tx_hash, tx_index)
 }
 
 fn map_tag_to_redeemer_tag(tag: &RedeemerTag) -> ValidatorRedeemerTag {

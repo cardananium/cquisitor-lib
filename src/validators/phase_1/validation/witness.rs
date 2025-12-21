@@ -302,15 +302,13 @@ impl<'a> WitnessValidator<'a> {
             .unwrap_or(csl::TransactionInputs::new());
         let inputs = tx_body.inputs();
 
-        self.collect_scripts_and_datums_from_any_inputs(&inputs, false)?;
-        self.collect_scripts_and_datums_from_any_inputs(&ref_inputs, true)?;
+        self.collect_scripts_from_inputs(&inputs, false)?;
+        self.collect_scripts_from_inputs(&ref_inputs, true)?;
 
-        // Collect scripts and datums from inputs
-        self.collect_scripts_and_datums_from_any_inputs(&inputs, false)?;
         Ok(())
     }
 
-    fn collect_scripts_and_datums_from_any_inputs(
+    fn collect_scripts_from_inputs(
         &mut self,
         inputs: &csl::TransactionInputs,
         is_reference_inputs: bool,
@@ -326,7 +324,7 @@ impl<'a> WitnessValidator<'a> {
                     WitnessSource::Input(input.clone(), i as u32)
                 };
 
-                // Check script_ref
+                // Check script_ref - scripts CAN be provided via both regular inputs and reference inputs
                 if let Some(script_ref_hex) = &utxo.utxo.output.script_ref {
                     let script_ref = normalize_script_ref(script_ref_hex)?;
                     // ScriptRef contains either NativeScript or PlutusScript
@@ -348,16 +346,11 @@ impl<'a> WitnessValidator<'a> {
                     }
                 }
 
-                // Check inline datum
-                if let Some(datum_hex) = &utxo.utxo.output.plutus_data {
-                    if let Ok(datum_bytes) = hex::decode(datum_hex) {
-                        if let Ok(datum) = csl::PlutusData::from_bytes(datum_bytes) {
-                            let datum_hash = csl::hash_plutus_data(&datum);
-                            self.datum_sources
-                                .insert(datum_hash, witness_source.clone());
-                        }
-                    }
-                }
+                // NOTE: We do NOT collect inline datums here!
+                // Datums for spending validation can only come from:
+                // 1. Witness set (plutus_data) - collected in collect_provided_witnesses
+                // 2. Inline datum in the SAME spending input - checked separately in collect_input_witnesses
+                // Inline datums from OTHER inputs or reference inputs CANNOT be used!
             }
         }
         Ok(())
@@ -495,10 +488,13 @@ impl<'a> WitnessValidator<'a> {
                             }
                             csl::CredKind::Script => {
                                 if let Some(script_hash) = payment_cred.to_scripthash() {
-                                    // Get datum hash for Plutus script inputs
-                                    let datum_hash = if let Some(data_hash_hex) =
-                                        &utxo.utxo.output.data_hash
-                                    {
+                                    let has_inline_datum = utxo.utxo.output.plutus_data.is_some();
+                                    
+                                    let datum_hash = if has_inline_datum {
+                                        // Inline datum present - no need to require datum in witness set
+                                        None
+                                    } else if let Some(data_hash_hex) = &utxo.utxo.output.data_hash {
+                                        // Datum hash present - require datum in witness set
                                         if let Ok(data_hash_bytes) = hex::decode(data_hash_hex) {
                                             csl::DataHash::from_bytes(data_hash_bytes).ok()
                                         } else {

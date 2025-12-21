@@ -285,12 +285,17 @@ pub fn decode_plutus_data(
         Err("Only hex encoding is supported".to_string())?;
     }
     if let Ok(decoded) = csl::PlutusData::from_hex(input) {
-        let value: Value = decoded
+        let data_hash = csl::hash_plutus_data(&decoded);
+        let plutus_data_json: Value = decoded
             .to_json(map_schema(schema))
             .map_err(|e| format!("Failed to convert to JSON: {:?}", e))
             .and_then(|json| {
                 serde_json::from_str(&json).map_err(|e| format!("Failed to parse JSON: {}", e))
             })?;
+        let value = Ok::<Value, String>(serde_json::json!({
+            "data_hash": data_hash.to_hex(),
+            "plutus_data": plutus_data_json,
+        }))?;
         return from_serde_json_value(&value)
             .map_err(|e| format!("Failed to convert to JsValue: {}", e));
     }

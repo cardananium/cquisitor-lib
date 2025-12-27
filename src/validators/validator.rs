@@ -16,15 +16,18 @@ use cardano_serialization_lib as csl;
 use std::collections::HashSet;
 
 #[wasm_bindgen]
-pub fn get_necessary_data_list_js(tx_hex: &str) -> Result<String, JsError> {
-    let necessary_data = get_necessary_data_list(tx_hex)
+pub fn get_necessary_data_list_js(tx_hex: &str, network_type: &str) -> Result<String, JsError> {
+    let network_type: NetworkType = serde_json::from_str(&format!("\"{}\"", network_type))
+        .map_err(|e| JsError::new(&format!("Failed to parse network type: {}", e)))?;
+
+    let necessary_data = get_necessary_data_list(tx_hex, network_type)
         .map_err(|e| JsError::new(&format!("Failed to get necessary data: {}", e)))?;
 
     serde_json::to_string(&necessary_data)
         .map_err(|e| JsError::new(&format!("Failed to serialize NecessaryInputData: {}", e)))
 }
 
-pub fn get_necessary_data_list(tx_hex: &str) -> Result<NecessaryInputData, String> {
+pub fn get_necessary_data_list(tx_hex: &str, network_type: NetworkType) -> Result<NecessaryInputData, String> {
     let csl_tx = csl::Transaction::from_hex(tx_hex)
         .map_err(|e| format!("Failed to parse transaction: {:?}", e))?;
 
@@ -38,13 +41,6 @@ pub fn get_necessary_data_list(tx_hex: &str) -> Result<NecessaryInputData, Strin
     let mut committee_members_hot = HashSet::new();
 
     let tx_body = csl_tx.body();
-
-    let network_type = csl_tx.body().network_id();
-    let network_type = match network_type.map(|n| n.kind()) {
-        Some(csl::NetworkIdKind::Mainnet) => NetworkType::Mainnet,
-        Some(csl::NetworkIdKind::Testnet) => NetworkType::Preview,
-        _ => NetworkType::Preview,
-    };
 
     // 1. Collect UTXOs from transaction inputs
     let inputs = tx_body.inputs();

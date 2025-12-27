@@ -11,7 +11,7 @@ use crate::{
     },
 };
 use cardano_serialization_lib as csl;
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 
 const MAX_REFERENCE_SCRIPTS_SIZE: u64 = 200 * 1024;
 
@@ -25,6 +25,7 @@ pub struct TransactionLimitsValidator<'a> {
     pub current_slot: u64,
     pub validity_interval: (Option<u64>, Option<u64>), // (start, end)
     pub inputs_sorted: bool,
+    pub withdrawals_sorted: bool,
     pub inputs_count: usize,
     pub ref_inputs: Vec<TxInput>,
     pub collateral_inputs: Vec<TxInput>,
@@ -82,6 +83,7 @@ impl<'a> TransactionLimitsValidator<'a> {
         let validity_interval = get_validity_interval(tx_body);
 
         let inputs_sorted = check_inputs_sorted(tx_body);
+        let withdrawals_sorted = check_withdrawals_sorted(tx_body);
         let inputs_count = tx_body.inputs().len();
 
         let ref_inputs = tx_body
@@ -124,6 +126,7 @@ impl<'a> TransactionLimitsValidator<'a> {
             current_slot,
             validity_interval,
             inputs_sorted,
+            withdrawals_sorted,
             inputs_count,
             ref_inputs,
             collateral_inputs,
@@ -252,6 +255,13 @@ impl<'a> TransactionLimitsValidator<'a> {
             ));
         }
 
+        if !self.withdrawals_sorted {
+            warnings.push(ValidationPhase1Warning::new(
+                Phase1Warning::WithdrawalsAreNotSorted,
+                "transaction.body.withdrawals".to_string(),
+            ));
+        }
+
         for (i, ref_input) in self.ref_inputs.iter().enumerate() {
             if self.inputs.contains(ref_input) {
                 errors.push(ValidationPhase1Error::new(
@@ -340,4 +350,27 @@ fn check_inputs_sorted(tx_body: &csl::TransactionBody) -> bool {
     }
 
     true
+}
+
+fn check_withdrawals_sorted(tx_body: &csl::TransactionBody) -> bool {
+    let withdrawals = match tx_body.withdrawals() {
+        Some(w) => w,
+        None => return true,
+    };
+
+    let keys = withdrawals.keys();
+    if keys.len() <= 1 {
+        return true;
+    }
+
+    // Collect original reward addresses
+    let original_order: Vec<csl::RewardAddress> = (0..keys.len())
+        .map(|i| keys.get(i))
+        .collect();
+
+    // Use BTreeSet to get sorted order (RewardAddress implements Ord)
+    let sorted_set: BTreeSet<&csl::RewardAddress> = original_order.iter().collect();
+    let sorted_order: Vec<&csl::RewardAddress> = sorted_set.into_iter().collect();
+
+    original_order.iter().collect::<Vec<_>>() == sorted_order
 }

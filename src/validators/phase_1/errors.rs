@@ -47,15 +47,18 @@ impl ValidationPhase1Error {
 #[derive(Serialize, Deserialize, JsonSchema, Clone, Debug)]
 pub struct ValidationPhase1Warning {
     pub warning: Phase1Warning,
+    pub warning_message: String,
     pub locations: Vec<String>,
     pub hint: Option<String>,
 }
 
 impl ValidationPhase1Warning {
     pub fn new(warning: Phase1Warning, location: String) -> Self {
+        let warning_message = warning.to_string();
         let hint = get_warning_hint(&warning);
         Self {
             warning,
+            warning_message,
             locations: vec![location],
             hint,
         }
@@ -853,6 +856,7 @@ pub enum Phase1Warning {
         fee_decomposition: FeeDecomposition,
     },
     InputsAreNotSorted,
+    WithdrawalsAreNotSorted,
     CollateralIsUnnecessary,
     TotalCollateralIsNotDeclared,
     /// The transaction's collateral input uses a reward address
@@ -906,6 +910,7 @@ impl Phase1Warning {
                         format!("Transaction fee ({} lovelace) is larger than minimum required fee ({} lovelace). Fee decomposition: {:?}", actual_fee, min_fee, fee_decomposition  )
                     }
             Self::InputsAreNotSorted => "Transaction inputs are not in canonical order".to_string(),
+            Self::WithdrawalsAreNotSorted => "Transaction withdrawals are not in canonical order".to_string(),
             Self::CollateralIsUnnecessary => "Collateral input is unnecessary".to_string(),
             Self::TotalCollateralIsNotDeclared => "Total collateral is not declared".to_string(),
             Self::InputUsesRewardAddress { invalid_input } => {

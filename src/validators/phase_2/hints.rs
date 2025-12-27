@@ -119,6 +119,15 @@ pub fn get_error_hint(error: &Phase2Error) -> Option<String> {
     }
 }
 
-pub fn get_warning_hint(_warning: &Phase2Warning) -> Option<String> {
-    return None;
+pub fn get_warning_hint(warning: &Phase2Warning) -> Option<String> {
+    match warning {
+        Phase2Warning::BudgetIsBiggerThanExpected { .. } => {
+            Some(
+                "The actual execution units used are less than what was allocated in the redeemer. \
+                This means you're overpaying for script execution. Consider reducing the budget values \
+                in the redeemer to save on transaction fees. You can use the actual execution units \
+                reported here as a baseline, adding a small safety margin (e.g., 10-20%) for variations.".to_string()
+            )
+        }
+    }
 }

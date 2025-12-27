@@ -39,24 +39,29 @@ impl ValidationPhase2Error {
 #[derive(Serialize, Deserialize, JsonSchema, Clone, Debug)]
 pub struct ValidationPhase2Warning {
     pub warning: Phase2Warning,
+    pub warning_message: String,
     pub locations: Vec<String>,
     pub hint: Option<String>,
 }
 
 impl ValidationPhase2Warning {
     pub fn new(warning: Phase2Warning, location: String) -> Self {
+        let warning_message = warning.to_string();
         let hint = get_warning_hint(&warning);
         Self {
             warning,
+            warning_message,
             locations: vec![location],
             hint,
         }
     }
 
     pub fn new_with_locations(warning: Phase2Warning, locations: &[String]) -> Self {
+        let warning_message = warning.to_string();
         let hint = get_warning_hint(&warning);
         Self {
             warning,
+            warning_message,
             locations: locations.to_vec(),
             hint,
         }

@@ -12,7 +12,7 @@ use crate::{
     },
 };
 use cardano_serialization_lib::{self as csl, Redeemers};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 pub enum ScriptType {
     NativeScript,
@@ -369,11 +369,20 @@ impl<'a> WitnessValidator<'a> {
 
     /// Adds required witnesses for script based on its type
     /// If script is unknown, adds UnknownScript requirement
+    /// 
+    /// # Arguments
+    /// * `script_hash` - The script hash
+    /// * `location` - Location string for error messages (contains original index)
+    /// * `entity_index` - Original index of the entity in the transaction body
+    /// * `redeemer_index` - Sorted index for redeemer matching (Cardano node sorts inputs/withdrawals)
+    /// * `redeemer_tag` - Redeemer tag if script requires a redeemer
+    /// * `datum_hash` - Datum hash if script requires a datum
     fn add_script_witness_requirement(
         &mut self,
         script_hash: csl::ScriptHash,
         location: String,
         entity_index: u32,
+        redeemer_index: u32,
         redeemer_tag: Option<csl::RedeemerTag>,
         datum_hash: Option<csl::DataHash>,
     ) {
@@ -393,7 +402,7 @@ impl<'a> WitnessValidator<'a> {
                     self.required_redeemer_witnesses
                         .push(RequiredRedeemerWitness {
                             tag,
-                            index: entity_index,
+                            index: redeemer_index,
                             location: location.clone(),
                             entity_index,
                         });
@@ -468,8 +477,18 @@ impl<'a> WitnessValidator<'a> {
 
     fn collect_input_witnesses(&mut self, tx_body: &csl::TransactionBody) {
         let inputs = tx_body.inputs();
+        
+        // Build sorted index mapping: Cardano node sorts inputs before matching with redeemer indices
+        let sorted_input_map = build_sorted_input_index_map(&inputs);
+        
         for i in 0..inputs.len() {
             let input = inputs.get(i);
+            // Get the sorted index for redeemer matching
+            let sorted_index = sorted_input_map
+                .get(&input)
+                .copied()
+                .unwrap_or(i as u32);
+            
             if let Some(utxo) = self
                 .validation_input_context
                 .find_utxo(input.transaction_id().to_hex(), input.index())
@@ -508,6 +527,7 @@ impl<'a> WitnessValidator<'a> {
                                         script_hash,
                                         format!("transaction.body.inputs.{}", i),
                                         i as u32,
+                                        sorted_index,
                                         Some(csl::RedeemerTag::new_spend()),
                                         datum_hash,
                                     );
@@ -549,8 +569,18 @@ impl<'a> WitnessValidator<'a> {
     fn collect_withdrawal_witnesses(&mut self, tx_body: &csl::TransactionBody) {
         if let Some(withdrawals) = tx_body.withdrawals() {
             let withdrawal_keys = withdrawals.keys();
+            
+            // Build sorted index mapping: Cardano node sorts withdrawals before matching with redeemer indices
+            let sorted_withdrawal_map = build_sorted_withdrawal_index_map(&withdrawal_keys);
+            
             for i in 0..withdrawal_keys.len() {
                 let reward_address = withdrawal_keys.get(i);
+                // Get the sorted index for redeemer matching
+                let sorted_index = sorted_withdrawal_map
+                    .get(&reward_address)
+                    .copied()
+                    .unwrap_or(i as u32);
+                
                 let stake_cred = reward_address.payment_cred();
 
                 match stake_cred.kind() {
@@ -570,6 +600,7 @@ impl<'a> WitnessValidator<'a> {
                                 script_hash,
                                 format!("transaction.body.withdrawals.{}", i),
                                 i as u32,
+                                sorted_index,
                                 Some(csl::RedeemerTag::new_reward()),
                                 None,
                             );
@@ -777,6 +808,7 @@ impl<'a> WitnessValidator<'a> {
                         script_hash,
                         location,
                         index,
+                        index, // certificates are not sorted, so redeemer_index = entity_index
                         Some(csl::RedeemerTag::new_cert()),
                         None,
                     );
@@ -798,6 +830,19 @@ impl<'a> WitnessValidator<'a> {
                             script_hash,
                             format!("transaction.body.voting_proposals.{}", i),
                             i as u32,
+                            i as u32, // voting proposals are not sorted
+                            Some(csl::RedeemerTag::new_voting_proposal()),
+                            None,
+                        );
+                    }
+                } else if action_kind == csl::GovernanceActionKind::TreasuryWithdrawalsAction {
+                    let treasury_action = gov_action.as_treasury_withdrawals_action().unwrap();
+                    if let Some(script_hash) = treasury_action.policy_hash() {
+                        self.add_script_witness_requirement(
+                            script_hash,
+                            format!("transaction.body.voting_proposals.{}", i),
+                            i as u32,
+                            i as u32, // voting proposals are not sorted
                             Some(csl::RedeemerTag::new_voting_proposal()),
                             None,
                         );
@@ -839,6 +884,7 @@ impl<'a> WitnessValidator<'a> {
                                 voter_cred,
                                 format!("transaction.body.voting_procedures.{}", i),
                                 i as u32,
+                                i as u32, // votes are not sorted
                                 Some(csl::RedeemerTag::new_vote()),
                                 None,
                             );
@@ -863,6 +909,7 @@ impl<'a> WitnessValidator<'a> {
                                 voter_cred,
                                 format!("transaction.body.voting_procedures.{}", i),
                                 i as u32,
+                                i as u32, // votes are not sorted
                                 Some(csl::RedeemerTag::new_vote()),
                                 None,
                             );
@@ -885,6 +932,7 @@ impl<'a> WitnessValidator<'a> {
     fn collect_mint_witnesses(&mut self, tx_body: &csl::TransactionBody) {
         if let Some(mint) = tx_body.mint() {
             let policy_ids = mint.keys();
+            
             for i in 0..policy_ids.len() {
                 let policy_id = policy_ids.get(i);
                 let script_hash = csl::ScriptHash::from_bytes(policy_id.to_bytes()).unwrap();
@@ -893,6 +941,7 @@ impl<'a> WitnessValidator<'a> {
                     script_hash,
                     format!("transaction.body.mint.{}", i),
                     i as u32,
+                    i as u32, // mints are not sorted
                     Some(csl::RedeemerTag::new_mint()),
                     None,
                 );
@@ -1216,3 +1265,44 @@ fn get_native_script_key_hashes_internal(
         csl::NativeScriptKind::TimelockExpiry => {}
     }
 }
+
+/// Builds a mapping from TransactionInput to sorted index
+/// Cardano node sorts inputs by (transaction_id, index) before matching with redeemer indices
+fn build_sorted_input_index_map(inputs: &csl::TransactionInputs) -> HashMap<csl::TransactionInput, u32> {
+    // Collect inputs
+    let original_order: Vec<csl::TransactionInput> = (0..inputs.len())
+        .map(|i| inputs.get(i))
+        .collect();
+
+    // Sort using BTreeSet (TransactionInput implements Ord)
+    let sorted_set: BTreeSet<&csl::TransactionInput> = original_order.iter().collect();
+    let sorted_order: Vec<&csl::TransactionInput> = sorted_set.into_iter().collect();
+
+    // Build mapping from TransactionInput to sorted index
+    sorted_order
+        .into_iter()
+        .enumerate()
+        .map(|(sorted_idx, input)| (input.clone(), sorted_idx as u32))
+        .collect()
+}
+
+/// Builds a mapping from RewardAddress to sorted index
+/// Cardano node sorts withdrawals by RewardAddress before matching with redeemer indices
+fn build_sorted_withdrawal_index_map(keys: &csl::RewardAddresses) -> HashMap<csl::RewardAddress, u32> {
+    // Collect reward addresses
+    let original_order: Vec<csl::RewardAddress> = (0..keys.len())
+        .map(|i| keys.get(i))
+        .collect();
+
+    // Sort using BTreeSet (RewardAddress implements Ord)
+    let sorted_set: BTreeSet<&csl::RewardAddress> = original_order.iter().collect();
+    let sorted_order: Vec<&csl::RewardAddress> = sorted_set.into_iter().collect();
+
+    // Build mapping from RewardAddress to sorted index
+    sorted_order
+        .into_iter()
+        .enumerate()
+        .map(|(sorted_idx, addr)| (addr.clone(), sorted_idx as u32))
+        .collect()
+}
+

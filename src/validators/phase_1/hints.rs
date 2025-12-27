@@ -254,6 +254,9 @@ pub fn get_warning_hint(warning: &Phase1Warning) -> Option<String> {
         Phase1Warning::InputsAreNotSorted => Some(
             "Sort transaction inputs in canonical order (lexicographically by transaction ID and output index) for better interoperability and deterministic behavior.".to_string()
         ),
+        Phase1Warning::WithdrawalsAreNotSorted => Some(
+            "Sort transaction withdrawals in canonical order (lexicographically by reward address) for better interoperability and deterministic behavior.".to_string()
+        ),
         Phase1Warning::CollateralIsUnnecessary => Some(
             "Remove collateral inputs if the transaction doesn't include Plutus script execution to reduce transaction size and complexity.".to_string()
         ),

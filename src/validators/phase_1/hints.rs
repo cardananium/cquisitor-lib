@@ -237,7 +237,32 @@ pub fn get_error_hint(error: &Phase1Error) -> Option<String> {
             "Remove unnecessary datum witnesses from the transaction. Only include datums that are actually referenced.".to_string()
         ),
         Phase1Error::ScriptDataHashMismatch { .. } => Some(
-            "Ensure the script data hash matches the actual hash of the redeemers, datums and costmodels. Recalculate the hash if necessary.".to_string()
+            "Ensure the script data hash matches the actual hash of the redeemers, datums and costmodels. Recalculate the hash if necessary.\
+            \n\n=== script_data_hash format (Alonzo+ ledger spec) ===\
+            \nblake2b256(redeemers || datums || used_cost_models)\
+            \nAll components serialized according to ledger CDDL specification.\
+            \n\n=== Serialization Details ===\
+            \n\n[REDEEMERS]\
+            \n- Pre-Conway: array format\
+            \n- Conway+: map format\
+            \n- Original format from deserialization is preserved\
+            \n\n[DATUMS]\
+            \n- For hash uses set encoding:\
+            \n  * Adds CBOR tag 258 (set semantic)\
+            \n  * Deduplicates elements\
+            \n  * May use indefinite length encoding\
+            \n\n[COST MODELS]\
+            \n- For hash uses special encoding:\
+            \n  * Keys sorted by length first, then lexicographically\
+            \n  * PlutusV1 special case (cardano-node bug workaround):\
+            \n    - Key 0 serialized as bytes(0x00) instead of integer\
+            \n    - Value wrapped in bytestring containing indefinite-length array\
+            \n    - Format: { bytes(0x00): bytes(9F cost1 cost2 ... FF) }\
+            \n  * PlutusV2 (key=1) and PlutusV3 (key=2): standard integer key with array value\
+            \n\n=== Special Case (datums-only) ===\
+            \nIf no redeemers but datums present: 0xA0 || datums || 0xA0\
+            \n(0xA0 is empty CBOR map)\
+            \n\nCheck the expected_decomposition field for component details.".to_string()
         ),
         Phase1Error::ReferenceInputOverlapsWithInput { .. } => Some(
             "Remove the reference input that overlaps with the input. Reference inputs are not allowed to overlap with inputs.".to_string()

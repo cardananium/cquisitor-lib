@@ -1,6 +1,7 @@
 use crate::{
     js_error::JsError,
     validators::{
+        common::ScriptDataHashDecomposition,
         helpers::{normalize_script_ref, string_to_csl_address},
         input_contexts::ValidationInputContext,
         phase_1::{
@@ -106,6 +107,7 @@ pub struct WitnessValidator<'a> {
     pub used_plutus_versions: HashSet<csl::LanguageKind>,
     pub expected_script_data_hash: Option<String>,
     pub provided_script_data_hash: Option<String>,
+    pub expected_script_data_hash_decomposition: Option<ScriptDataHashDecomposition>,
 }
 
 impl<'a> WitnessValidator<'a> {
@@ -138,6 +140,7 @@ impl<'a> WitnessValidator<'a> {
             used_plutus_versions: HashSet::new(),
             provided_script_data_hash: None,
             expected_script_data_hash: None,
+            expected_script_data_hash_decomposition: None,
         };
 
         // Collect all provided witnesses
@@ -171,8 +174,9 @@ impl<'a> WitnessValidator<'a> {
         tx_body: &csl::TransactionBody,
         tx_witness_set: &csl::TransactionWitnessSet,
     ) -> Result<(), String> {
-        let script_data_hash = self.calulucate_actual_script_data_hash(tx_witness_set)?;
+        let (script_data_hash, decomposition) = self.calulucate_actual_script_data_hash(tx_witness_set)?;
         self.expected_script_data_hash = script_data_hash;
+        self.expected_script_data_hash_decomposition = decomposition;
 
         let provided_script_data_hash = tx_body.script_data_hash();
         self.provided_script_data_hash = provided_script_data_hash.map(|hash| hash.to_hex());
@@ -965,11 +969,12 @@ impl<'a> WitnessValidator<'a> {
     pub fn calulucate_actual_script_data_hash(
         &self,
         tx_witness_set: &csl::TransactionWitnessSet,
-    ) -> Result<Option<String>, String> {
+    ) -> Result<(Option<String>, Option<ScriptDataHashDecomposition>), String> {
         let datums = tx_witness_set.plutus_data();
         let redeemers = tx_witness_set.redeemers().unwrap_or(Redeemers::new());
         let mut cost_models = csl::Costmdls::new();
 
+        let mut plutus_versions_used: Vec<String> = Vec::new();
         for used_plutus_version in &self.used_plutus_versions {
             if used_plutus_version == &csl::LanguageKind::PlutusV1 {
                 let cost_model = pp_cost_model_to_csl(
@@ -981,6 +986,7 @@ impl<'a> WitnessValidator<'a> {
                         .ok_or("Plutus V1 cost model not found")?,
                 );
                 cost_models.insert(&csl::Language::new_plutus_v1(), &cost_model);
+                plutus_versions_used.push("PlutusV1".to_string());
             } else if used_plutus_version == &csl::LanguageKind::PlutusV2 {
                 let cost_model = pp_cost_model_to_csl(
                     self.validation_input_context
@@ -991,6 +997,7 @@ impl<'a> WitnessValidator<'a> {
                         .ok_or("Plutus V2 cost model not found")?,
                 );
                 cost_models.insert(&csl::Language::new_plutus_v2(), &cost_model);
+                plutus_versions_used.push("PlutusV2".to_string());
             } else if used_plutus_version == &csl::LanguageKind::PlutusV3 {
                 let cost_model = pp_cost_model_to_csl(
                     self.validation_input_context
@@ -1001,14 +1008,70 @@ impl<'a> WitnessValidator<'a> {
                         .ok_or("Plutus V3 cost model not found")?,
                 );
                 cost_models.insert(&csl::Language::new_plutus_v3(), &cost_model);
+                plutus_versions_used.push("PlutusV3".to_string());
             }
         }
 
         if datums.is_some() || redeemers.len() > 0 || cost_models.len() > 0 {
-            let script_data_hash = csl::hash_script_data(&redeemers, &cost_models, datums);
-            Ok(Some(script_data_hash.to_hex()))
+            let script_data_hash = csl::hash_script_data(&redeemers, &cost_models, datums.clone());
+            
+            // Determine encoding format
+            let is_datums_only_format = redeemers.len() == 0 && datums.is_some();
+            let encoding_format = if is_datums_only_format {
+                "datums_only".to_string()
+            } else {
+                "standard".to_string()
+            };
+            
+            // Build description of what is actually hashed (per ledger CDDL spec)
+            // Standard: redeemers || datums (if present) || used_cost_modesl
+            // Datums-only: 0xA0 || datums || 0xA0
+            let hash_input_description = if is_datums_only_format {
+                "0xA0 (empty map) || datums (serialized per CDDL) || 0xA0 (empty map)".to_string()
+            } else {
+                let mut parts = vec!["redeemers (serialized per CDDL)".to_string()];
+                if datums.is_some() {
+                    parts.push("datums (serialized per CDDL)".to_string());
+                }
+                parts.push("cost_models (serialized per CDDL)".to_string());
+                parts.join(" || ")
+            };
+            
+            // Get raw CBOR for debugging (note: may differ from internal encoding)
+            let redeemers_cbor = if redeemers.len() > 0 {
+                Some(redeemers.to_hex())
+            } else {
+                None
+            };
+            
+            let (datums_cbor, datums_count) = if let Some(ref d) = datums {
+                // Add CBOR set tag 258 (0xD90102) before datum bytes
+                let datums_hex = format!("d90102{}", d.to_hex());
+                (Some(datums_hex), Some(d.len() as u32))
+            } else {
+                (None, None)
+            };
+            
+            let cost_models_cbor = if cost_models.len() > 0 {
+                Some(cost_models.to_hex())
+            } else {
+                None
+            };
+            
+            let decomposition = ScriptDataHashDecomposition {
+                encoding_format,
+                redeemers_cbor,
+                redeemers_count: redeemers.len() as u32,
+                datums_cbor,
+                datums_count,
+                cost_models_cbor,
+                plutus_versions_used,
+                hash_input_description,
+            };
+            
+            Ok((Some(script_data_hash.to_hex()), Some(decomposition)))
         } else {
-            Ok(None)
+            Ok((None, None))
         }
     }
 
@@ -1214,6 +1277,7 @@ impl<'a> WitnessValidator<'a> {
                 Phase1Error::ScriptDataHashMismatch {
                     expected_hash: self.expected_script_data_hash.clone(),
                     provided_hash: self.provided_script_data_hash.clone(),
+                    expected_decomposition: self.expected_script_data_hash_decomposition.clone(),
                 },
                 "transaction.body.script_data_hash".to_string(),
             ));
@@ -1305,4 +1369,3 @@ fn build_sorted_withdrawal_index_map(keys: &csl::RewardAddresses) -> HashMap<csl
         .map(|(sorted_idx, addr)| (addr.clone(), sorted_idx as u32))
         .collect()
 }
-

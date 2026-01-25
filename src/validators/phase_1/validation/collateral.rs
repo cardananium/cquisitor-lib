@@ -200,7 +200,7 @@ impl CollateralValidator {
                 ));
             } else if invalid_input.2 == InvalidInputType::AddressIsReward {
                 warnings.push(ValidationPhase1Warning::new(
-                    Phase1Warning::CollateralInputUsesRewardAddress {
+                Phase1Warning::CollateralInputUsesRewardAddress {
                         invalid_collateral: csl_tx_input_to_string(&invalid_input.0),
                     },
                     format!("transaction.body.collateral.{}", invalid_input.1),

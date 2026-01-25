@@ -7,7 +7,7 @@ use std::collections::HashSet;
 use crate::common::TxInput;
 use crate::validators::common::ProtocolVersion;
 
-use crate::validators::common::{FeeDecomposition, LocalCredential as Credential, GovernanceActionId, Voter};
+use crate::validators::common::{FeeDecomposition, LocalCredential as Credential, GovernanceActionId, ScriptDataHashDecomposition, Voter};
 use crate::validators::phase_1::hints::get_error_hint;
 use crate::validators::phase_1::hints::get_warning_hint;
 use crate::validators::value::Value;
@@ -386,10 +386,12 @@ pub enum Phase1Error {
     },
     /// Script data hash mismatch
     ScriptDataHashMismatch {
-        /// The expected script data hash
+        /// The expected script data hash (computed from witness set)
         expected_hash: Option<String>,
-        /// The actual script data hash
+        /// The provided script data hash (from transaction body)
         provided_hash: Option<String>,
+        /// Decomposition of the expected hash computation
+        expected_decomposition: Option<ScriptDataHashDecomposition>,
     },
     ReferenceInputOverlapsWithInput {
         input: TxInput,
@@ -838,8 +840,13 @@ impl Phase1Error {
             Self::ExtraneousDatumWitnesses { datum_hash } => {
                 format!("Extraneous datum witnesses provided: {}", datum_hash)
             }
-            Self::ScriptDataHashMismatch { expected_hash, provided_hash } => {
-                format!("Script data hash mismatch. Expected: {}, Found: {}", expected_hash.as_ref().unwrap_or(&"None".to_string()), provided_hash.as_ref().unwrap_or(&"None".to_string()))
+            Self::ScriptDataHashMismatch { expected_hash, provided_hash, expected_decomposition } => {
+                format!(
+                    "Script data hash mismatch. Expected: {}, Found: {}. Decomposition: {:?}",
+                    expected_hash.as_ref().unwrap_or(&"None".to_string()),
+                    provided_hash.as_ref().unwrap_or(&"None".to_string()),
+                    expected_decomposition
+                )
             },
             Self::ReferenceInputOverlapsWithInput { input } => {
                 format!("Reference input overlaps with input: {:?}", input)

@@ -416,7 +416,7 @@ This library builds upon the excellent work of the Cardano community, particular
 
 - [cardano-serialization-lib](https://github.com/Emurgo/cardano-serialization-lib) - For cardano structures deserialization
 - [Pallas](https://github.com/txpipe/pallas) - Cardano primitives
-- [UPLC](https://github.com/aiken-lang/uplc) - Plutus script execution
+- [UPLC](https://github.com/aiken-lang/aiken/tree/main/crates/uplc) - Plutus script execution
 - The Cardano Ledger specification team
 
 ## Support
@@ -424,7 +424,7 @@ This library builds upon the excellent work of the Cardano community, particular
 For questions and support:
 
 - 📖 Check the [API Documentation](./API_DOCUMENTATION.md)
-- 🐛 Report bugs via [GitHub Issues](https://github.com/your-org/cquisitor-lib/issues)
+- 🐛 Report bugs via [GitHub Issues](https://github.com/cardananium/cquisitor-lib/issues)
 
 ---
 

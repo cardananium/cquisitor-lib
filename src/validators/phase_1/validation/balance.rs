@@ -224,7 +224,18 @@ impl<'a> BalanceValidator<'a> {
                             ));
                         }
                     }
-                    if account_context.delegated_to_drep.is_none() {
+                    // DRep-delegation gate (Conway v10+, CIP-1694): only checks the
+                    // pre-tx state of the account. Any VoteDelegation cert appearing
+                    // in this same tx is intentionally NOT considered here — by ledger
+                    // semantics, withdrawals are validated against the account state as
+                    // it exists at the start of the tx, before this tx's CERTS take
+                    // effect. So you cannot first delegate to a DRep and withdraw in
+                    // the same tx; the delegation must already be in place.
+                    // Also gated on key-hash creds only — script-hash stake creds are
+                    // exempt from this requirement (see is_key_hash_reward_address).
+                    if account_context.delegated_to_drep.is_none()
+                        && is_key_hash_reward_address(&reward_address)
+                    {
                         errors.push(ValidationPhase1Error::new(
                             Phase1Error::WithdrawalNotAllowedBecauseNotDelegatedToDRep {
                                 reward_address: reward_address.clone(),
@@ -635,4 +646,14 @@ fn calculate_voting_proposals_deposits(tx_body: &csl::TransactionBody) -> Vec<De
         }
     }
     deposits
+}
+
+fn is_key_hash_reward_address(reward_address: &str) -> bool {
+    let Ok(address) = csl::Address::from_bech32(reward_address) else {
+        return false;
+    };
+    let Some(reward) = csl::RewardAddress::from_address(&address) else {
+        return false;
+    };
+    reward.payment_cred().kind() == csl::CredKind::Key
 }

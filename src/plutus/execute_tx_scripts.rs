@@ -193,7 +193,7 @@ fn eval_all_redeemers(
                     cost_mdls,
                     &remaining_budget,
                 ) {
-                    Ok(new_redeemer) => Ok((redeemer.clone(), new_redeemer)),
+                    Ok((new_redeemer, _)) => Ok((redeemer.clone(), new_redeemer)),
                     Err(err) => Err((redeemer.clone(), err)),
                 }
             })

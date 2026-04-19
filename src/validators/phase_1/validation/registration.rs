@@ -26,6 +26,26 @@ struct CertificateInfo {
 }
 
 #[derive(Debug, Clone)]
+enum DRepTarget {
+    /// A registered DRep identified by bech32 (key-hash or script-hash).
+    Credential(String),
+    /// Predefined DRep that always abstains; not subject to registration check.
+    AlwaysAbstain,
+    /// Predefined DRep that always votes no-confidence; not subject to registration check.
+    AlwaysNoConfidence,
+}
+
+fn csl_drep_to_drep_target(drep: &csl::DRep) -> DRepTarget {
+    match drep.kind() {
+        csl::DRepKind::AlwaysAbstain => DRepTarget::AlwaysAbstain,
+        csl::DRepKind::AlwaysNoConfidence => DRepTarget::AlwaysNoConfidence,
+        csl::DRepKind::KeyHash | csl::DRepKind::ScriptHash => {
+            DRepTarget::Credential(drep.to_bech32(true).unwrap_or_default())
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
 enum CertificateType {
     StakeRegistration {
         reward_address: String,
@@ -68,20 +88,20 @@ enum CertificateType {
     StakeAndVoteDelegation {
         reward_address: String,
         pool_id: String,
-        drep: String,
+        drep: DRepTarget,
     },
     StakeVoteRegistrationAndDelegation {
         reward_address: String,
         pool_id: String,
-        drep: String,
+        drep: DRepTarget,
     },
     VoteDelegation {
         reward_address: String,
-        drep: String,
+        drep: DRepTarget,
     },
     VoteRegistrationAndDelegation {
         reward_address: String,
-        drep: String,
+        drep: DRepTarget,
     },
     GenesisKeyDelegation,
     MoveInstantaneousRewardsCert,
@@ -99,6 +119,9 @@ struct RegistrationState {
     pool_retirements_in_tx: HashMap<String, u64>, // pool_id -> retirement_epoch
     /// Committee resignations in this tx
     committee_resignations_in_tx: HashSet<LocalCredential>,
+    /// Committee hot-key authorizations seen in this tx (cold credentials).
+    /// Used to detect a second hot-auth for the same cold key within one tx.
+    committee_hot_auths_in_tx: HashSet<LocalCredential>,
 }
 
 pub struct RegistrationValidator<'a> {
@@ -119,6 +142,7 @@ impl<'a> RegistrationValidator<'a> {
             deregistrations_in_tx: HashSet::new(),
             pool_retirements_in_tx: HashMap::new(),
             committee_resignations_in_tx: HashSet::new(),
+            committee_hot_auths_in_tx: HashSet::new(),
         };
 
         // Load initial registration state from validation context
@@ -321,10 +345,7 @@ impl<'a> RegistrationValidator<'a> {
                         &context.network_type,
                     );
                     let pool_id = stake_vote_deleg_cert.pool_keyhash().to_hex();
-                    let drep = stake_vote_deleg_cert
-                        .drep()
-                        .to_bech32(true)
-                        .unwrap_or_else(|_| "".to_string());
+                    let drep = csl_drep_to_drep_target(&stake_vote_deleg_cert.drep());
                     Some(CertificateType::StakeAndVoteDelegation {
                         reward_address,
                         pool_id,
@@ -344,10 +365,7 @@ impl<'a> RegistrationValidator<'a> {
                         &context.network_type,
                     );
                     let pool_id = stake_vote_reg_deleg_cert.pool_keyhash().to_hex();
-                    let drep = stake_vote_reg_deleg_cert
-                        .drep()
-                        .to_bech32(true)
-                        .unwrap_or_else(|_| "".to_string());
+                    let drep = csl_drep_to_drep_target(&stake_vote_reg_deleg_cert.drep());
                     Some(CertificateType::StakeVoteRegistrationAndDelegation {
                         reward_address,
                         pool_id,
@@ -364,10 +382,7 @@ impl<'a> RegistrationValidator<'a> {
                         &stake_credential,
                         &context.network_type,
                     );
-                    let drep = vote_deleg_cert
-                        .drep()
-                        .to_bech32(true)
-                        .unwrap_or_else(|_| "".to_string());
+                    let drep = csl_drep_to_drep_target(&vote_deleg_cert.drep());
                     Some(CertificateType::VoteDelegation {
                         reward_address,
                         drep,
@@ -383,10 +398,7 @@ impl<'a> RegistrationValidator<'a> {
                         &stake_credential,
                         &context.network_type,
                     );
-                    let drep = vote_reg_deleg_cert
-                        .drep()
-                        .to_bech32(true)
-                        .unwrap_or_else(|_| "".to_string());
+                    let drep = csl_drep_to_drep_target(&vote_reg_deleg_cert.drep());
                     Some(CertificateType::VoteRegistrationAndDelegation {
                         reward_address,
                         drep,
@@ -477,10 +489,17 @@ impl<'a> RegistrationValidator<'a> {
                     .committee_resignations_in_tx
                     .insert(committee_cold_credential.clone());
             }
+            CertificateType::CommitteeHotAuth {
+                committee_cold_credential,
+                ..
+            } => {
+                state
+                    .committee_hot_auths_in_tx
+                    .insert(committee_cold_credential.clone());
+            }
             CertificateType::StakeDelegation { .. }
             | CertificateType::StakeAndVoteDelegation { .. }
-            | CertificateType::VoteDelegation { .. }
-            | CertificateType::CommitteeHotAuth { .. } => {
+            | CertificateType::VoteDelegation { .. } => {
                 // These don't affect registration state
             }
             CertificateType::GenesisKeyDelegation
@@ -498,8 +517,21 @@ impl<'a> RegistrationValidator<'a> {
         let slots_per_epoch = 432000u64; // Standard epoch length in slots (5 days)
         let current_epoch = self.validation_input_context.slot / slots_per_epoch;
 
+        // Walk certs in order. Each cert is validated against the state as the
+        // ledger would observe it at that point (after all preceding certs in
+        // this tx have been applied), then its own state-changes are folded in.
+        let mut state = RegistrationState {
+            initial_registrations: self.registration_state.initial_registrations.clone(),
+            registrations_in_tx: HashMap::new(),
+            deregistrations_in_tx: HashSet::new(),
+            pool_retirements_in_tx: HashMap::new(),
+            committee_resignations_in_tx: HashSet::new(),
+            committee_hot_auths_in_tx: HashSet::new(),
+        };
+
         for cert_info in &self.certificates {
-            self.validate_certificate(&cert_info, current_epoch, &mut errors, &mut warnings);
+            self.validate_certificate(&cert_info, &state, current_epoch, &mut errors, &mut warnings);
+            Self::update_state(&mut state, &cert_info.cert_type, cert_info.cert_index);
         }
 
         ValidationResult::new_phase_1(errors, warnings)
@@ -508,6 +540,7 @@ impl<'a> RegistrationValidator<'a> {
     fn validate_certificate(
         &self,
         cert_info: &CertificateInfo,
+        state: &RegistrationState,
         current_epoch: u64,
         errors: &mut Vec<ValidationPhase1Error>,
         warnings: &mut Vec<ValidationPhase1Warning>,
@@ -518,7 +551,7 @@ impl<'a> RegistrationValidator<'a> {
 
                 // Check for duplicate registration in the same transaction
                 // Only warn if a PREVIOUS certificate already registered this entity
-                if let Some(&first_cert_index) = self.registration_state.registrations_in_tx.get(&entity) {
+                if let Some(&first_cert_index) = state.registrations_in_tx.get(&entity) {
                     if first_cert_index < cert_info.cert_index {
                         warnings.push(ValidationPhase1Warning::new(
                             Phase1Warning::DuplicateRegistrationInTx {
@@ -532,14 +565,9 @@ impl<'a> RegistrationValidator<'a> {
                 }
 
                 // Check if already registered (either initially or in this tx)
-                if self
-                    .registration_state
-                    .initial_registrations
-                    .contains(&entity)
-                    && !self
-                        .registration_state
-                        .deregistrations_in_tx
-                        .contains(&entity)
+                if (state.initial_registrations.contains(&entity)
+                    || state.registrations_in_tx.contains_key(&entity))
+                    && !state.deregistrations_in_tx.contains(&entity)
                 {
                     errors.push(ValidationPhase1Error::new(
                         Phase1Error::StakeAlreadyRegistered {
@@ -551,16 +579,13 @@ impl<'a> RegistrationValidator<'a> {
             }
             CertificateType::StakeDeregistration { reward_address } => {
                 let entity = RegistrableEntity::Account(reward_address.clone());
-                let is_registered = self
-                    .registration_state
+                let is_registered = state
                     .initial_registrations
                     .contains(&entity)
-                    || self
-                        .registration_state
+                    || state
                         .registrations_in_tx
                         .contains_key(&entity);
-                let is_deregistered = self
-                    .registration_state
+                let is_deregistered = state
                     .deregistrations_in_tx
                     .contains(&entity);
 
@@ -597,16 +622,13 @@ impl<'a> RegistrationValidator<'a> {
             } => {
                 // Check if stake key is registered
                 let account_entity = RegistrableEntity::Account(reward_address.clone());
-                let is_registered = self
-                    .registration_state
+                let is_registered = state
                     .initial_registrations
                     .contains(&account_entity)
-                    || self
-                        .registration_state
+                    || state
                         .registrations_in_tx
                         .contains_key(&account_entity);
-                let is_deregistered = self
-                    .registration_state
+                let is_deregistered = state
                     .deregistrations_in_tx
                     .contains(&account_entity);
 
@@ -621,23 +643,27 @@ impl<'a> RegistrationValidator<'a> {
 
                 // Check if pool is registered
                 let pool_entity = RegistrableEntity::Pool(pool_id.clone());
-                let is_pool_registered = self
-                    .registration_state
+                let is_pool_registered = state
                     .initial_registrations
                     .contains(&pool_entity)
-                    || self
-                        .registration_state
+                    || state
                         .registrations_in_tx
                         .contains_key(&pool_entity);
-                let is_pool_retiring = self
-                    .registration_state
-                    .pool_retirements_in_tx
-                    .contains_key(pool_id);
-
-                if !is_pool_registered || is_pool_retiring {
+                if !is_pool_registered {
                     errors.push(ValidationPhase1Error::new(
                         Phase1Error::StakePoolNotRegistered {
                             pool_id: pool_id.clone(),
+                        },
+                        format!("transaction.body.certs.{}", cert_info.cert_index),
+                    ));
+                } else if state
+                    .pool_retirements_in_tx
+                    .contains_key(pool_id)
+                {
+                    warnings.push(ValidationPhase1Warning::new(
+                        Phase1Warning::DelegationToRetiringPool {
+                            pool_id: pool_id.clone(),
+                            cert_index: cert_info.cert_index,
                         },
                         format!("transaction.body.certs.{}", cert_info.cert_index),
                     ));
@@ -648,7 +674,7 @@ impl<'a> RegistrationValidator<'a> {
 
                 // Check for duplicate registration in the same transaction
                 // Only warn if a PREVIOUS certificate already registered this entity
-                if let Some(&first_cert_index) = self.registration_state.registrations_in_tx.get(&entity) {
+                if let Some(&first_cert_index) = state.registrations_in_tx.get(&entity) {
                     if first_cert_index < cert_info.cert_index {
                         warnings.push(ValidationPhase1Warning::new(
                             Phase1Warning::DuplicateRegistrationInTx {
@@ -677,14 +703,9 @@ impl<'a> RegistrationValidator<'a> {
                 }
 
                 // Check if pool is already registered (warning only)
-                if self
-                    .registration_state
-                    .initial_registrations
-                    .contains(&entity)
-                    && !self
-                        .registration_state
-                        .pool_retirements_in_tx
-                        .contains_key(pool_id)
+                if (state.initial_registrations.contains(&entity)
+                    || state.registrations_in_tx.contains_key(&entity))
+                    && !state.pool_retirements_in_tx.contains_key(pool_id)
                 {
                     warnings.push(ValidationPhase1Warning::new(
                         Phase1Warning::PoolAlreadyRegistered {
@@ -700,12 +721,10 @@ impl<'a> RegistrationValidator<'a> {
             } => {
                 // Check if pool is registered
                 let entity = RegistrableEntity::Pool(pool_id.clone());
-                let is_registered = self
-                    .registration_state
+                let is_registered = state
                     .initial_registrations
                     .contains(&entity)
-                    || self
-                        .registration_state
+                    || state
                         .registrations_in_tx
                         .contains_key(&entity);
 
@@ -745,7 +764,7 @@ impl<'a> RegistrationValidator<'a> {
 
                 // Check for duplicate registration in the same transaction
                 // Only warn if a PREVIOUS certificate already registered this entity
-                if let Some(&first_cert_index) = self.registration_state.registrations_in_tx.get(&entity) {
+                if let Some(&first_cert_index) = state.registrations_in_tx.get(&entity) {
                     if first_cert_index < cert_info.cert_index {
                         warnings.push(ValidationPhase1Warning::new(
                             Phase1Warning::DuplicateRegistrationInTx {
@@ -759,14 +778,9 @@ impl<'a> RegistrationValidator<'a> {
                 }
 
                 // DRep re-registration is typically allowed for updates
-                if self
-                    .registration_state
-                    .initial_registrations
-                    .contains(&entity)
-                    && !self
-                        .registration_state
-                        .deregistrations_in_tx
-                        .contains(&entity)
+                if (state.initial_registrations.contains(&entity)
+                    || state.registrations_in_tx.contains_key(&entity))
+                    && !state.deregistrations_in_tx.contains(&entity)
                 {
                     warnings.push(ValidationPhase1Warning::new(
                         Phase1Warning::DRepAlreadyRegistered {
@@ -779,16 +793,13 @@ impl<'a> RegistrationValidator<'a> {
             CertificateType::DRepDeregistration { drep_id } => {
                 // Check if DRep is registered
                 let entity = RegistrableEntity::DRep(drep_id.clone());
-                let is_registered = self
-                    .registration_state
+                let is_registered = state
                     .initial_registrations
                     .contains(&entity)
-                    || self
-                        .registration_state
+                    || state
                         .registrations_in_tx
                         .contains_key(&entity);
-                let is_deregistered = self
-                    .registration_state
+                let is_deregistered = state
                     .deregistrations_in_tx
                     .contains(&entity);
 
@@ -809,7 +820,7 @@ impl<'a> RegistrationValidator<'a> {
 
                 // Check for duplicate registration in the same transaction
                 // Only warn if a PREVIOUS certificate already registered this entity
-                if let Some(&first_cert_index) = self.registration_state.registrations_in_tx.get(&account_entity) {
+                if let Some(&first_cert_index) = state.registrations_in_tx.get(&account_entity) {
                     if first_cert_index < cert_info.cert_index {
                         warnings.push(ValidationPhase1Warning::new(
                             Phase1Warning::DuplicateRegistrationInTx {
@@ -823,14 +834,9 @@ impl<'a> RegistrationValidator<'a> {
                 }
 
                 // Check if stake key is already registered
-                if self
-                    .registration_state
-                    .initial_registrations
-                    .contains(&account_entity)
-                    && !self
-                        .registration_state
-                        .deregistrations_in_tx
-                        .contains(&account_entity)
+                if (state.initial_registrations.contains(&account_entity)
+                    || state.registrations_in_tx.contains_key(&account_entity))
+                    && !state.deregistrations_in_tx.contains(&account_entity)
                 {
                     errors.push(ValidationPhase1Error::new(
                         Phase1Error::StakeAlreadyRegistered {
@@ -842,23 +848,27 @@ impl<'a> RegistrationValidator<'a> {
 
                 // Check if pool is registered
                 let pool_entity = RegistrableEntity::Pool(pool_id.clone());
-                let is_pool_registered = self
-                    .registration_state
+                let is_pool_registered = state
                     .initial_registrations
                     .contains(&pool_entity)
-                    || self
-                        .registration_state
+                    || state
                         .registrations_in_tx
                         .contains_key(&pool_entity);
-                let is_pool_retiring = self
-                    .registration_state
-                    .pool_retirements_in_tx
-                    .contains_key(pool_id);
-
-                if !is_pool_registered || is_pool_retiring {
+                if !is_pool_registered {
                     errors.push(ValidationPhase1Error::new(
                         Phase1Error::StakePoolNotRegistered {
                             pool_id: pool_id.clone(),
+                        },
+                        format!("transaction.body.certs.{}", cert_info.cert_index),
+                    ));
+                } else if state
+                    .pool_retirements_in_tx
+                    .contains_key(pool_id)
+                {
+                    warnings.push(ValidationPhase1Warning::new(
+                        Phase1Warning::DelegationToRetiringPool {
+                            pool_id: pool_id.clone(),
+                            cert_index: cert_info.cert_index,
                         },
                         format!("transaction.body.certs.{}", cert_info.cert_index),
                     ));
@@ -867,16 +877,13 @@ impl<'a> RegistrationValidator<'a> {
             CertificateType::DRepUpdate { drep_id } => {
                 // Check if DRep is registered
                 let entity = RegistrableEntity::DRep(drep_id.clone());
-                let is_registered = self
-                    .registration_state
+                let is_registered = state
                     .initial_registrations
                     .contains(&entity)
-                    || self
-                        .registration_state
+                    || state
                         .registrations_in_tx
                         .contains_key(&entity);
-                let is_deregistered = self
-                    .registration_state
+                let is_deregistered = state
                     .deregistrations_in_tx
                     .contains(&entity);
 
@@ -896,16 +903,13 @@ impl<'a> RegistrationValidator<'a> {
             } => {
                 // Check if stake key is registered
                 let account_entity = RegistrableEntity::Account(reward_address.clone());
-                let is_registered = self
-                    .registration_state
+                let is_registered = state
                     .initial_registrations
                     .contains(&account_entity)
-                    || self
-                        .registration_state
+                    || state
                         .registrations_in_tx
                         .contains_key(&account_entity);
-                let is_deregistered = self
-                    .registration_state
+                let is_deregistered = state
                     .deregistrations_in_tx
                     .contains(&account_entity);
 
@@ -920,47 +924,49 @@ impl<'a> RegistrationValidator<'a> {
 
                 // Check if pool is registered
                 let pool_entity = RegistrableEntity::Pool(pool_id.clone());
-                let is_pool_registered = self
-                    .registration_state
+                let is_pool_registered = state
                     .initial_registrations
                     .contains(&pool_entity)
-                    || self
-                        .registration_state
+                    || state
                         .registrations_in_tx
                         .contains_key(&pool_entity);
-                let is_pool_retiring = self
-                    .registration_state
-                    .pool_retirements_in_tx
-                    .contains_key(pool_id);
-
-                if !is_pool_registered || is_pool_retiring {
+                if !is_pool_registered {
                     errors.push(ValidationPhase1Error::new(
                         Phase1Error::StakePoolNotRegistered {
                             pool_id: pool_id.clone(),
                         },
                         format!("transaction.body.certs.{}", cert_info.cert_index),
                     ));
+                } else if state
+                    .pool_retirements_in_tx
+                    .contains_key(pool_id)
+                {
+                    warnings.push(ValidationPhase1Warning::new(
+                        Phase1Warning::DelegationToRetiringPool {
+                            pool_id: pool_id.clone(),
+                            cert_index: cert_info.cert_index,
+                        },
+                        format!("transaction.body.certs.{}", cert_info.cert_index),
+                    ));
                 }
 
-                // Check if DRep is registered (if not empty)
-                if !drep.is_empty() {
-                    let drep_entity = RegistrableEntity::DRep(drep.clone());
-                    let is_drep_registered = self
-                        .registration_state
+                // AlwaysAbstain / AlwaysNoConfidence are predefined DReps and need no registration.
+                if let DRepTarget::Credential(drep_bech32) = drep {
+                    let drep_entity = RegistrableEntity::DRep(drep_bech32.clone());
+                    let is_drep_registered = state
                         .initial_registrations
                         .contains(&drep_entity)
-                        || self
-                            .registration_state
+                        || state
                             .registrations_in_tx
                             .contains_key(&drep_entity);
-                    let is_drep_deregistered = self
-                        .registration_state
+                    let is_drep_deregistered = state
                         .deregistrations_in_tx
                         .contains(&drep_entity);
 
                     if !is_drep_registered || is_drep_deregistered {
-                        warnings.push(ValidationPhase1Warning::new(
-                            Phase1Warning::DRepNotRegistered {
+                        errors.push(ValidationPhase1Error::new(
+                            Phase1Error::DelegateeDRepNotRegistered {
+                                drep_id: drep_bech32.clone(),
                                 cert_index: cert_info.cert_index,
                             },
                             format!("transaction.body.certs.{}", cert_info.cert_index),
@@ -977,7 +983,7 @@ impl<'a> RegistrationValidator<'a> {
 
                 // Check for duplicate registration in the same transaction
                 // Only warn if a PREVIOUS certificate already registered this entity
-                if let Some(&first_cert_index) = self.registration_state.registrations_in_tx.get(&account_entity) {
+                if let Some(&first_cert_index) = state.registrations_in_tx.get(&account_entity) {
                     if first_cert_index < cert_info.cert_index {
                         warnings.push(ValidationPhase1Warning::new(
                             Phase1Warning::DuplicateRegistrationInTx {
@@ -991,14 +997,9 @@ impl<'a> RegistrationValidator<'a> {
                 }
 
                 // Check if stake key is already registered
-                if self
-                    .registration_state
-                    .initial_registrations
-                    .contains(&account_entity)
-                    && !self
-                        .registration_state
-                        .deregistrations_in_tx
-                        .contains(&account_entity)
+                if (state.initial_registrations.contains(&account_entity)
+                    || state.registrations_in_tx.contains_key(&account_entity))
+                    && !state.deregistrations_in_tx.contains(&account_entity)
                 {
                     errors.push(ValidationPhase1Error::new(
                         Phase1Error::StakeAlreadyRegistered {
@@ -1010,47 +1011,49 @@ impl<'a> RegistrationValidator<'a> {
 
                 // Check if pool is registered
                 let pool_entity = RegistrableEntity::Pool(pool_id.clone());
-                let is_pool_registered = self
-                    .registration_state
+                let is_pool_registered = state
                     .initial_registrations
                     .contains(&pool_entity)
-                    || self
-                        .registration_state
+                    || state
                         .registrations_in_tx
                         .contains_key(&pool_entity);
-                let is_pool_retiring = self
-                    .registration_state
-                    .pool_retirements_in_tx
-                    .contains_key(pool_id);
-
-                if !is_pool_registered || is_pool_retiring {
+                if !is_pool_registered {
                     errors.push(ValidationPhase1Error::new(
                         Phase1Error::StakePoolNotRegistered {
                             pool_id: pool_id.clone(),
                         },
                         format!("transaction.body.certs.{}", cert_info.cert_index),
                     ));
+                } else if state
+                    .pool_retirements_in_tx
+                    .contains_key(pool_id)
+                {
+                    warnings.push(ValidationPhase1Warning::new(
+                        Phase1Warning::DelegationToRetiringPool {
+                            pool_id: pool_id.clone(),
+                            cert_index: cert_info.cert_index,
+                        },
+                        format!("transaction.body.certs.{}", cert_info.cert_index),
+                    ));
                 }
 
-                // Check if DRep is registered (if not empty)
-                if !drep.is_empty() {
-                    let drep_entity = RegistrableEntity::DRep(drep.clone());
-                    let is_drep_registered = self
-                        .registration_state
+                // AlwaysAbstain / AlwaysNoConfidence are predefined DReps and need no registration.
+                if let DRepTarget::Credential(drep_bech32) = drep {
+                    let drep_entity = RegistrableEntity::DRep(drep_bech32.clone());
+                    let is_drep_registered = state
                         .initial_registrations
                         .contains(&drep_entity)
-                        || self
-                            .registration_state
+                        || state
                             .registrations_in_tx
                             .contains_key(&drep_entity);
-                    let is_drep_deregistered = self
-                        .registration_state
+                    let is_drep_deregistered = state
                         .deregistrations_in_tx
                         .contains(&drep_entity);
 
                     if !is_drep_registered || is_drep_deregistered {
-                        warnings.push(ValidationPhase1Warning::new(
-                            Phase1Warning::DRepNotRegistered {
+                        errors.push(ValidationPhase1Error::new(
+                            Phase1Error::DelegateeDRepNotRegistered {
+                                drep_id: drep_bech32.clone(),
                                 cert_index: cert_info.cert_index,
                             },
                             format!("transaction.body.certs.{}", cert_info.cert_index),
@@ -1064,16 +1067,13 @@ impl<'a> RegistrationValidator<'a> {
             } => {
                 // Check if stake key is registered
                 let account_entity = RegistrableEntity::Account(reward_address.clone());
-                let is_registered = self
-                    .registration_state
+                let is_registered = state
                     .initial_registrations
                     .contains(&account_entity)
-                    || self
-                        .registration_state
+                    || state
                         .registrations_in_tx
                         .contains_key(&account_entity);
-                let is_deregistered = self
-                    .registration_state
+                let is_deregistered = state
                     .deregistrations_in_tx
                     .contains(&account_entity);
 
@@ -1086,25 +1086,23 @@ impl<'a> RegistrationValidator<'a> {
                     ));
                 }
 
-                // Check if DRep is registered (if not empty)
-                if !drep.is_empty() {
-                    let drep_entity = RegistrableEntity::DRep(drep.clone());
-                    let is_drep_registered = self
-                        .registration_state
+                // AlwaysAbstain / AlwaysNoConfidence are predefined DReps and need no registration.
+                if let DRepTarget::Credential(drep_bech32) = drep {
+                    let drep_entity = RegistrableEntity::DRep(drep_bech32.clone());
+                    let is_drep_registered = state
                         .initial_registrations
                         .contains(&drep_entity)
-                        || self
-                            .registration_state
+                        || state
                             .registrations_in_tx
                             .contains_key(&drep_entity);
-                    let is_drep_deregistered = self
-                        .registration_state
+                    let is_drep_deregistered = state
                         .deregistrations_in_tx
                         .contains(&drep_entity);
 
                     if !is_drep_registered || is_drep_deregistered {
-                        warnings.push(ValidationPhase1Warning::new(
-                            Phase1Warning::DRepNotRegistered {
+                        errors.push(ValidationPhase1Error::new(
+                            Phase1Error::DelegateeDRepNotRegistered {
+                                drep_id: drep_bech32.clone(),
                                 cert_index: cert_info.cert_index,
                             },
                             format!("transaction.body.certs.{}", cert_info.cert_index),
@@ -1120,7 +1118,7 @@ impl<'a> RegistrationValidator<'a> {
 
                 // Check for duplicate registration in the same transaction
                 // Only warn if a PREVIOUS certificate already registered this entity
-                if let Some(&first_cert_index) = self.registration_state.registrations_in_tx.get(&account_entity) {
+                if let Some(&first_cert_index) = state.registrations_in_tx.get(&account_entity) {
                     if first_cert_index < cert_info.cert_index {
                         warnings.push(ValidationPhase1Warning::new(
                             Phase1Warning::DuplicateRegistrationInTx {
@@ -1134,14 +1132,9 @@ impl<'a> RegistrationValidator<'a> {
                 }
 
                 // Check if stake key is already registered
-                if self
-                    .registration_state
-                    .initial_registrations
-                    .contains(&account_entity)
-                    && !self
-                        .registration_state
-                        .deregistrations_in_tx
-                        .contains(&account_entity)
+                if (state.initial_registrations.contains(&account_entity)
+                    || state.registrations_in_tx.contains_key(&account_entity))
+                    && !state.deregistrations_in_tx.contains(&account_entity)
                 {
                     errors.push(ValidationPhase1Error::new(
                         Phase1Error::StakeAlreadyRegistered {
@@ -1151,25 +1144,23 @@ impl<'a> RegistrationValidator<'a> {
                     ));
                 }
 
-                // Check if DRep is registered (if not empty)
-                if !drep.is_empty() {
-                    let drep_entity = RegistrableEntity::DRep(drep.clone());
-                    let is_drep_registered = self
-                        .registration_state
+                // AlwaysAbstain / AlwaysNoConfidence are predefined DReps and need no registration.
+                if let DRepTarget::Credential(drep_bech32) = drep {
+                    let drep_entity = RegistrableEntity::DRep(drep_bech32.clone());
+                    let is_drep_registered = state
                         .initial_registrations
                         .contains(&drep_entity)
-                        || self
-                            .registration_state
+                        || state
                             .registrations_in_tx
                             .contains_key(&drep_entity);
-                    let is_drep_deregistered = self
-                        .registration_state
+                    let is_drep_deregistered = state
                         .deregistrations_in_tx
                         .contains(&drep_entity);
 
                     if !is_drep_registered || is_drep_deregistered {
-                        warnings.push(ValidationPhase1Warning::new(
-                            Phase1Warning::DRepNotRegistered {
+                        errors.push(ValidationPhase1Error::new(
+                            Phase1Error::DelegateeDRepNotRegistered {
+                                drep_id: drep_bech32.clone(),
                                 cert_index: cert_info.cert_index,
                             },
                             format!("transaction.body.certs.{}", cert_info.cert_index),
@@ -1194,10 +1185,10 @@ impl<'a> RegistrationValidator<'a> {
                 committee_hot_credential,
             } => {
 
-                // Check if committee member has already resigned in this transaction
-                if self
-                    .registration_state
-                    .committee_resignations_in_tx
+                // A second hot-auth for the same cold key in this tx is redundant
+                // (the later auth would just overwrite the earlier hot key).
+                if state
+                    .committee_hot_auths_in_tx
                     .contains(&committee_cold_credential)
                 {
                     warnings.push(ValidationPhase1Warning::new(
@@ -1209,9 +1200,9 @@ impl<'a> RegistrationValidator<'a> {
                     ));
                 }
 
-                // Check if committee member has already resigned
-                if self
-                    .registration_state
+                // Hot-auth after a cold-resign of the same key in this tx (or any earlier
+                // resignation already in initial state) is rejected by the ledger.
+                if state
                     .committee_resignations_in_tx
                     .contains(&committee_cold_credential)
                 {
@@ -1300,8 +1291,7 @@ impl<'a> RegistrationValidator<'a> {
                     }
                 }
 
-                if self
-                    .registration_state
+                if state
                     .committee_resignations_in_tx
                     .contains(&committee_cold_credential)
                 {

@@ -5,7 +5,7 @@ use uplc::{
     machine::cost_model::ExBudget,
     tx::{
         script_context::{
-            find_script, DataLookupTable, ScriptContext, ScriptVersion, TxInfo, TxInfoV1, TxInfoV2,
+            find_script, DataLookupTable, PlutusScript, ScriptContext, TxInfo, TxInfoV1, TxInfoV2,
             TxInfoV3,
         },
         to_plutus_data::ToPlutusData,
@@ -77,7 +77,7 @@ pub fn eval_redeemer(
             ScriptContext::V3 { .. } => program.apply_data(script_context.to_plutus_data()),
         };
 
-        let mut eval_result = if let Some(costs) = cost_mdl_opt {
+        let eval_result = if let Some(costs) = cost_mdl_opt {
             program.eval_as(lang, costs, Some(initial_budget))
         } else {
             program.eval_version(ExBudget::max(), lang)
@@ -124,11 +124,7 @@ pub fn eval_redeemer(
 
     (|| -> Result<(EvalRedeemerResult, Option<Phase2Error>), Phase2Error> {
         match redeemers_script {
-            Ok((ScriptVersion::Native(_), _)) => {
-                Err(Phase2Error::NativeScriptIsReferencedByRedeemer)
-            }
-
-            Ok((ScriptVersion::V1(script), datum)) => Ok(do_eval_redeemer(
+            Ok((PlutusScript::V1(script), datum)) => Ok(do_eval_redeemer(
                 cost_mdls_opt
                     .map(|cost_mdls| {
                         cost_mdls
@@ -151,7 +147,7 @@ pub fn eval_redeemer(
                 })?,
             )),
 
-            Ok((ScriptVersion::V2(script), datum)) => Ok(do_eval_redeemer(
+            Ok((PlutusScript::V2(script), datum)) => Ok(do_eval_redeemer(
                 cost_mdls_opt
                     .map(|cost_mdls| {
                         cost_mdls
@@ -174,7 +170,7 @@ pub fn eval_redeemer(
                 })?,
             )),
 
-            Ok((ScriptVersion::V3(script), datum)) => Ok(do_eval_redeemer(
+            Ok((PlutusScript::V3(script), datum)) => Ok(do_eval_redeemer(
                 cost_mdls_opt
                     .map(|cost_mdls| {
                         cost_mdls

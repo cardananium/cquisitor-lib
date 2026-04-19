@@ -267,6 +267,9 @@ pub fn get_error_hint(error: &Phase1Error) -> Option<String> {
         Phase1Error::ReferenceInputOverlapsWithInput { .. } => Some(
             "Remove the reference input that overlaps with the input. Reference inputs are not allowed to overlap with inputs.".to_string()
         ),
+        Phase1Error::DelegateeDRepNotRegistered { .. } => Some(
+            "The vote-delegation certificate targets a DRep that is not registered. Register the DRep first (or include its registration certificate earlier in the transaction), or delegate to AlwaysAbstain / AlwaysNoConfidence which do not require registration.".to_string()
+        ),
     }
 }
 
@@ -320,6 +323,9 @@ pub fn get_warning_hint(warning: &Phase1Warning) -> Option<String> {
         ),
         Phase1Warning::DuplicateCommitteeHotRegistrationInTx { .. } => Some(
             "Remove duplicate committee hot registration certificates from the same transaction to avoid redundancy.".to_string()
+        ),
+        Phase1Warning::DelegationToRetiringPool { .. } => Some(
+            "The pool you are delegating to is being retired in the same transaction. The delegation is valid but will only earn rewards until the pool's retirement epoch. Consider delegating to an active pool instead.".to_string()
         ),
     }
 }

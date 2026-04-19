@@ -237,6 +237,12 @@ pub enum Phase1Error {
         supplied_refund: i128,
         required_refund: i128,
     },
+    /// Vote delegation targets a DRep that is not registered
+    /// (mirrors ledger's DelegateeDRepNotRegisteredDELEG)
+    DelegateeDRepNotRegistered {
+        drep_id: String,
+        cert_index: u32,
+    },
     /// Stake registration deposit mismatch
     StakeRegistrationWrongDeposit {
         supplied_deposit: i128,
@@ -816,6 +822,9 @@ impl Phase1Error {
             Self::DRepDeregistrationWrongRefund { supplied_refund, required_refund } => {
                 format!("DRep deregistration refund mismatch. Supplied: {}, Required: {}", supplied_refund, required_refund)
             }
+            Self::DelegateeDRepNotRegistered { drep_id, cert_index } => {
+                format!("Vote delegation target DRep is not registered: {} (certificate at index {})", drep_id, cert_index)
+            }
             Self::StakeRegistrationWrongDeposit { supplied_deposit, required_deposit } => {
                 format!("Stake registration deposit mismatch. Supplied: {}, Required: {}", supplied_deposit, required_deposit)
             }
@@ -894,6 +903,12 @@ pub enum Phase1Warning {
     DRepNotRegistered {
         cert_index: u32,
     },
+    /// Stake delegation targets a pool that is being retired in the same transaction.
+    /// The delegation is still valid until the pool's retirement epoch is reached.
+    DelegationToRetiringPool {
+        pool_id: String,
+        cert_index: u32,
+    },
     /// Duplicate registration attempt in the same transaction
     DuplicateRegistrationInTx {
         entity_type: String,
@@ -943,6 +958,9 @@ impl Phase1Warning {
                     }
             Self::DRepNotRegistered { cert_index } => {
                         format!("DRep not registered for certificate at index: {}", cert_index)
+                    }
+            Self::DelegationToRetiringPool { pool_id, cert_index } => {
+                        format!("Stake delegation (cert {}) targets pool {} which is being retired in the same transaction. The delegation will only be effective until the pool's retirement epoch.", cert_index, pool_id)
                     }
             Self::DuplicateRegistrationInTx { entity_type, entity_id, cert_index } => {
                         format!("Duplicate registration attempt in the same transaction. Entity type: {}, Entity ID: {}, Certificate index: {}", entity_type, entity_id, cert_index)

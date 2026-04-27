@@ -13,7 +13,10 @@ Extracts a list of all necessary blockchain data required to validate a Cardano 
 
 ### Signature
 ```typescript
-function get_necessary_data_list_js(tx_hex: string): string
+function get_necessary_data_list_js(
+    tx_hex: string,
+    network_type: "mainnet" | "preview" | "preprod"
+): string
 ```
 
 ### Parameters
@@ -21,6 +24,7 @@ function get_necessary_data_list_js(tx_hex: string): string
 | Parameter | Type | Description |
 |-----------|------|-------------|
 | `tx_hex` | `string` | Hexadecimal-encoded Cardano transaction in CBOR format |
+| `network_type` | `string` | Target network: `"mainnet"`, `"preview"`, or `"preprod"`. Used to derive stake/reward addresses (bech32 prefix) for `accounts`, `pools`, `dReps`. |
 
 ### Returns
 
@@ -75,7 +79,7 @@ import { get_necessary_data_list_js } from 'cquisitor-lib';
 const txHex = "84a400..."; // Your transaction hex
 
 try {
-    const necessaryDataJson = get_necessary_data_list_js(txHex);
+    const necessaryDataJson = get_necessary_data_list_js(txHex, "mainnet");
     const necessaryData = JSON.parse(necessaryDataJson);
     
     console.log('Required UTXOs:', necessaryData.utxos);
@@ -281,7 +285,7 @@ import {
 async function validateTransaction(txHex: string) {
     try {
         // Step 1: Get the list of required data
-        const necessaryDataJson = get_necessary_data_list_js(txHex);
+        const necessaryDataJson = get_necessary_data_list_js(txHex, "mainnet");
         const necessaryData = JSON.parse(necessaryDataJson);
         
         // Step 2: Fetch the required data from your indexer/node

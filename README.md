@@ -22,9 +22,12 @@ Functions:
 - `decode_specific_type(hex, type_name, params)` - Decode specific Cardano type
 - `get_possible_types_for_input(hex)` - Suggests types that can decode given input
 
-### CBOR Decoder
+### CBOR Decoder & CDDL Validation
 
-`cbor_to_json(cbor_hex)` - Converts raw CBOR to JSON with positional information, supporting indefinite arrays/maps and all CBOR types.
+- `cbor_to_json(cbor_hex)` - Converts raw CBOR to JSON with positional information, supporting indefinite arrays/maps and all CBOR types. Each node carries an optional `oddities` array flagging deviations from RFC 8949 deterministic encoding (overlong integers/floats, indefinite length, unsorted/duplicate map keys, non-canonical bignums). Never throws on malformed input — returns a `{ok, value}` / `{ok: false, error, partial?}` union where `error` is a structured `CborDecodeError` (kind / byte offset / byte span / semantic `path`) and `partial` is the sub-tree decoded before the failure, with every unfinished container flagged `incomplete: true`.
+- `validate_cddl(cddl)` - Parses a CDDL schema; reports parse errors and unresolved rule references (e.g. `thing = [unknown_rule, int]` → `kind: "unresolved_references"`).
+- `validate_cbor_against_cddl(cbor_hex, cddl, rule_name)` - Validates a CBOR payload against a named rule. Errors carry `kind`, `expected`, semantic `path`, byte/anchor spans, and an `additional` array when multiple violations fire.
+- `decode_cbor_against_cddl(cbor_hex, cddl, rule_name)` - Maps decoded CBOR onto a CDDL schema and returns labelled JSON (e.g. Cardano `[body, witness_set, bool, aux]` becomes `{transaction_body, transaction_witness_set, ...}`). Handles generics (`set<a>`), tagged sets, type rules used as field labels, and a few well-known tags (bignum → string number, datetime → ISO string). Sub-structures the schema doesn't cover surface under `@extra` / `@positional` so partial matches don't lose data.
 
 ### Plutus Script Decoder
 
@@ -104,7 +107,8 @@ import {
 
 // Step 1: Parse transaction and identify required data
 const txHex = "84a400..."; // Your transaction in hex format
-const necessaryDataJson = get_necessary_data_list_js(txHex);
+const networkType = "mainnet"; // or "preview" | "preprod"
+const necessaryDataJson = get_necessary_data_list_js(txHex, networkType);
 const necessaryData = JSON.parse(necessaryDataJson);
 
 console.log('Required UTXOs:', necessaryData.utxos);
@@ -177,7 +181,7 @@ import {
 async function validateTransaction(txHex: string): Promise<boolean> {
     try {
         // Parse transaction
-        const necessaryDataJson = get_necessary_data_list_js(txHex);
+        const necessaryDataJson = get_necessary_data_list_js(txHex, "mainnet");
         const necessaryData = JSON.parse(necessaryDataJson);
         
         // Fetch required blockchain data
@@ -226,12 +230,12 @@ async function validateTransaction(txHex: string): Promise<boolean> {
 
 ### Transaction Validation
 
-#### `get_necessary_data_list_js(tx_hex: string): string`
+#### `get_necessary_data_list_js(tx_hex: string, network_type: "mainnet" | "preview" | "preprod"): string`
 
-Extracts required blockchain data for validation.
+Extracts required blockchain data for validation. `network_type` determines the bech32 prefix used when deriving stake/reward addresses for `accounts`, `pools`, and `dReps`.
 
 ```typescript
-const necessaryData = JSON.parse(get_necessary_data_list_js(txHex));
+const necessaryData = JSON.parse(get_necessary_data_list_js(txHex, "mainnet"));
 // Returns: { utxos, accounts, pools, dReps, govActions, ... }
 ```
 
@@ -247,6 +251,23 @@ const result = JSON.parse(validate_transaction_js(txHex, JSON.stringify(context)
 #### `get_utxo_list_from_tx(tx_hex: string): string[]`
 
 Extracts all UTxO references (inputs + collateral + reference inputs) from transaction.
+
+#### `get_ref_script_bytes(tx_hex: string, output_index: number): string`
+
+Returns the hex-encoded CBOR bytes of the reference script embedded in `outputs[output_index]`. Returns an empty string if the output has no reference script or the index is out of range.
+
+```typescript
+const scriptHex = get_ref_script_bytes(txHex, 0);
+```
+
+#### `extract_hashes_from_transaction_js(tx_hex: string): string`
+
+Returns a JSON-serialized `ExtractedHashes` with every script / datum / redeemer / metadata / auxiliary-data hash referenced by the transaction (witness set, outputs with inline scripts/datums, auxiliary data). Useful for building indexers or caches.
+
+```typescript
+const hashes = JSON.parse(extract_hashes_from_transaction_js(txHex));
+// { witness_native_script_hashes, witness_plutus_scripts, witness_datum_hashes, ... }
+```
 
 ### Universal Decoder
 
@@ -288,14 +309,91 @@ const possibleTypes = get_possible_types_for_input("e1a...");
 
 ### CBOR Decoder
 
-#### `cbor_to_json(cbor_hex: string): CborValue`
+#### `cbor_to_json(cbor_hex: string): CborDecodeResult`
 
-Converts CBOR to JSON with positional metadata.
+Converts CBOR to JSON with positional metadata. Each node has `position_info` (byte span of its header) and, for containers/tags, `struct_position_info` (span of the whole subtree). Non-canonical encoding deviations (per RFC 8949 §4.1/§4.2) are flagged locally on the offending node via an optional `oddities: CborOddity[]` field — canonical inputs omit the field entirely.
+
+The function **never throws** on malformed input. On success it returns `{ ok: true, value }`; on failure `{ ok: false, error, partial? }` where `error` is a structured `CborDecodeError` and `partial` is the sub-tree decoded up to the failure point:
 
 ```typescript
-const cbor = cbor_to_json("a26461646472...");
-// Returns structured JSON with position info for each element
+const r = cbor_to_json("a26461646472...");
+if (r.ok) {
+    // r.value — the full positional tree; each node may carry oddities like:
+    //   { kind: "IntNotShortest",    detail: "value 15 uses 2-byte header, shortest is 1" }
+    //   { kind: "IndefiniteLength",  detail: "indefinite-length map" }
+    //   { kind: "MapKeysNotSorted",  detail: "key at offset 3 sorts after key at offset 5" }
+    //   { kind: "DuplicateMapKeys",  detail: "duplicate key at offsets 3 and 6" }
+    //   { kind: "BignumForSmallInt", detail: "unsigned bignum fits in a native CBOR integer" }
+} else {
+    // r.error: { kind, offset?, byte_span?, path, message }
+    //   kind       — machine-readable tag ("invalid_syntax", "unexpected_eof", ...).
+    //   offset     — byte where decoding stopped.
+    //   byte_span  — { offset, length } when the failure pins a range.
+    //   path       — structural location, e.g. "$.entries[1].value[0]".
+    // r.partial (optional) — same shape as a CborValue, but every unfinished
+    //   container carries `incomplete: true`, and partial map entries carry
+    //   `incomplete_at: "key" | "value"` on the half that didn't parse.
+}
 ```
+
+See `CborOddityKind` and `CborDecodeErrorKind` in the type definitions for the full lists.
+
+#### `validate_cddl(cddl: string): { valid: boolean, error?: object }`
+
+Parses a CDDL schema and reports whether it is well-formed. Beyond surface parse errors this also catches **dangling rule references** at parse time, surfaced as `kind: "unresolved_references"`.
+
+```typescript
+validate_cddl("thing = {n: uint}");
+// { valid: true }
+
+validate_cddl("thing = [unknown_rule, int]");
+// { valid: false, error: { kind: "unresolved_references",
+//                           message: "missing definition for rule unknown_rule" } }
+```
+
+`error.kind` values: `"parse_error"`, `"unresolved_references"`.
+
+#### `validate_cbor_against_cddl(cbor_hex: string, cddl: string, rule_name: string): { valid: boolean, error?: object }`
+
+Validates a CBOR payload against a specific rule in a CDDL schema. The rule does not have to be the first rule in the document — when it isn't, the validator wraps it in a synthetic root internally.
+
+```typescript
+validate_cbor_against_cddl("01", "thing = tstr", "thing");
+// {
+//   valid: false,
+//   error: {
+//     kind: "mismatch",
+//     expected: "tstr",
+//     path: "$",
+//     byte_spans: [{ offset: 0, length: 1 }],
+//     message: "expected type tstr, got Integer(Integer(1))"
+//   }
+// }
+```
+
+`error.kind` values: `"parse_error"`, `"unresolved_references"`, `"missing_rule"`, `"input_parse"`, `"mismatch"`, `"map_cut"`, `"generic"`. When multiple violations fire, the headline goes in the top-level fields and the rest land in `error.additional`.
+
+#### `decode_cbor_against_cddl(cbor_hex: string, cddl: string, rule_name: string): unknown`
+
+Walks the CDDL alongside the decoded CBOR and produces a JSON tree where positional/numeric-keyed structures are replaced with the names the schema declares. Useful for turning a Cardano transaction CBOR into something inspectable without hand-mapping every field.
+
+```typescript
+decode_cbor_against_cddl(txHex, conwayCddl, "transaction");
+// {
+//   transaction_body: {
+//     0: { "@tag": 258, "@value": [{ transaction_id: "16b6...", index: 0 }] },
+//     1: [{ address: "00ae...", amount: 1_000_000 }, ...],
+//     2: 200000,
+//     7: "bdaa..."
+//   },
+//   transaction_witness_set: {
+//     0: { "@tag": 258, "@value": [{ vkey: "f8f5...", signature: "1e14..." }] }
+//   },
+//   "@positional": [true, { "@tag": 259, "@value": {} }]
+// }
+```
+
+Recognised features: type choices (first match wins), generics (`set<a>`), tagged data (well-known tags 0/2/3 specialised to ISO date / bignum string), rule references, optionals/repetitions, prelude scalars. Sub-structures the schema doesn't cover or that don't match any choice fall back to a raw form under `@extra` (maps) or `@positional` (arrays) so data is never silently dropped.
 
 ### Plutus Script Decoder
 

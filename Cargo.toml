@@ -1,6 +1,6 @@
 [package]
 name = "cquisitor-lib"
-version = "0.1.0-beta.44"
+version = "0.1.0-beta.50"
 authors = ["Evgenii Lisitskii <evgeniilisitskii@gmail.com>"]
 edition = "2018"
 description = "Cardano transaction validation library"
@@ -37,12 +37,11 @@ console_error_panic_hook = { version = "0.1.6", optional = true }
 #
 # Unfortunately, `wee_alloc` requires nightly Rust when targeting wasm for now.
 wee_alloc = { version = "0.4.5", optional = true }
-cardano-serialization-lib = { version = "15.0.0-beta.1", features = [] }
+cardano-serialization-lib = { version = "15.0.3", features = [] }
 schemars = "0.9.0"
 serde = "1.0.217"
 serde_json = { version = "1.0.136", features = [] }
 hex = "0.4.3"
-minicbor = { package = "cquisitor-minicbor", version = "0.19.0", features = ["std", "half", "derive"] }
 cryptoxide = "0.4.4"
 uplc = "1.1.10"
 pallas-codec = "0.33.0"
@@ -55,21 +54,27 @@ itertools = { version = "0.14.0", features = [] }
 bs58 = "0.5.1"
 bech32 = "0.11.0"
 wasm-bindgen = "0.2.92"
-js-sys = "0.3.69"
+js-sys = "0.3.69"                                                                                               
+cddl = { version = "0.10.5", default-features = false, features = [
+    "std",
+    "json",
+    "cbor",
+    "ast-span",
+    "additional-controls",
+] }
+ciborium = "0.2.2"
+ciborium-io = "0.2.2"
+ciborium-ll = "0.2.2"
+
+[patch.crates-io]
+cddl = { path = "../cddl" }
 
 [target.'cfg(not(all(target_arch = "wasm32", not(target_os = "emscripten"))))'.dependencies]
 noop_proc_macro = "0.3.0"
 
-
 [target.'cfg(all(target_arch = "wasm32", not(target_os = "emscripten")))'.dependencies]
-js-sys = "0.3.51"
 wasm-bindgen = { version = "0.2.92", features = ["serde-serialize"] }
-wasm-bindgen-futures = "0.4.40"
 serde-wasm-bindgen = "0.6.5"
-
-
-[dev-dependencies]
-wasm-bindgen-test = "0.3.13"
 
 [profile.release]
 # Tell `rustc` to optimize for small code size.

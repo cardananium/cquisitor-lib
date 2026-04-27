@@ -2,34 +2,7 @@
 
 import fs from 'fs';
 import path from 'path';
-import { fileURLToPath } from 'url';
 import { compile } from 'json-schema-to-typescript';
-
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-
-/**
- * Generate export function declarations for parsing/serialization
- */
-function generateExportDeclarations(name) {
-    return `
-/**
- * Parse ${name} from JSON string
- */
-export declare function parse${name}(jsonString: string): ${name};
-
-/**
- * Validate and parse ${name} from JSON string with runtime checking
- */
-export declare function parseSafe${name}(jsonString: string): ${name};
-
-/**
- * Serialize ${name} to JSON string
- */
-export declare function stringify${name}(data: ${name}): string;
-
-`;
-}
 
 /**
  * Extract all field paths that should be bigint from a schema based on format
@@ -139,10 +112,12 @@ function convertToBigInt(content, allSchemas) {
 }
 
 /**
- * Normalize a type definition by removing comments and whitespace for comparison
+ * Normalize a type definition by removing comments and whitespace for comparison.
+ * Also sorts top-level `|` union members so `"A" | "B"` and `"B" | "A"` compare
+ * equal — these are semantically identical TypeScript types.
  */
 function normalizeTypeDefinition(typeDef) {
-    return typeDef
+    const flat = typeDef
         .replace(/\/\*\*[\s\S]*?\*\//g, '') // Remove comments
         .replace(/\/\*[\s\S]*?\*\//g, '')   // Remove single-line comments
         .replace(/\s+/g, ' ')               // Normalize whitespace
@@ -150,6 +125,98 @@ function normalizeTypeDefinition(typeDef) {
         .replace(/\s*:\s*/g, ':')           // Remove spaces around colons
         .replace(/\s*\?\s*/g, '?')          // Remove spaces around question marks
         .trim();
+
+    return sortTopLevelUnions(flat);
+}
+
+/**
+ * Walk `input` and sort members of every top-level `|`-union so that member
+ * order doesn't affect equality. Tracks nesting depth and string state so
+ * unions inside objects/tuples are independently sorted too.
+ */
+function sortTopLevelUnions(input) {
+    const parts = splitTopLevelUnion(input);
+    if (parts.length <= 1) {
+        return transformNestedUnions(input);
+    }
+    const sortedParts = parts
+        .map(transformNestedUnions)
+        .slice()
+        .sort();
+    return sortedParts.join('|');
+}
+
+/**
+ * Split on top-level `|` only (not inside (), [], {}, <>, or strings).
+ */
+function splitTopLevelUnion(input) {
+    const parts = [];
+    let depth = 0;
+    let inString = false;
+    let stringChar = '';
+    let current = '';
+    for (let i = 0; i < input.length; i++) {
+        const ch = input[i];
+        const prev = i > 0 ? input[i - 1] : '';
+        if ((ch === '"' || ch === "'") && prev !== '\\') {
+            if (!inString) { inString = true; stringChar = ch; }
+            else if (ch === stringChar) { inString = false; }
+        }
+        if (!inString) {
+            if (ch === '(' || ch === '[' || ch === '{' || ch === '<') depth++;
+            else if (ch === ')' || ch === ']' || ch === '}' || ch === '>') depth--;
+            else if (ch === '|' && depth === 0) {
+                parts.push(current);
+                current = '';
+                continue;
+            }
+        }
+        current += ch;
+    }
+    parts.push(current);
+    return parts;
+}
+
+/**
+ * Recurse into object/array bracket groups and sort unions found inside.
+ */
+function transformNestedUnions(input) {
+    // Replace each {...}, [...], (...) body with a version whose inner unions
+    // are themselves sorted. Simple depth-tracking recursive scan.
+    let result = '';
+    let i = 0;
+    while (i < input.length) {
+        const ch = input[i];
+        if (ch === '{' || ch === '[' || ch === '(') {
+            const open = ch;
+            const close = open === '{' ? '}' : open === '[' ? ']' : ')';
+            let depth = 1;
+            let j = i + 1;
+            let inString = false;
+            let stringChar = '';
+            while (j < input.length && depth > 0) {
+                const c = input[j];
+                const p = input[j - 1];
+                if ((c === '"' || c === "'") && p !== '\\') {
+                    if (!inString) { inString = true; stringChar = c; }
+                    else if (c === stringChar) { inString = false; }
+                }
+                if (!inString) {
+                    if (c === open) depth++;
+                    else if (c === close) depth--;
+                }
+                if (depth === 0) break;
+                j++;
+            }
+            const inner = input.slice(i + 1, j);
+            result += open + sortTopLevelUnions(inner) + close;
+            i = j + 1;
+        } else {
+            result += ch;
+            i++;
+        }
+    }
+    return result;
 }
 
 /**
@@ -360,6 +427,47 @@ function findDuplicateTypes(typeMap) {
 }
 
 /**
+ * Scan a TypeScript source for types declared under the same name with
+ * *different* bodies. Identical repeats are tolerated silently (the caller's
+ * dedup pass handles those), but a real collision is a correctness bug —
+ * usually caused by the Rust side producing a type that shadows a hand-written
+ * one. We throw with a readable diff so the drift is caught immediately.
+ */
+function assertNoNameConflicts(content, label) {
+    const typeMap = extractTypeDefinitions(content);
+    const conflicts = [];
+    typeMap.forEach((info, name) => {
+        const bodies = new Map(); // normalizedDefinition -> count
+        for (const occurrence of info.allOccurrences || [info]) {
+            const key = occurrence.kind + '|' + occurrence.normalizedDefinition;
+            bodies.set(key, (bodies.get(key) || 0) + 1);
+        }
+        if (bodies.size > 1) {
+            conflicts.push({ name, variants: [...bodies.keys()] });
+        }
+    });
+
+    if (conflicts.length === 0) {
+        return;
+    }
+
+    console.error(`❌ ${label}: same-name / different-body type conflicts detected:`);
+    for (const { name, variants } of conflicts) {
+        console.error(`  - ${name} has ${variants.length} distinct bodies:`);
+        variants.forEach((v, i) => {
+            const [kind, body] = v.split('|');
+            const snippet = body.length > 160 ? body.slice(0, 160) + '…' : body;
+            console.error(`      [${i + 1}] ${kind}: ${snippet}`);
+        });
+    }
+    throw new Error(
+        `Type-name conflicts in ${label}. Align the Rust types (src/common.rs, ` +
+        `input_contexts, etc.) or remove the hand-written copy so one name maps ` +
+        `to one definition.`
+    );
+}
+
+/**
  * Remove duplicate type definitions and replace references
  */
 function deduplicateTypes(content) {
@@ -425,21 +533,17 @@ function deduplicateTypes(content) {
 }
 
 /**
- * Generate all types in a single .ts file using json-schema-to-typescript
+ * Compile the schemas into a TypeScript type body. The returned string
+ * contains only `export ...` declarations — no banner comment — so the caller
+ * can prepend whatever header each target file needs.
  */
-async function generateTypesFile(allSchemas, outputPath) {
+async function generateTypesBody(allSchemas) {
     const mainTypes = Object.keys(allSchemas);
-    
-    console.log(`📝 Generating .ts file with ${mainTypes.length} main types`);
-    
-    let content = `// Auto-generated TypeScript types from JSON schemas
-// Generated at: ${new Date().toISOString()}
-//
-// This file contains exported TypeScript types that can be imported in other modules.
-// Large integers (uint64, int64) are represented as bigint for safe handling.
 
-`;
-    
+    console.log(`📝 Generating type body with ${mainTypes.length} main types`);
+
+    let content = '';
+
     // Process each schema with json-schema-to-typescript
     for (const [typeName, schema] of Object.entries(allSchemas)) {
         try {
@@ -491,12 +595,7 @@ async function generateTypesFile(allSchemas, outputPath) {
     
     // Remove duplicate type definitions and replace references
     content = deduplicateTypes(content);
-    
-    // // Generate function declarations for each main type
-    // mainTypes.forEach(typeName => {
-    //     content += generateExportDeclarations(typeName);
-    // });
-    
+
     return content;
 }
 
@@ -515,29 +614,34 @@ async function main() {
         fs.mkdirSync(outputDir, { recursive: true });
     }
     
-    // Schema files to process
-    const schemaFiles = [
-        'NecessaryInputData.schema.json',
-        'ValidationResult.schema.json',
-        'ValidationInputContext.schema.json'
-    ];
-    
-    // Load all schemas
+    // Discover every *.schema.json in the input directory. The Rust side
+    // (src/schema_generator.rs) is the single source of truth for which
+    // schemas exist — adding a new `schema_for!(...)` there is enough.
+    if (!fs.existsSync(schemasDir)) {
+        console.error(`❌ Schemas directory not found: ${schemasDir}`);
+        process.exit(1);
+    }
+
+    const schemaFiles = fs
+        .readdirSync(schemasDir)
+        .filter(name => name.endsWith('.schema.json'))
+        .sort();
+
+    if (schemaFiles.length === 0) {
+        console.error(`❌ No *.schema.json files in ${schemasDir}. Run generate-schemas first.`);
+        process.exit(1);
+    }
+
     const allSchemas = {};
     schemaFiles.forEach(filename => {
         const schemaPath = path.join(schemasDir, filename);
-        if (fs.existsSync(schemaPath)) {
-            try {
-                const schemaContent = fs.readFileSync(schemaPath, 'utf8');
-                const schema = JSON.parse(schemaContent);
-                const typeName = filename.replace('.schema.json', '');
-                allSchemas[typeName] = schema;
-                console.log(`📋 Loaded schema for ${typeName}`);
-            } catch (error) {
-                console.warn(`⚠️  Failed to load schema ${filename}: ${error.message}`);
-            }
-        } else {
-            console.warn(`⚠️  Schema file not found: ${schemaPath}`);
+        try {
+            const schema = JSON.parse(fs.readFileSync(schemaPath, 'utf8'));
+            const typeName = filename.replace('.schema.json', '');
+            allSchemas[typeName] = schema;
+            console.log(`📋 Loaded schema for ${typeName}`);
+        } catch (error) {
+            console.warn(`⚠️  Failed to load schema ${filename}: ${error.message}`);
         }
     });
     
@@ -547,15 +651,47 @@ async function main() {
     }
     
     try {
-        // Generate single combined .ts file
-        const tsFilePath = path.join(outputDir, 'index.ts');
-        const tsFileContent = await generateTypesFile(allSchemas, tsFilePath);
-        
-        fs.writeFileSync(tsFilePath, tsFileContent);
-        console.log(`✅ Generated .ts file: ${tsFilePath}`);
-        
-        console.log('\n🎉 TypeScript type file generation completed!');
-        console.log(`📁 Generated file: ${tsFilePath}`);
+        const typesBody = await generateTypesBody(allSchemas);
+
+        // 1. Standalone importable module: types/index.ts
+        const indexBanner = `// Auto-generated TypeScript types from JSON schemas
+// Generated at: ${new Date().toISOString()}
+//
+// This file contains exported TypeScript types that can be imported in other modules.
+// Large integers (uint64, int64) are represented as bigint for safe handling.
+
+`;
+        const indexPath = path.join(outputDir, 'index.ts');
+        fs.writeFileSync(indexPath, indexBanner + typesBody);
+        console.log(`✅ Generated: ${indexPath}`);
+
+        // 2. Splice the same body into the hand-maintained d.ts, replacing
+        //    everything after the `///AUTOGENERATED` marker. If either the
+        //    file or the marker is missing we leave a clear warning rather
+        //    than silently overwriting the hand-written half.
+        const dtsPath = path.join(outputDir, 'cquisitor_lib.d.ts');
+        if (fs.existsSync(dtsPath)) {
+            const marker = '///AUTOGENERATED';
+            const existing = fs.readFileSync(dtsPath, 'utf8');
+            const markerIndex = existing.indexOf(marker);
+            if (markerIndex === -1) {
+                console.warn(
+                    `⚠️  Skipped ${dtsPath}: marker '${marker}' not found. ` +
+                    `Add it on its own line below the hand-written section so ` +
+                    `future runs can refresh the generated types.`
+                );
+            } else {
+                const head = existing.slice(0, markerIndex + marker.length);
+                const updated = `${head}\n${typesBody}`;
+                assertNoNameConflicts(updated, dtsPath);
+                fs.writeFileSync(dtsPath, updated);
+                console.log(`✅ Refreshed autogenerated section of: ${dtsPath}`);
+            }
+        } else {
+            console.warn(`⚠️  ${dtsPath} not found; skipping d.ts refresh.`);
+        }
+
+        console.log('\n🎉 TypeScript type generation completed!');
         console.log('\nUsage example:');
         console.log("  import { ValidationResult, NecessaryInputData } from './types/index.js';");
     } catch (error) {

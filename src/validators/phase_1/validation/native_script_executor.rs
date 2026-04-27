@@ -31,20 +31,20 @@ impl<'a> NativeScriptExecutor<'a> {
                 self.execute_pubkey_script(script.as_script_pubkey().ok_or("ScriptPubkey is None")?)
             }
             csl::NativeScriptKind::ScriptAll => {
-                self.execute_all_script(self.script.as_script_all().ok_or("ScriptAll is None")?)
+                self.execute_all_script(script.as_script_all().ok_or("ScriptAll is None")?)
             }
             csl::NativeScriptKind::ScriptAny => {
-                self.execute_any_script(self.script.as_script_any().ok_or("ScriptAny is None")?)
+                self.execute_any_script(script.as_script_any().ok_or("ScriptAny is None")?)
             }
             csl::NativeScriptKind::ScriptNOfK => self
-                .execute_nofk_script(self.script.as_script_n_of_k().ok_or("ScriptNOfK is None")?),
+                .execute_nofk_script(script.as_script_n_of_k().ok_or("ScriptNOfK is None")?),
             csl::NativeScriptKind::TimelockStart => self.execute_invalid_before_script(
-                self.script
+                script
                     .as_timelock_start()
                     .ok_or("TimelockStart is None")?,
             ),
             csl::NativeScriptKind::TimelockExpiry => self.execute_invalid_hereafter_script(
-                self.script
+                script
                     .as_timelock_expiry()
                     .ok_or("TimelockExpiry is None")?,
             ),

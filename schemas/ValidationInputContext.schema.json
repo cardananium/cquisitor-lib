@@ -1,0 +1,651 @@
+{
+  "$defs": {
+    "AccountInputContext": {
+      "properties": {
+        "balance": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "bech32Address": {
+          "type": "string"
+        },
+        "delegatedToDrep": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "delegatedToPool": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "isRegistered": {
+          "type": "boolean"
+        },
+        "payedDeposit": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "bech32Address",
+        "isRegistered"
+      ],
+      "type": "object"
+    },
+    "Asset": {
+      "properties": {
+        "quantity": {
+          "type": "string"
+        },
+        "unit": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "unit",
+        "quantity"
+      ],
+      "type": "object"
+    },
+    "CommitteeInputContext": {
+      "properties": {
+        "committeeMemberCold": {
+          "$ref": "#/$defs/LocalCredential"
+        },
+        "committeeMemberHot": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/LocalCredential"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "isResigned": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "committeeMemberCold",
+        "isResigned"
+      ],
+      "type": "object"
+    },
+    "CostModels": {
+      "properties": {
+        "plutusV1": {
+          "items": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "plutusV2": {
+          "items": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "plutusV3": {
+          "items": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "DrepInputContext": {
+      "properties": {
+        "bech32Drep": {
+          "type": "string"
+        },
+        "isRegistered": {
+          "type": "boolean"
+        },
+        "payedDeposit": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "bech32Drep",
+        "isRegistered"
+      ],
+      "type": "object"
+    },
+    "ExUnitPrices": {
+      "properties": {
+        "memPrice": {
+          "$ref": "#/$defs/SubCoin"
+        },
+        "stepPrice": {
+          "$ref": "#/$defs/SubCoin"
+        }
+      },
+      "required": [
+        "memPrice",
+        "stepPrice"
+      ],
+      "type": "object"
+    },
+    "ExUnits": {
+      "properties": {
+        "mem": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "steps": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "mem",
+        "steps"
+      ],
+      "type": "object"
+    },
+    "GovActionInputContext": {
+      "properties": {
+        "actionId": {
+          "$ref": "#/$defs/GovernanceActionId"
+        },
+        "actionType": {
+          "$ref": "#/$defs/GovernanceActionType"
+        },
+        "isActive": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "actionId",
+        "actionType",
+        "isActive"
+      ],
+      "type": "object"
+    },
+    "GovernanceActionId": {
+      "properties": {
+        "index": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "txHash": {
+          "items": {
+            "format": "uint8",
+            "maximum": 255,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "txHash",
+        "index"
+      ],
+      "type": "object"
+    },
+    "GovernanceActionType": {
+      "enum": [
+        "parameterChangeAction",
+        "hardForkInitiationAction",
+        "treasuryWithdrawalsAction",
+        "noConfidenceAction",
+        "updateCommitteeAction",
+        "newConstitutionAction",
+        "infoAction"
+      ],
+      "type": "string"
+    },
+    "LocalCredential": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "keyHash": {
+              "items": {
+                "format": "uint8",
+                "maximum": 255,
+                "minimum": 0,
+                "type": "integer"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "keyHash"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "scriptHash": {
+              "items": {
+                "format": "uint8",
+                "maximum": 255,
+                "minimum": 0,
+                "type": "integer"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "scriptHash"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "NetworkType": {
+      "enum": [
+        "mainnet",
+        "preview",
+        "preprod"
+      ],
+      "type": "string"
+    },
+    "PoolInputContext": {
+      "properties": {
+        "isRegistered": {
+          "type": "boolean"
+        },
+        "poolId": {
+          "type": "string"
+        },
+        "retirementEpoch": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "poolId",
+        "isRegistered"
+      ],
+      "type": "object"
+    },
+    "ProtocolParameters": {
+      "properties": {
+        "adaPerUtxoByte": {
+          "description": "Cost per UTxO byte in lovelace",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "collateralPercentage": {
+          "description": "Percentage of transaction fee required as collateral",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "costModels": {
+          "$ref": "#/$defs/CostModels",
+          "description": "Cost models for Plutus script execution"
+        },
+        "drepDeposit": {
+          "description": "Deposit amount required for registering as a DRep",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "executionPrices": {
+          "$ref": "#/$defs/ExUnitPrices",
+          "description": "Price of execution units for script execution"
+        },
+        "governanceActionDeposit": {
+          "description": "Deposit amount required for submitting a governance action",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "maxBlockBodySize": {
+          "description": "Maximum block body size in bytes",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "maxBlockExecutionUnits": {
+          "$ref": "#/$defs/ExUnits",
+          "description": "Maximum execution units allowed for a block"
+        },
+        "maxBlockHeaderSize": {
+          "description": "Maximum block header size in bytes",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "maxCollateralInputs": {
+          "description": "Maximum number of collateral inputs",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "maxEpochForPoolRetirement": {
+          "description": "Maximum number of epochs that can be used for pool retirement ahead",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "maxTransactionSize": {
+          "description": "Maximum transaction size in bytes",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "maxTxExecutionUnits": {
+          "$ref": "#/$defs/ExUnits",
+          "description": "Maximum execution units allowed for a transaction"
+        },
+        "maxValueSize": {
+          "description": "Maximum size of a Value in bytes",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "minFeeCoefficientA": {
+          "description": "Linear factor for the minimum fee calculation formula",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "minFeeConstantB": {
+          "description": "Constant factor for the minimum fee calculation formula",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "minPoolCost": {
+          "description": "Minimum pool cost in lovelace",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "protocolVersion": {
+          "description": "Protocol version (major, minor)",
+          "maxItems": 2,
+          "minItems": 2,
+          "prefixItems": [
+            {
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            }
+          ],
+          "type": "array"
+        },
+        "referenceScriptCostPerByte": {
+          "$ref": "#/$defs/SubCoin",
+          "description": "Coins per byte for reference scripts"
+        },
+        "stakeKeyDeposit": {
+          "description": "Deposit amount required for registering a stake key",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "stakePoolDeposit": {
+          "description": "Deposit amount required for registering a stake pool",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "minFeeCoefficientA",
+        "minFeeConstantB",
+        "maxBlockBodySize",
+        "maxTransactionSize",
+        "maxBlockHeaderSize",
+        "stakeKeyDeposit",
+        "stakePoolDeposit",
+        "maxEpochForPoolRetirement",
+        "protocolVersion",
+        "minPoolCost",
+        "adaPerUtxoByte",
+        "costModels",
+        "executionPrices",
+        "maxTxExecutionUnits",
+        "maxBlockExecutionUnits",
+        "maxValueSize",
+        "collateralPercentage",
+        "maxCollateralInputs",
+        "governanceActionDeposit",
+        "drepDeposit",
+        "referenceScriptCostPerByte"
+      ],
+      "type": "object"
+    },
+    "SubCoin": {
+      "properties": {
+        "denominator": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "numerator": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "numerator",
+        "denominator"
+      ],
+      "type": "object"
+    },
+    "TxInput": {
+      "properties": {
+        "outputIndex": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "txHash": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "outputIndex",
+        "txHash"
+      ],
+      "type": "object"
+    },
+    "TxOutput": {
+      "properties": {
+        "address": {
+          "type": "string"
+        },
+        "amount": {
+          "items": {
+            "$ref": "#/$defs/Asset"
+          },
+          "type": "array"
+        },
+        "dataHash": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "plutusData": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "scriptHash": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "scriptRef": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "address",
+        "amount"
+      ],
+      "type": "object"
+    },
+    "UTxO": {
+      "properties": {
+        "input": {
+          "$ref": "#/$defs/TxInput"
+        },
+        "output": {
+          "$ref": "#/$defs/TxOutput"
+        }
+      },
+      "required": [
+        "input",
+        "output"
+      ],
+      "type": "object"
+    },
+    "UtxoInputContext": {
+      "properties": {
+        "isSpent": {
+          "type": "boolean"
+        },
+        "utxo": {
+          "$ref": "#/$defs/UTxO"
+        }
+      },
+      "required": [
+        "utxo",
+        "isSpent"
+      ],
+      "type": "object"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "properties": {
+    "accountContexts": {
+      "items": {
+        "$ref": "#/$defs/AccountInputContext"
+      },
+      "type": "array"
+    },
+    "currentCommitteeMembers": {
+      "items": {
+        "$ref": "#/$defs/CommitteeInputContext"
+      },
+      "type": "array"
+    },
+    "drepContexts": {
+      "items": {
+        "$ref": "#/$defs/DrepInputContext"
+      },
+      "type": "array"
+    },
+    "govActionContexts": {
+      "items": {
+        "$ref": "#/$defs/GovActionInputContext"
+      },
+      "type": "array"
+    },
+    "lastEnactedGovAction": {
+      "items": {
+        "$ref": "#/$defs/GovActionInputContext"
+      },
+      "type": "array"
+    },
+    "networkType": {
+      "$ref": "#/$defs/NetworkType"
+    },
+    "poolContexts": {
+      "items": {
+        "$ref": "#/$defs/PoolInputContext"
+      },
+      "type": "array"
+    },
+    "potentialCommitteeMembers": {
+      "items": {
+        "$ref": "#/$defs/CommitteeInputContext"
+      },
+      "type": "array"
+    },
+    "protocolParameters": {
+      "$ref": "#/$defs/ProtocolParameters"
+    },
+    "slot": {
+      "format": "uint64",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "treasuryValue": {
+      "format": "uint64",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "utxoSet": {
+      "items": {
+        "$ref": "#/$defs/UtxoInputContext"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "utxoSet",
+    "protocolParameters",
+    "slot",
+    "accountContexts",
+    "drepContexts",
+    "poolContexts",
+    "govActionContexts",
+    "lastEnactedGovAction",
+    "currentCommitteeMembers",
+    "potentialCommitteeMembers",
+    "treasuryValue",
+    "networkType"
+  ],
+  "title": "ValidationInputContext",
+  "type": "object"
+}

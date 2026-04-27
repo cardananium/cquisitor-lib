@@ -2,7 +2,7 @@ use crate::{
     common::TxInput,
     js_error::JsError,
     validators::{
-        helpers::normalize_script_ref,
+        helpers::reference_script_size,
         input_contexts::{UtxoInputContext, ValidationInputContext},
         phase_1::errors::{
             Phase1Error, Phase1Warning, ValidationPhase1Error, ValidationPhase1Warning,
@@ -284,7 +284,9 @@ fn collect_utxos<'a>(
     let inputs = tx_body.inputs();
     let mut input_utxos: HashSet<&'a UtxoInputContext> = inputs
         .into_iter()
-        .map(|input| validation_input_context.find_utxo(input.to_hex(), input.index()))
+        .map(|input| {
+            validation_input_context.find_utxo(input.transaction_id().to_hex(), input.index())
+        })
         .filter_map(|utxo| utxo)
         .collect();
 
@@ -292,7 +294,9 @@ fn collect_utxos<'a>(
     let ref_utxos: Vec<&'a UtxoInputContext> = ref_inputs
         .unwrap_or(csl::TransactionInputs::new())
         .into_iter()
-        .map(|input| validation_input_context.find_utxo(input.to_hex(), input.index()))
+        .map(|input| {
+            validation_input_context.find_utxo(input.transaction_id().to_hex(), input.index())
+        })
         .filter_map(|utxo| utxo)
         .collect();
 
@@ -303,14 +307,12 @@ fn collect_utxos<'a>(
 fn calculate_total_reference_scripts_size(
     utxos: &HashSet<&UtxoInputContext>,
 ) -> Result<u64, String> {
+    // Matches cardano-ledger Conway/UTxO.hs::txNonDistinctRefScriptsSize —
+    // uses the inner script's originalBytes, not the wrapped ScriptRef CBOR.
     let mut total_size = 0u64;
     for utxo in utxos.iter() {
-        if utxo.utxo.output.script_ref.is_some() {
-            if let Some(script_ref) = &utxo.utxo.output.script_ref {
-                let normalized_script_ref = normalize_script_ref(script_ref)?;
-                let script_ref_size = normalized_script_ref.to_unwrapped_bytes().len() as u64;
-                total_size += script_ref_size;
-            }
+        if let Some(script_ref) = &utxo.utxo.output.script_ref {
+            total_size += reference_script_size(script_ref)?;
         }
     }
     Ok(total_size)

@@ -7,8 +7,9 @@ use crate::validators::input_contexts::NecessaryInputData;
 use crate::validators::input_contexts::ValidationInputContext;
 use crate::validators::phase_1::validation::fee::FeeValidator;
 use crate::validators::phase_1::validation::{
-    AuxiliaryDataValidator, BalanceValidator, CollateralValidator, OutputValidator,
-    RegistrationValidator, TransactionLimitsValidator, WitnessValidator,
+    AuxiliaryDataValidator, BalanceValidator, CollateralValidator, GovernanceValidator,
+    NetworkValidator, OutputValidator, RegistrationValidator, TransactionLimitsValidator,
+    WitnessValidator,
 };
 use crate::validators::phase_2;
 use crate::validators::validation_result::ValidationResult;
@@ -479,6 +480,16 @@ pub fn validate_transaction(
         TransactionLimitsValidator::new(tx_size, &tx_body, &tx_witness_set, &validation_context)?;
     let transaction_limits_result = transaction_limits_context.validate();
     overall_result.append(transaction_limits_result);
+
+    // 8a. Network-id validation
+    let network_context = NetworkValidator::new(&tx_body, &validation_context);
+    let network_result = network_context.validate();
+    overall_result.append(network_result);
+
+    // 8b. Governance / votes / proposals validation
+    let governance_context = GovernanceValidator::new(&tx_body, &validation_context);
+    let governance_result = governance_context.validate(&tx_body, &validation_context);
+    overall_result.append(governance_result);
 
     // 9. Votes validation
 

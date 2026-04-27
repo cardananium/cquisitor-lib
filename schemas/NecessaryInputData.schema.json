@@ -1,0 +1,159 @@
+{
+  "$defs": {
+    "GovernanceActionId": {
+      "properties": {
+        "index": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "txHash": {
+          "items": {
+            "format": "uint8",
+            "maximum": 255,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "txHash",
+        "index"
+      ],
+      "type": "object"
+    },
+    "GovernanceActionType": {
+      "enum": [
+        "parameterChangeAction",
+        "hardForkInitiationAction",
+        "treasuryWithdrawalsAction",
+        "noConfidenceAction",
+        "updateCommitteeAction",
+        "newConstitutionAction",
+        "infoAction"
+      ],
+      "type": "string"
+    },
+    "LocalCredential": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "keyHash": {
+              "items": {
+                "format": "uint8",
+                "maximum": 255,
+                "minimum": 0,
+                "type": "integer"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "keyHash"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "scriptHash": {
+              "items": {
+                "format": "uint8",
+                "maximum": 255,
+                "minimum": 0,
+                "type": "integer"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "scriptHash"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "TxInput": {
+      "properties": {
+        "outputIndex": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "txHash": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "outputIndex",
+        "txHash"
+      ],
+      "type": "object"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "properties": {
+    "accounts": {
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "committeeMembersCold": {
+      "items": {
+        "$ref": "#/$defs/LocalCredential"
+      },
+      "type": "array"
+    },
+    "committeeMembersHot": {
+      "items": {
+        "$ref": "#/$defs/LocalCredential"
+      },
+      "type": "array"
+    },
+    "dReps": {
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "govActions": {
+      "items": {
+        "$ref": "#/$defs/GovernanceActionId"
+      },
+      "type": "array"
+    },
+    "lastEnactedGovAction": {
+      "items": {
+        "$ref": "#/$defs/GovernanceActionType"
+      },
+      "type": "array"
+    },
+    "pools": {
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "utxos": {
+      "items": {
+        "$ref": "#/$defs/TxInput"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "utxos",
+    "accounts",
+    "pools",
+    "dReps",
+    "govActions",
+    "lastEnactedGovAction",
+    "committeeMembersCold",
+    "committeeMembersHot"
+  ],
+  "title": "NecessaryInputData",
+  "type": "object"
+}

@@ -1,5 +1,5 @@
 use anyhow::{anyhow, Result};
-use pallas_codec::minicbor as minicbor;
+use pallas_codec::minicbor;
 
 #[derive(Debug, Clone, Copy)]
 pub enum OutputEncoding {
@@ -8,10 +8,15 @@ pub enum OutputEncoding {
     PurePlutusScriptBytes,
 }
 
-static SUPPORTED_PLUTUS_VERSIONS: &[[u8; 3]] = &[
+// Known leading bytes for supported Plutus core versions.
+const SUPPORTED_PLUTUS_VERSIONS: &[[u8; 3]] = &[
     [1, 0, 0], // Plutus V1
     [1, 1, 0], // Plutus V3
 ];
+
+// Scripts in the wild are occasionally wrapped in CBOR byte strings several
+// times; unwrap up to this many layers before giving up.
+const MAX_CBOR_UNWRAP_DEPTH: usize = 10;
 
 pub fn normalize_plutus_script(
     plutus_script: &[u8],
@@ -26,27 +31,30 @@ pub fn normalize_plutus_script_with_core_version(
     encoding: OutputEncoding,
 ) -> Result<(Vec<u8>, [u8; 3])> {
     let pure_plutus_bytes = get_pure_plutus_bytes(plutus_script)?;
+    let core_version = [
+        pure_plutus_bytes[0],
+        pure_plutus_bytes[1],
+        pure_plutus_bytes[2],
+    ];
     let encoded_bytes = apply_encoding(&pure_plutus_bytes, encoding)?;
-    let core_version = [pure_plutus_bytes[0], pure_plutus_bytes[1], pure_plutus_bytes[2]];
     Ok((encoded_bytes, core_version))
 }
 
 fn get_pure_plutus_bytes(plutus_script: &[u8]) -> Result<Vec<u8>> {
-    let mut unwrapped_script = plutus_script.to_vec();
+    let mut unwrapped = plutus_script.to_vec();
 
-    for _ in 0..10 {
-        if has_supported_plutus_version(&unwrapped_script) {
-            return Ok(unwrapped_script);
+    for _ in 0..MAX_CBOR_UNWRAP_DEPTH {
+        if has_supported_plutus_version(&unwrapped) {
+            return Ok(unwrapped);
         }
-        // Try to parse as CBOR "bytes" (major type 2)
-        match try_decode_cbor_bytes(&unwrapped_script) {
-            Ok(inner) => unwrapped_script = inner,
+        match try_decode_cbor_bytes(&unwrapped) {
+            Ok(inner) => unwrapped = inner,
             Err(_) => break,
         }
     }
 
-    if has_supported_plutus_version(&unwrapped_script) {
-        Ok(unwrapped_script)
+    if has_supported_plutus_version(&unwrapped) {
+        Ok(unwrapped)
     } else {
         Err(anyhow!(
             "Unsupported Plutus version or invalid Plutus script bytes"
@@ -59,9 +67,7 @@ fn has_supported_plutus_version(plutus_script: &[u8]) -> bool {
         return false;
     }
     let version = [plutus_script[0], plutus_script[1], plutus_script[2]];
-    SUPPORTED_PLUTUS_VERSIONS
-        .iter()
-        .any(|&v| v == version)
+    SUPPORTED_PLUTUS_VERSIONS.iter().any(|v| v == &version)
 }
 
 fn try_decode_cbor_bytes(input: &[u8]) -> Result<Vec<u8>> {
@@ -73,17 +79,17 @@ fn try_decode_cbor_bytes(input: &[u8]) -> Result<Vec<u8>> {
 #[derive(Debug)]
 struct ByteWrapper(Vec<u8>);
 
-
-impl<'b, C> minicbor::Decode<'b, C> for ByteWrapper
-{
-    fn decode(d: &mut minicbor::Decoder<'b>, _ctx: &mut C) -> std::result::Result<Self, minicbor::decode::Error> {
+impl<'b, C> minicbor::Decode<'b, C> for ByteWrapper {
+    fn decode(
+        d: &mut minicbor::Decoder<'b>,
+        _ctx: &mut C,
+    ) -> std::result::Result<Self, minicbor::decode::Error> {
         let cbor = d.bytes()?;
         Ok(ByteWrapper(cbor.to_vec()))
     }
 }
 
-impl<C> minicbor::Encode<C> for ByteWrapper
-{
+impl<C> minicbor::Encode<C> for ByteWrapper {
     fn encode<W: minicbor::encode::Write>(
         &self,
         e: &mut minicbor::Encoder<W>,
@@ -106,7 +112,6 @@ fn apply_encoding(pure_plutus_script: &[u8], output_encoding: OutputEncoding) ->
 }
 
 fn apply_cbor_encoding(bytes: &[u8]) -> Result<Vec<u8>> {
-    let encoded = minicbor::to_vec(ByteWrapper(bytes.to_vec()))
-        .map_err(|e| anyhow!("Failed to encode CBOR bytes: {:?}", e))?;
-    Ok(encoded)
+    minicbor::to_vec(ByteWrapper(bytes.to_vec()))
+        .map_err(|e| anyhow!("Failed to encode CBOR bytes: {:?}", e))
 }

@@ -102,7 +102,96 @@ export function get_possible_types_for_input(input: string): (string)[];
  * @param {string} cbor_hex
  * @returns {any}
  */
-export function cbor_to_json(cbor_hex: string): CborValue;
+/**
+ * Decodes a CBOR hex string into a positional JSON tree.
+ *
+ * Never throws on malformed input — on failure returns
+ * `{ ok: false, error: CborDecodeError, partial? }`. Structured errors
+ * carry `kind`, `offset`, a `byte_span`, a semantic `path` into the
+ * failing position, and a human `message`.
+ *
+ * When anything was successfully decoded before the failure, `partial`
+ * contains the prefix tree with every un-finished container flagged
+ * `incomplete: true`. Node shape otherwise matches the success value, so
+ * renderers can display it the same way.
+ */
+export function cbor_to_json(cbor_hex: string): CborDecodeResult;
+
+export type CborDecodeResult =
+    | { ok: true; value: CborValue }
+    | { ok: false; error: CborDecodeError; partial?: CborPartialValue };
+
+export type CborDecodeErrorKind =
+    | "invalid_hex"
+    | "invalid_syntax"
+    | "unexpected_eof"
+    | "unexpected_break"
+    | "trailing_data"
+    | "invalid_utf8"
+    | "invalid_chunk"
+    | "int_not_representable"
+    | "non_finite_float"
+    | "io_error";
+
+export interface CborDecodeError {
+    kind: CborDecodeErrorKind;
+    /** Human-readable message. Not stable — use `kind` for branching. */
+    message: string;
+    /** Semantic path into the decoded tree (e.g. `$.entries[1].value[0]`). */
+    path: string;
+    /** Byte offset where decoding failed. Absent only for rare IO fallbacks. */
+    offset?: number;
+    /** Byte range pinned by the failure, when wider than a single byte. */
+    byte_span?: CborPosition;
+}
+
+/**
+ * Validates a CDDL schema. Returns `{ valid: true }` if the schema parses
+ * **and** every rule reference resolves; otherwise `{ valid: false, error }`.
+ * Undefined rule references come back with `kind: "unresolved_references"`
+ * (e.g. `thing = [unknown_rule, int]`).
+ * @param {string} cddl
+ * @returns {any}
+ */
+export function validate_cddl(cddl: string): CddlValidationResult;
+
+/**
+ * Validates CBOR bytes against a rule in the given CDDL schema. On failure
+ * `error` describes the mismatch, including a semantic `path`, the byte
+ * spans in the input that produced it, and (when several validation
+ * errors fire) an `additional` array with the rest.
+ * @param {string} cbor_hex
+ * @param {string} cddl
+ * @param {string} rule_name
+ * @returns {any}
+ */
+export function validate_cbor_against_cddl(
+    cbor_hex: string,
+    cddl: string,
+    rule_name: string
+): CborValidationResult;
+
+/**
+ * Maps decoded CBOR onto a CDDL schema and returns labelled JSON. Where
+ * `cbor_to_json` returns positional CBOR (numeric map keys, raw arrays),
+ * this walks the schema in parallel and replaces them with the named
+ * fields the CDDL declares — turning Cardano shapes like
+ * `[transaction_body, transaction_witness_set, bool, ...]` into
+ * `{transaction_body: {...}, transaction_witness_set: {...}, ...}`.
+ *
+ * Sub-structures the schema doesn't cover fall back to a raw
+ * representation (under `@extra` for maps / `@positional` for arrays),
+ * so partial matches still yield useful output.
+ * @param {string} cbor_hex
+ * @param {string} cddl
+ * @param {string} rule_name
+ * @returns {any}
+ */
+export function decode_cbor_against_cddl(
+    cbor_hex: string,
+    cddl: string,
+    rule_name: string
+): unknown;
 
 export function check_block_or_tx_signatures(hex_str: string): CheckSignaturesResult;
 
@@ -162,14 +251,51 @@ export type CborSimpleType =
     | "Undefined"
     | "Break";
 
-export interface CborSimple {
+/**
+ * Non-canonical / non-deterministic CBOR encoding flagged on a node. Kinds
+ * mirror deviations from RFC 8949 §4.1 ("Preferred Serialization") and §4.2
+ * ("Core Deterministic Encoding Requirements").
+ *
+ *  - `IntNotShortest`        — integer not encoded in shortest argument width (§4.2.1)
+ *  - `FloatNotShortest`      — float representable in a narrower IEEE-754 width (§4.1)
+ *  - `IndefiniteLength`      — indefinite-length bytes/text/array/map (§4.2.1)
+ *  - `MapKeysNotSorted`      — map keys not in bytewise lexicographic order (§4.2.1)
+ *  - `DuplicateMapKeys`      — duplicate encoded map keys (§5.6 / §4.2.1)
+ *  - `BignumForSmallInt`     — tag 2/3 wrapping a value that fits in a native int (§3.4.3)
+ *  - `BignumLeadingZeroes`   — bignum byte string has leading zero bytes (§3.4.3)
+ */
+export type CborOddityKind =
+    | "IntNotShortest"
+    | "FloatNotShortest"
+    | "IndefiniteLength"
+    | "MapKeysNotSorted"
+    | "DuplicateMapKeys"
+    | "BignumForSmallInt"
+    | "BignumLeadingZeroes";
+
+export interface CborOddity {
+    kind: CborOddityKind;
+    /** Human-readable context (actual value, position, narrowest alternative, ...). */
+    detail?: string;
+}
+
+/**
+ * Fields common to every CBOR node emitted by `cbor_to_json`.
+ * `oddities` is only present when at least one non-canonical form was detected
+ * on this specific node — canonical inputs omit it entirely.
+ */
+interface CborNodeBase {
+    oddities?: CborOddity[];
+}
+
+export interface CborSimple extends CborNodeBase {
     type: CborSimpleType;
     position_info: CborPosition;
     struct_position_info?: CborPosition;
     value: any;
 }
 
-export interface CborArray {
+export interface CborArray extends CborNodeBase {
     type: "Array";
     position_info: CborPosition;
     struct_position_info: CborPosition;
@@ -177,7 +303,7 @@ export interface CborArray {
     values: CborValue[]; // nested
 }
 
-export interface CborMap {
+export interface CborMap extends CborNodeBase {
     type: "Map";
     position_info: CborPosition;
     struct_position_info: CborPosition;
@@ -188,7 +314,7 @@ export interface CborMap {
     }[];
 }
 
-export interface CborTag {
+export interface CborTag extends CborNodeBase {
     type: "Tag";
     position_info: CborPosition;
     struct_position_info: CborPosition;
@@ -196,14 +322,14 @@ export interface CborTag {
     value: CborValue;
 }
 
-export interface CborIndefiniteString {
+export interface CborIndefiniteString extends CborNodeBase {
     type: "IndefiniteLengthString";
     position_info: CborPosition;
     struct_position_info: CborPosition;
     chunks: CborValue[];
 }
 
-export interface CborIndefiniteBytes {
+export interface CborIndefiniteBytes extends CborNodeBase {
     type: "IndefiniteLengthBytes";
     position_info: CborPosition;
     struct_position_info: CborPosition;
@@ -217,6 +343,95 @@ export type CborValue =
     | CborTag
     | CborIndefiniteString
     | CborIndefiniteBytes;
+
+/**
+ * Sub-tree returned alongside a decode error. Structurally identical to
+ * `CborValue`, with two additional flags present **only** on nodes that
+ * couldn't be finished:
+ *
+ *  - `incomplete: true` — on containers (Array / Map / Tag /
+ *    IndefiniteLengthBytes / IndefiniteLengthString) whose body was cut
+ *    short by the failure. For definite-length Array/Map the `items` field
+ *    retains the wire-declared count; `values.length` shows how many slots
+ *    actually decoded.
+ *  - `incomplete_at: "key" | "value"` — on the single map entry where
+ *    decoding stopped; at most one of `key` / `value` on that entry is
+ *    populated, indicating which half had been parsed before the failure.
+ */
+export type CborPartialValue =
+    | CborSimple
+    | CborPartialArray
+    | CborPartialMap
+    | CborPartialTag
+    | CborPartialIndefiniteString
+    | CborPartialIndefiniteBytes;
+
+export interface CborPartialArray extends Omit<CborArray, "values"> {
+    values: CborPartialValue[];
+    incomplete?: true;
+}
+
+export interface CborPartialMap extends Omit<CborMap, "values"> {
+    values: Array<CborPartialMapEntry | { key: CborValue; value: CborValue }>;
+    incomplete?: true;
+}
+
+export interface CborPartialMapEntry {
+    key?: CborPartialValue;
+    value?: CborPartialValue;
+    incomplete: true;
+    incomplete_at: "key" | "value";
+}
+
+export interface CborPartialTag extends Omit<CborTag, "value"> {
+    /** Absent when the inner item could not be parsed at all. */
+    value?: CborPartialValue;
+    incomplete?: true;
+}
+
+export interface CborPartialIndefiniteString
+    extends Omit<CborIndefiniteString, "chunks"> {
+    chunks: CborValue[];
+    incomplete?: true;
+}
+
+export interface CborPartialIndefiniteBytes
+    extends Omit<CborIndefiniteBytes, "chunks"> {
+    chunks: CborValue[];
+    incomplete?: true;
+}
+
+export type CddlValidationResult =
+    | { valid: true }
+    | { valid: false; error: CddlErrorInfo };
+
+export interface CddlErrorInfo {
+    kind: string;
+    message: string;
+}
+
+export type CborValidationResult =
+    | { valid: true }
+    | { valid: false; error: CborValidationErrorInfo };
+
+/**
+ * `kind` categorises the failure:
+ *  - "parse_error" — the CDDL itself failed to parse
+ *  - "unresolved_references" — the CDDL references a rule name that isn't defined
+ *  - "missing_rule" — the rule name passed to `validate_cbor_against_cddl` is not in the CDDL
+ *  - "input_parse" — the CBOR bytes themselves are malformed
+ *  - "mismatch" / "map_cut" — a data mismatch; inspect `expected`, `path`,
+ *    `byte_spans`, and `anchor_spans` for precise locations
+ *  - "generic" — anything that didn't fit one of the buckets above
+ */
+export interface CborValidationErrorInfo {
+    kind: string;
+    message: string;
+    expected?: string;
+    path?: string;
+    byte_spans?: CborPosition[];
+    anchor_spans?: CborPosition[];
+}
 
 export interface DecodingParams {
     plutus_script_version?: number;
@@ -236,15 +451,8 @@ export interface CheckSignaturesResult {
     invalidVkeyWitnesses: string[];
 }
 
-
-// The execution units object contains two numeric fields.
-export type ExUnits = {
-    steps: number;
-    mem: number;
-};
-
-// The redeemer tag is one of the following literal strings.
-export type RedeemerTag = "Spend" | "Mint" | "Cert" | "Reward" | "Propose" | "Vote";
+// RedeemerTag lives in the autogenerated block below (from Rust
+// validators::validation_result::RedeemerTag).
 
 // A successful redeemer evaluation contains the original execution units,
 // the calculated execution units, and additional redeemer info.
@@ -270,7 +478,6 @@ export type RedeemerResult = RedeemerSuccess | RedeemerError;
 
 // Type for the `execute_tx_scripts` response after JSON-parsing.
 export type ExecuteTxScriptsResult = RedeemerResult[];
-
 
 // The overall JSON produced by `to_json_program`:
 export interface ProgramJson {
@@ -477,38 +684,14 @@ export interface ArrayData {
     list: PlutusData[];
 }
 
-export interface Asset {
-    unit: string;
-    quantity: string;
-}
-
-export interface TxInput {
-    outputIndex: number;
-    txHash: string;
-}
-
-export interface TxOutput {
-    address: string;
-    amount: Asset[];
-    dataHash?: string;
-    plutusData?: string;
-    scriptRef?: string;
-    scriptHash?: string;
-}
-
-export interface UTxO {
-    input: TxInput;
-    output: TxOutput;
-}
-
-export interface CostModels {
-    plutusV1?: number[];
-    plutusV2?: number[];
-    plutusV3?: number[];
-}
-
+// Asset / TxInput / TxOutput / UTxO / CostModels / ExUnits are defined in the
+// autogenerated block below (they come from Rust types in src/common.rs via
+// schemars). Do NOT add hand-written copies here — `schema-to-ts.js` fails on
+// same-name collisions between the hand-written and autogenerated halves.
 
 ///AUTOGENERATED
+
+
 export interface NecessaryInputData {
   accounts: string[];
   committeeMembersCold: LocalCredential[];
@@ -518,6 +701,186 @@ export interface NecessaryInputData {
   lastEnactedGovAction: GovernanceActionType[];
   pools: string[];
   utxos: TxInput[];
+}
+
+export type GovernanceActionType =
+  | "parameterChangeAction"
+  | "hardForkInitiationAction"
+  | "treasuryWithdrawalsAction"
+  | "noConfidenceAction"
+  | "updateCommitteeAction"
+  | "newConstitutionAction"
+  | "infoAction";
+export type NetworkType = "mainnet" | "preview" | "preprod";
+
+export interface ValidationInputContext {
+  accountContexts: AccountInputContext[];
+  currentCommitteeMembers: CommitteeInputContext[];
+  drepContexts: DrepInputContext[];
+  govActionContexts: GovActionInputContext[];
+  lastEnactedGovAction: GovActionInputContext[];
+  networkType: NetworkType;
+  poolContexts: PoolInputContext[];
+  potentialCommitteeMembers: CommitteeInputContext[];
+  protocolParameters: ProtocolParameters;
+  slot: bigint;
+  treasuryValue: bigint;
+  utxoSet: UtxoInputContext[];
+}
+export interface AccountInputContext {
+  balance?: number | null;
+  bech32Address: string;
+  delegatedToDrep?: string | null;
+  delegatedToPool?: string | null;
+  isRegistered: boolean;
+  payedDeposit?: number | null;
+}
+export interface CommitteeInputContext {
+  committeeMemberCold: LocalCredential;
+  committeeMemberHot?: LocalCredential | null;
+  isResigned: boolean;
+}
+export interface DrepInputContext {
+  bech32Drep: string;
+  isRegistered: boolean;
+  payedDeposit?: number | null;
+}
+export interface GovActionInputContext {
+  actionId: GovernanceActionId;
+  actionType: GovernanceActionType;
+  isActive: boolean;
+}
+
+export interface PoolInputContext {
+  isRegistered: boolean;
+  poolId: string;
+  retirementEpoch?: number | null;
+}
+export interface ProtocolParameters {
+  /**
+   * Cost per UTxO byte in lovelace
+   */
+  adaPerUtxoByte: bigint;
+  /**
+   * Percentage of transaction fee required as collateral
+   */
+  collateralPercentage: number;
+  costModels: CostModels;
+  /**
+   * Deposit amount required for registering as a DRep
+   */
+  drepDeposit: bigint;
+  executionPrices: ExUnitPrices;
+  /**
+   * Deposit amount required for submitting a governance action
+   */
+  governanceActionDeposit: bigint;
+  /**
+   * Maximum block body size in bytes
+   */
+  maxBlockBodySize: number;
+  maxBlockExecutionUnits: ExUnits;
+  /**
+   * Maximum block header size in bytes
+   */
+  maxBlockHeaderSize: number;
+  /**
+   * Maximum number of collateral inputs
+   */
+  maxCollateralInputs: number;
+  /**
+   * Maximum number of epochs that can be used for pool retirement ahead
+   */
+  maxEpochForPoolRetirement: number;
+  /**
+   * Maximum transaction size in bytes
+   */
+  maxTransactionSize: number;
+  maxTxExecutionUnits: ExUnits;
+  /**
+   * Maximum size of a Value in bytes
+   */
+  maxValueSize: number;
+  /**
+   * Linear factor for the minimum fee calculation formula
+   */
+  minFeeCoefficientA: bigint;
+  /**
+   * Constant factor for the minimum fee calculation formula
+   */
+  minFeeConstantB: bigint;
+  /**
+   * Minimum pool cost in lovelace
+   */
+  minPoolCost: bigint;
+  /**
+   * Protocol version (major, minor)
+   *
+   * @minItems 2
+   * @maxItems 2
+   */
+  protocolVersion: [unknown, unknown];
+  referenceScriptCostPerByte: SubCoin;
+  /**
+   * Deposit amount required for registering a stake key
+   */
+  stakeKeyDeposit: bigint;
+  /**
+   * Deposit amount required for registering a stake pool
+   */
+  stakePoolDeposit: bigint;
+}
+/**
+ * Cost models for Plutus script execution
+ */
+export interface CostModels {
+  plutusV1?: number[] | null;
+  plutusV2?: number[] | null;
+  plutusV3?: number[] | null;
+}
+/**
+ * Price of execution units for script execution
+ */
+export interface ExUnitPrices {
+  memPrice: SubCoin;
+  stepPrice: SubCoin;
+}
+export interface SubCoin {
+  denominator: bigint;
+  numerator: bigint;
+}
+/**
+ * Maximum execution units allowed for a block
+ */
+
+/**
+ * Maximum execution units allowed for a transaction
+ */
+
+/**
+ * Coins per byte for reference scripts
+ */
+
+export interface UtxoInputContext {
+  isSpent: boolean;
+  utxo: UTxO;
+}
+export interface UTxO {
+  input: TxInput;
+  output: TxOutput;
+}
+
+export interface TxOutput {
+  address: string;
+  amount: Asset[];
+  dataHash?: string | null;
+  plutusData?: string | null;
+  scriptHash?: string | null;
+  scriptRef?: string | null;
+}
+export interface Asset {
+  quantity: string;
+  unit: string;
 }
 
 /**
@@ -763,6 +1126,12 @@ export type Phase1Error =
       DRepDeregistrationWrongRefund: {
         required_refund: number;
         supplied_refund: number;
+      };
+    }
+  | {
+      DelegateeDRepNotRegistered: {
+        cert_index: number;
+        drep_id: string;
       };
     }
   | {
@@ -1022,7 +1391,17 @@ export type Phase1Error =
         input: TxInput;
       };
     };
-
+export type LocalCredential =
+  | {
+      keyHash: number[];
+    }
+  | {
+      scriptHash: number[];
+    };
+export type RedeemerTag = "Mint" | "Spend" | "Cert" | "Propose" | "Vote" | "Reward";
+/**
+ * Phase 1 validation errors
+ */
 export type Phase2Error =
   | "NativeScriptIsReferencedByRedeemer"
   | {
@@ -1158,6 +1537,12 @@ export type Phase1Warning =
       };
     }
   | {
+      DelegationToRetiringPool: {
+        cert_index: number;
+        pool_id: string;
+      };
+    }
+  | {
       DuplicateRegistrationInTx: {
         cert_index: number;
         entity_id: string;
@@ -1193,7 +1578,10 @@ export interface ValidationPhase1Error {
 /**
  * The invalid input UTxO
  */
-
+export interface TxInput {
+  outputIndex: number;
+  txHash: string;
+}
 export interface FeeDecomposition {
   executionUnitsFee: bigint;
   referenceScriptsFee: bigint;
@@ -1211,7 +1599,10 @@ export interface ValidatorAsset {
   policy_id: string;
   quantity: number;
 }
-
+export interface GovernanceActionId {
+  index: bigint;
+  txHash: number[];
+}
 /**
  * The invalid governance action
  */
@@ -1311,7 +1702,10 @@ export interface EvalRedeemerResult {
   success: boolean;
   tag: RedeemerTag;
 }
-
+export interface ExUnits {
+  mem: bigint;
+  steps: bigint;
+}
 export interface ValidationPhase2Error {
   error: Phase2Error;
   error_message: string;
@@ -1331,157 +1725,3 @@ export interface ValidationPhase1Warning {
   warning_message: string;
 }
 
-export type LocalCredential =
-  | {
-      keyHash: number[];
-    }
-  | {
-      scriptHash: number[];
-    };
-export type GovernanceActionType =
-  | "parameterChangeAction"
-  | "hardForkInitiationAction"
-  | "treasuryWithdrawalsAction"
-  | "noConfidenceAction"
-  | "updateCommitteeAction"
-  | "newConstitutionAction"
-  | "infoAction";
-export type NetworkType = "mainnet" | "preview" | "preprod";
-
-export interface ValidationInputContext {
-  accountContexts: AccountInputContext[];
-  currentCommitteeMembers: CommitteeInputContext[];
-  drepContexts: DrepInputContext[];
-  govActionContexts: GovActionInputContext[];
-  lastEnactedGovAction: GovActionInputContext[];
-  networkType: NetworkType;
-  poolContexts: PoolInputContext[];
-  potentialCommitteeMembers: CommitteeInputContext[];
-  protocolParameters: ProtocolParameters;
-  slot: bigint;
-  treasuryValue: bigint;
-  utxoSet: UtxoInputContext[];
-}
-export interface AccountInputContext {
-  balance?: number | null;
-  bech32Address: string;
-  delegatedToDrep?: string | null;
-  delegatedToPool?: string | null;
-  isRegistered: boolean;
-  payedDeposit?: number | null;
-}
-export interface CommitteeInputContext {
-  committeeMemberCold: LocalCredential;
-  committeeMemberHot?: LocalCredential | null;
-  isResigned: boolean;
-}
-export interface DrepInputContext {
-  bech32Drep: string;
-  isRegistered: boolean;
-  payedDeposit?: number | null;
-}
-export interface GovActionInputContext {
-  actionId: GovernanceActionId;
-  actionType: GovernanceActionType;
-  isActive: boolean;
-}
-export interface GovernanceActionId {
-  index: bigint;
-  txHash: number[];
-}
-export interface PoolInputContext {
-  isRegistered: boolean;
-  poolId: string;
-  retirementEpoch?: number | null;
-}
-export interface ProtocolParameters {
-  /**
-   * Cost per UTxO byte in lovelace
-   */
-  adaPerUtxoByte: bigint;
-  /**
-   * Percentage of transaction fee required as collateral
-   */
-  collateralPercentage: number;
-  costModels: CostModels;
-  /**
-   * Deposit amount required for registering as a DRep
-   */
-  drepDeposit: bigint;
-  executionPrices: ExUnitPrices;
-  /**
-   * Deposit amount required for submitting a governance action
-   */
-  governanceActionDeposit: bigint;
-  /**
-   * Maximum block body size in bytes
-   */
-  maxBlockBodySize: number;
-  maxBlockExecutionUnits: ExUnits;
-  /**
-   * Maximum block header size in bytes
-   */
-  maxBlockHeaderSize: number;
-  /**
-   * Maximum number of collateral inputs
-   */
-  maxCollateralInputs: number;
-  /**
-   * Maximum number of epochs that can be used for pool retirement ahead
-   */
-  maxEpochForPoolRetirement: number;
-  /**
-   * Maximum transaction size in bytes
-   */
-  maxTransactionSize: number;
-  maxTxExecutionUnits: ExUnits;
-  /**
-   * Maximum size of a Value in bytes
-   */
-  maxValueSize: number;
-  /**
-   * Linear factor for the minimum fee calculation formula
-   */
-  minFeeCoefficientA: bigint;
-  /**
-   * Constant factor for the minimum fee calculation formula
-   */
-  minFeeConstantB: bigint;
-  /**
-   * Minimum pool cost in lovelace
-   */
-  minPoolCost: bigint;
-  /**
-   * Protocol version (major, minor)
-   *
-   * @minItems 2
-   * @maxItems 2
-   */
-  protocolVersion: [unknown, unknown];
-  referenceScriptCostPerByte: SubCoin;
-  /**
-   * Deposit amount required for registering a stake key
-   */
-  stakeKeyDeposit: bigint;
-  /**
-   * Deposit amount required for registering a stake pool
-   */
-  stakePoolDeposit: bigint;
-}
-
-/**
- * Price of execution units for script execution
- */
-export interface ExUnitPrices {
-  memPrice: SubCoin;
-  stepPrice: SubCoin;
-}
-export interface SubCoin {
-  denominator: bigint;
-  numerator: bigint;
-}
-
-export interface UtxoInputContext {
-  isSpent: boolean;
-  utxo: UTxO;
-}

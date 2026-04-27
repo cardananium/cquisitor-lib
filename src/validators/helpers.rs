@@ -80,3 +80,26 @@ pub fn normalize_script_ref_raw(
 ) -> Result<Vec<u8>, String> {
     normalize_script_ref(script_ref).map(|script_ref| script_ref.to_bytes())
 }
+
+/// Return the "originalBytes size" of a reference script, matching
+/// cardano-ledger's `originalBytesSize Script` used by both the min-fee and
+/// the 200 KiB refScriptsSize limit (`Conway/UTxO.hs::txNonDistinctRefScriptsSize`).
+///
+/// Specifically:
+/// * **Plutus** → length of the raw UPLC binary (no CBOR array wrapper, no
+///   language tag). Matches `originalBytes (PlutusBinary bs) = bs`.
+/// * **Native** → length of the native script's CBOR. Matches Timelock's
+///   MemoBytes-backed `originalBytes`.
+///
+/// In particular this is strictly less than `ScriptRef::to_unwrapped_bytes()`,
+/// which includes the `[language_tag, script_bytes]` array overhead.
+pub fn reference_script_size(script_ref_hex: &String) -> Result<u64, String> {
+    let script_ref = normalize_script_ref(script_ref_hex)?;
+    if let Some(native) = script_ref.native_script() {
+        Ok(native.to_bytes().len() as u64)
+    } else if let Some(plutus) = script_ref.plutus_script() {
+        Ok(plutus.bytes().len() as u64)
+    } else {
+        Ok(0)
+    }
+}

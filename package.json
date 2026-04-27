@@ -18,10 +18,11 @@
     "rust:build-wasm:browser": "rimraf ./pkg/browser && WASM_BINDGEN_WEAKREF=1 wasm-pack build --target browser --out-dir pkg/browser",
     "rust:build-wasm": "npm run rust:build-wasm:node && npm run rust:build-wasm:browser",
     "postbuild": "./post-build.sh",
-    "build-all": "npm run clean && npm run rust:build-wasm && npm run postbuild",
-    "generate-dts": "./generate-types.sh",
+    "build-all": "npm run clean && npm run generate-dts && npm run rust:build-wasm && npm run postbuild",
     "generate-schemas": "cargo run --bin generate_schemas schemas",
-    "schemas-to-dts": "node schema-to-ts.js schemas types"
+    "schemas-to-dts": "node schema-to-ts.js schemas types",
+    "generate-dts": "npm run generate-schemas && npm run schemas-to-dts",
+    "generate-decoders": "ts-node --esm generator.ts"
   },
   "keywords": [],
   "author": "Evgenii Lisitskii",

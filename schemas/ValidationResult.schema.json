@@ -1,0 +1,3143 @@
+{
+  "$defs": {
+    "EvalRedeemerResult": {
+      "properties": {
+        "calculated_ex_units": {
+          "$ref": "#/$defs/ExUnits"
+        },
+        "error": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "index": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "logs": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "provided_ex_units": {
+          "$ref": "#/$defs/ExUnits"
+        },
+        "success": {
+          "type": "boolean"
+        },
+        "tag": {
+          "$ref": "#/$defs/RedeemerTag"
+        }
+      },
+      "required": [
+        "tag",
+        "index",
+        "provided_ex_units",
+        "calculated_ex_units",
+        "logs",
+        "success"
+      ],
+      "type": "object"
+    },
+    "ExUnits": {
+      "properties": {
+        "mem": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "steps": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "mem",
+        "steps"
+      ],
+      "type": "object"
+    },
+    "FeeDecomposition": {
+      "properties": {
+        "executionUnitsFee": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "referenceScriptsFee": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "txSizeFee": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "txSizeFee",
+        "referenceScriptsFee",
+        "executionUnitsFee"
+      ],
+      "type": "object"
+    },
+    "GovernanceActionId": {
+      "properties": {
+        "index": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "txHash": {
+          "items": {
+            "format": "uint8",
+            "maximum": 255,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "txHash",
+        "index"
+      ],
+      "type": "object"
+    },
+    "LocalCredential": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "keyHash": {
+              "items": {
+                "format": "uint8",
+                "maximum": 255,
+                "minimum": 0,
+                "type": "integer"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "keyHash"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "scriptHash": {
+              "items": {
+                "format": "uint8",
+                "maximum": 255,
+                "minimum": 0,
+                "type": "integer"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "scriptHash"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "MultiAsset": {
+      "properties": {
+        "assets": {
+          "items": {
+            "$ref": "#/$defs/ValidatorAsset"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "assets"
+      ],
+      "type": "object"
+    },
+    "Phase1Error": {
+      "description": "Phase 1 validation errors",
+      "oneOf": [
+        {
+          "enum": [
+            "GenesisKeyDelegationCertificateIsNotSupported",
+            "MoveInstantaneousRewardsCertificateIsNotSupported"
+          ],
+          "type": "string"
+        },
+        {
+          "additionalProperties": false,
+          "description": "The transaction references one or more input UTxOs that do not exist or have already been spent",
+          "properties": {
+            "BadInputsUTxO": {
+              "properties": {
+                "invalid_input": {
+                  "$ref": "#/$defs/TxInput",
+                  "description": "The invalid input UTxO"
+                }
+              },
+              "required": [
+                "invalid_input"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "BadInputsUTxO"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "The transaction's validity interval is not satisfied by the current slot",
+          "properties": {
+            "OutsideValidityIntervalUTxO": {
+              "properties": {
+                "current_slot": {
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "interval_end": {
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "interval_start": {
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "current_slot",
+                "interval_start",
+                "interval_end"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "OutsideValidityIntervalUTxO"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "The transaction's size in bytes exceeds the protocol's maximum allowed size",
+          "properties": {
+            "MaxTxSizeUTxO": {
+              "properties": {
+                "actual_size": {
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "max_size": {
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "actual_size",
+                "max_size"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "MaxTxSizeUTxO"
+          ],
+          "type": "object"
+        },
+        {
+          "const": "InputSetEmptyUTxO",
+          "description": "The transaction has an empty input set",
+          "type": "string"
+        },
+        {
+          "additionalProperties": false,
+          "description": "The transaction fee is below the minimum required",
+          "properties": {
+            "FeeTooSmallUTxO": {
+              "properties": {
+                "actual_fee": {
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "fee_decomposition": {
+                  "$ref": "#/$defs/FeeDecomposition"
+                },
+                "min_fee": {
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "actual_fee",
+                "min_fee",
+                "fee_decomposition"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "FeeTooSmallUTxO"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "The transaction fails the value conservation check",
+          "properties": {
+            "ValueNotConservedUTxO": {
+              "properties": {
+                "difference": {
+                  "$ref": "#/$defs/Value"
+                },
+                "input_sum": {
+                  "$ref": "#/$defs/Value"
+                },
+                "output_sum": {
+                  "$ref": "#/$defs/Value"
+                }
+              },
+              "required": [
+                "input_sum",
+                "output_sum",
+                "difference"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "ValueNotConservedUTxO"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "One or more output addresses have a network ID that does not match the chain's network",
+          "properties": {
+            "WrongNetwork": {
+              "properties": {
+                "wrong_addresses": {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array",
+                  "uniqueItems": true
+                }
+              },
+              "required": [
+                "wrong_addresses"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "WrongNetwork"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "One or more withdrawal reward accounts have a network ID that doesn't match the expected network",
+          "properties": {
+            "WrongNetworkWithdrawal": {
+              "properties": {
+                "wrong_addresses": {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array",
+                  "uniqueItems": true
+                }
+              },
+              "required": [
+                "wrong_addresses"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "WrongNetworkWithdrawal"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "The network ID specified in the transaction body is incorrect",
+          "properties": {
+            "WrongNetworkInTxBody": {
+              "properties": {
+                "actual_network": {
+                  "format": "uint8",
+                  "maximum": 255,
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "expected_network": {
+                  "format": "uint8",
+                  "maximum": 255,
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "actual_network",
+                "expected_network"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "WrongNetworkInTxBody"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "One or more transaction outputs contain less than the minimum required amount of Ada",
+          "properties": {
+            "OutputTooSmallUTxO": {
+              "properties": {
+                "min_amount": {
+                  "format": "int128",
+                  "type": "integer"
+                },
+                "output_amount": {
+                  "format": "int128",
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "output_amount",
+                "min_amount"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "OutputTooSmallUTxO"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "The collateral return is too small",
+          "properties": {
+            "CollateralReturnTooSmall": {
+              "properties": {
+                "min_amount": {
+                  "format": "int128",
+                  "type": "integer"
+                },
+                "output_amount": {
+                  "format": "int128",
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "output_amount",
+                "min_amount"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "CollateralReturnTooSmall"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "A transaction output to a Byron-era address has attributes that are too large",
+          "properties": {
+            "OutputBootAddrAttrsTooBig": {
+              "properties": {
+                "actual_size": {
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "max_size": {
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "output": true
+              },
+              "required": [
+                "output",
+                "actual_size",
+                "max_size"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "OutputBootAddrAttrsTooBig"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "One or more transaction outputs are too large in size",
+          "properties": {
+            "OutputsValueTooBig": {
+              "properties": {
+                "actual_size": {
+                  "format": "uint32",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "max_size": {
+                  "format": "uint32",
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "actual_size",
+                "max_size"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "OutputsValueTooBig"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "The transaction's collateral inputs do not cover the required collateral amount",
+          "properties": {
+            "InsufficientCollateral": {
+              "properties": {
+                "required_collateral": {
+                  "format": "int128",
+                  "type": "integer"
+                },
+                "total_collateral": {
+                  "format": "int128",
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "total_collateral",
+                "required_collateral"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "InsufficientCollateral"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "The total execution units requested by the transaction's Plutus scripts exceed the allowed maximum",
+          "properties": {
+            "ExUnitsTooBigUTxO": {
+              "properties": {
+                "actual_memory_units": {
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "actual_steps_units": {
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "max_memory_units": {
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "max_steps_units": {
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "actual_memory_units",
+                "actual_steps_units",
+                "max_memory_units",
+                "max_steps_units"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "ExUnitsTooBigUTxO"
+          ],
+          "type": "object"
+        },
+        {
+          "const": "CalculatedCollateralContainsNonAdaAssets",
+          "description": "The collateral inputs contain non-ADA assets",
+          "type": "string"
+        },
+        {
+          "additionalProperties": false,
+          "description": "The collateral input contains non-ADA assets",
+          "properties": {
+            "CollateralInputContainsNonAdaAssets": {
+              "properties": {
+                "collateral_input": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "collateral_input"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "CollateralInputContainsNonAdaAssets"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "The collateral inputs are locked by a script",
+          "properties": {
+            "CollateralIsLockedByScript": {
+              "properties": {
+                "invalid_collateral": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "invalid_collateral"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "CollateralIsLockedByScript"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "The number of collateral inputs exceeds the maximum allowed",
+          "properties": {
+            "TooManyCollateralInputs": {
+              "properties": {
+                "actual_count": {
+                  "format": "uint32",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "max_count": {
+                  "format": "uint32",
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "actual_count",
+                "max_count"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "TooManyCollateralInputs"
+          ],
+          "type": "object"
+        },
+        {
+          "const": "NoCollateralInputs",
+          "description": "The transaction marked as requiring script execution has no collateral inputs",
+          "type": "string"
+        },
+        {
+          "additionalProperties": false,
+          "description": "The total collateral amount declared does not match the sum of the provided collateral inputs",
+          "properties": {
+            "IncorrectTotalCollateralField": {
+              "properties": {
+                "actual_sum": {
+                  "format": "int128",
+                  "type": "integer"
+                },
+                "declared_total": {
+                  "format": "int128",
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "declared_total",
+                "actual_sum"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "IncorrectTotalCollateralField"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Invalid signature",
+          "properties": {
+            "InvalidSignature": {
+              "properties": {
+                "invalid_signature": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "invalid_signature"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "InvalidSignature"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Extraneous signature",
+          "properties": {
+            "ExtraneousSignature": {
+              "properties": {
+                "extraneous_signature": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "extraneous_signature"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "ExtraneousSignature"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Native script is unsuccessful",
+          "properties": {
+            "NativeScriptIsUnsuccessful": {
+              "properties": {
+                "native_script_hash": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "native_script_hash"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "NativeScriptIsUnsuccessful"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Plutus script is unsuccessful",
+          "properties": {
+            "PlutusScriptIsUnsuccessful": {
+              "properties": {
+                "plutus_script_hash": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "plutus_script_hash"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "PlutusScriptIsUnsuccessful"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "The transaction is missing required verification key witnesses",
+          "properties": {
+            "MissingVKeyWitnesses": {
+              "properties": {
+                "missing_key_hash": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "missing_key_hash"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "MissingVKeyWitnesses"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "A needed script is not provided",
+          "properties": {
+            "MissingScriptWitnesses": {
+              "properties": {
+                "missing_script_hash": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "missing_script_hash"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "MissingScriptWitnesses"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "A required redeemer is not provided",
+          "properties": {
+            "MissingRedeemer": {
+              "properties": {
+                "index": {
+                  "format": "uint32",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "tag": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "tag",
+                "index"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "MissingRedeemer"
+          ],
+          "type": "object"
+        },
+        {
+          "const": "MissingTxBodyMetadataHash",
+          "description": "The transaction body indicated a metadata hash, but the actual metadata was not included",
+          "type": "string"
+        },
+        {
+          "const": "MissingTxMetadata",
+          "description": "The transaction includes metadata, but the transaction body's metadata hash field is absent",
+          "type": "string"
+        },
+        {
+          "additionalProperties": false,
+          "description": "The metadata hash in the transaction body does not match the hash of the actual metadata",
+          "properties": {
+            "ConflictingMetadataHash": {
+              "properties": {
+                "actual_hash": {
+                  "type": "string"
+                },
+                "expected_hash": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "expected_hash",
+                "actual_hash"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "ConflictingMetadataHash"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "The metadata payload is invalid",
+          "properties": {
+            "InvalidMetadata": {
+              "properties": {
+                "message": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "message"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "InvalidMetadata"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "The transaction supplied script witnesses that are not needed",
+          "properties": {
+            "ExtraneousScriptWitnesses": {
+              "properties": {
+                "extraneous_script": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "extraneous_script"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "ExtraneousScriptWitnesses"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "A stake registration certificate attempted to register an already registered stake key",
+          "properties": {
+            "StakeAlreadyRegistered": {
+              "properties": {
+                "reward_address": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "reward_address"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "StakeAlreadyRegistered"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "A stake key deregistration or delegation was attempted for an unregistered stake key",
+          "properties": {
+            "StakeNotRegistered": {
+              "properties": {
+                "reward_address": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "reward_address"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "StakeNotRegistered"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "A stake key deregistration attempted while reward account still has unwithdrawn rewards",
+          "properties": {
+            "StakeNonZeroAccountBalance": {
+              "properties": {
+                "remaining_balance": {
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "reward_address": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "reward_address",
+                "remaining_balance"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "StakeNonZeroAccountBalance"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "A withdrawal attempted from a non-existent reward account",
+          "properties": {
+            "RewardAccountNotExisting": {
+              "properties": {
+                "reward_address": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "reward_address"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "RewardAccountNotExisting"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Wrong requested withdrawal amount",
+          "properties": {
+            "WrongRequestedWithdrawalAmount": {
+              "properties": {
+                "expected_amount": {
+                  "format": "int128",
+                  "type": "integer"
+                },
+                "requested_amount": {
+                  "format": "int128",
+                  "type": "integer"
+                },
+                "reward_address": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "expected_amount",
+                "requested_amount",
+                "reward_address"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "WrongRequestedWithdrawalAmount"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "A stake pool retirement or update attempted for a non-existent pool",
+          "properties": {
+            "StakePoolNotRegistered": {
+              "properties": {
+                "pool_id": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "pool_id"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "StakePoolNotRegistered"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "The epoch specified for a stake pool's retirement is invalid",
+          "properties": {
+            "WrongRetirementEpoch": {
+              "properties": {
+                "current_epoch": {
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "max_epoch": {
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "min_epoch": {
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "specified_epoch": {
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "specified_epoch",
+                "current_epoch",
+                "min_epoch",
+                "max_epoch"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "WrongRetirementEpoch"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "A stake pool's cost parameter is below the minimum fixed fee",
+          "properties": {
+            "StakePoolCostTooLow": {
+              "properties": {
+                "min_cost": {
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "specified_cost": {
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "specified_cost",
+                "min_cost"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "StakePoolCostTooLow"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "An MIR certificate attempted to withdraw more than available",
+          "properties": {
+            "InsufficientFundsForMir": {
+              "properties": {
+                "available_amount": {
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "requested_amount": {
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "requested_amount",
+                "available_amount"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "InsufficientFundsForMir"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Constitutional Committee vote by non-elected member",
+          "properties": {
+            "InvalidCommitteeVote": {
+              "properties": {
+                "message": {
+                  "type": "string"
+                },
+                "voter": true
+              },
+              "required": [
+                "voter",
+                "message"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "InvalidCommitteeVote"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "DRep registration deposit mismatch",
+          "properties": {
+            "DRepIncorrectDeposit": {
+              "properties": {
+                "required_deposit": {
+                  "format": "int128",
+                  "type": "integer"
+                },
+                "supplied_deposit": {
+                  "format": "int128",
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "supplied_deposit",
+                "required_deposit"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "DRepIncorrectDeposit"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "DRep deregistration refund mismatch",
+          "properties": {
+            "DRepDeregistrationWrongRefund": {
+              "properties": {
+                "required_refund": {
+                  "format": "int128",
+                  "type": "integer"
+                },
+                "supplied_refund": {
+                  "format": "int128",
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "supplied_refund",
+                "required_refund"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "DRepDeregistrationWrongRefund"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Vote delegation targets a DRep that is not registered\n (mirrors ledger's DelegateeDRepNotRegisteredDELEG)",
+          "properties": {
+            "DelegateeDRepNotRegistered": {
+              "properties": {
+                "cert_index": {
+                  "format": "uint32",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "drep_id": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "drep_id",
+                "cert_index"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "DelegateeDRepNotRegistered"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Stake registration deposit mismatch",
+          "properties": {
+            "StakeRegistrationWrongDeposit": {
+              "properties": {
+                "required_deposit": {
+                  "format": "int128",
+                  "type": "integer"
+                },
+                "supplied_deposit": {
+                  "format": "int128",
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "supplied_deposit",
+                "required_deposit"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "StakeRegistrationWrongDeposit"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Stake deregistration refund mismatch",
+          "properties": {
+            "StakeDeregistrationWrongRefund": {
+              "properties": {
+                "required_refund": {
+                  "format": "int128",
+                  "type": "integer"
+                },
+                "supplied_refund": {
+                  "format": "int128",
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "supplied_refund",
+                "required_refund"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "StakeDeregistrationWrongRefund"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Pool registration deposit mismatch",
+          "properties": {
+            "PoolRegistrationWrongDeposit": {
+              "properties": {
+                "required_deposit": {
+                  "format": "int128",
+                  "type": "integer"
+                },
+                "supplied_deposit": {
+                  "format": "int128",
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "supplied_deposit",
+                "required_deposit"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "PoolRegistrationWrongDeposit"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Committee member has previously resigned",
+          "properties": {
+            "CommitteeHasPreviouslyResigned": {
+              "properties": {
+                "committee_credential": {
+                  "$ref": "#/$defs/LocalCredential"
+                }
+              },
+              "required": [
+                "committee_credential"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "CommitteeHasPreviouslyResigned"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Treasury value mismatch",
+          "properties": {
+            "TreasuryValueMismatch": {
+              "properties": {
+                "actual_value": {
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "declared_value": {
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "declared_value",
+                "actual_value"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "TreasuryValueMismatch"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Reference scripts size too big",
+          "properties": {
+            "RefScriptsSizeTooBig": {
+              "properties": {
+                "actual_size": {
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "max_size": {
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "actual_size",
+                "max_size"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "RefScriptsSizeTooBig"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Withdrawal from stake credential not delegated to DRep",
+          "properties": {
+            "WithdrawalNotAllowedBecauseNotDelegatedToDRep": {
+              "properties": {
+                "reward_address": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "reward_address"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "WithdrawalNotAllowedBecauseNotDelegatedToDRep"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "The transaction attempts to reference or update a committee cold credential that is not recognized",
+          "properties": {
+            "CommitteeIsUnknown": {
+              "properties": {
+                "committee_key_hash": {
+                  "$ref": "#/$defs/LocalCredential",
+                  "description": "The committee key hash"
+                }
+              },
+              "required": [
+                "committee_key_hash"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "CommitteeIsUnknown"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Governance actions referenced in the transaction do not exist",
+          "properties": {
+            "GovActionsDoNotExist": {
+              "properties": {
+                "invalid_action_ids": {
+                  "description": "The list of invalid governance action IDs",
+                  "items": {
+                    "$ref": "#/$defs/GovernanceActionId"
+                  },
+                  "type": "array"
+                }
+              },
+              "required": [
+                "invalid_action_ids"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "GovActionsDoNotExist"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "The proposal is malformed (e.g. invalid parameter updates)",
+          "properties": {
+            "MalformedProposal": {
+              "properties": {
+                "gov_action": {
+                  "$ref": "#/$defs/GovernanceActionId",
+                  "description": "The invalid governance action"
+                }
+              },
+              "required": [
+                "gov_action"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "MalformedProposal"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Network ID mismatch in proposal procedure",
+          "properties": {
+            "ProposalProcedureNetworkIdMismatch": {
+              "properties": {
+                "expected_network": {
+                  "description": "The expected network ID",
+                  "format": "uint8",
+                  "maximum": 255,
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "reward_account": {
+                  "description": "The reward account",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "reward_account",
+                "expected_network"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "ProposalProcedureNetworkIdMismatch"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Network ID mismatch in treasury withdrawals",
+          "properties": {
+            "TreasuryWithdrawalsNetworkIdMismatch": {
+              "properties": {
+                "expected_network": {
+                  "description": "The expected network ID",
+                  "format": "uint8",
+                  "maximum": 255,
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "mismatched_account": {
+                  "description": "The set of mismatched reward accounts",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "mismatched_account",
+                "expected_network"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "TreasuryWithdrawalsNetworkIdMismatch"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "The proposal deposit amount is incorrect",
+          "properties": {
+            "VotingProposalIncorrectDeposit": {
+              "properties": {
+                "proposal_index": {
+                  "format": "uint32",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "required_deposit": {
+                  "description": "The required deposit amount",
+                  "format": "int128",
+                  "type": "integer"
+                },
+                "supplied_deposit": {
+                  "description": "The supplied deposit amount",
+                  "format": "int128",
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "supplied_deposit",
+                "required_deposit",
+                "proposal_index"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "VotingProposalIncorrectDeposit"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Voters are not allowed to vote on certain governance actions",
+          "properties": {
+            "DisallowedVoters": {
+              "properties": {
+                "disallowed_pairs": {
+                  "description": "List of disallowed voter and action ID pairs",
+                  "items": {
+                    "maxItems": 2,
+                    "minItems": 2,
+                    "prefixItems": [
+                      {
+                        "$ref": "#/$defs/Voter"
+                      },
+                      {
+                        "$ref": "#/$defs/GovernanceActionId"
+                      }
+                    ],
+                    "type": "array"
+                  },
+                  "type": "array"
+                }
+              },
+              "required": [
+                "disallowed_pairs"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "DisallowedVoters"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Conflicting committee update (same credentials in remove and add sets)",
+          "properties": {
+            "ConflictingCommitteeUpdate": {
+              "properties": {
+                "conflicting_credentials": {
+                  "$ref": "#/$defs/LocalCredential",
+                  "description": "The set of conflicting credentials"
+                }
+              },
+              "required": [
+                "conflicting_credentials"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "ConflictingCommitteeUpdate"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Committee member expiration epochs are too small",
+          "properties": {
+            "ExpirationEpochTooSmall": {
+              "properties": {
+                "invalid_expirations": {
+                  "additionalProperties": {
+                    "format": "uint64",
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  "description": "Map of credentials to their invalid expiration epochs",
+                  "type": "object"
+                }
+              },
+              "required": [
+                "invalid_expirations"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "ExpirationEpochTooSmall"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Invalid previous governance action ID in proposal",
+          "properties": {
+            "InvalidPrevGovActionId": {
+              "properties": {
+                "proposal": {
+                  "description": "The invalid proposal"
+                }
+              },
+              "required": [
+                "proposal"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "InvalidPrevGovActionId"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Voting attempted on expired governance actions",
+          "properties": {
+            "VotingOnExpiredGovAction": {
+              "properties": {
+                "expired_gov_action": {
+                  "$ref": "#/$defs/GovernanceActionId",
+                  "description": "The expired governance action"
+                }
+              },
+              "required": [
+                "expired_gov_action"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "VotingOnExpiredGovAction"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Protocol version cannot follow previous version",
+          "properties": {
+            "ProposalCantFollow": {
+              "properties": {
+                "expected_versions": {
+                  "description": "The expected protocol version",
+                  "items": {
+                    "$ref": "#/$defs/ProtocolVersion"
+                  },
+                  "type": "array"
+                },
+                "prev_gov_action_id": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/$defs/GovernanceActionId"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "description": "Previous governance action ID"
+                },
+                "supplied_version": {
+                  "$ref": "#/$defs/ProtocolVersion",
+                  "description": "The supplied protocol version"
+                }
+              },
+              "required": [
+                "supplied_version",
+                "expected_versions"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "ProposalCantFollow"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Invalid constitution policy hash",
+          "properties": {
+            "InvalidConstitutionPolicyHash": {
+              "properties": {
+                "expected_hash": {
+                  "description": "The expected policy hash",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "supplied_hash": {
+                  "description": "The supplied policy hash",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                }
+              },
+              "type": "object"
+            }
+          },
+          "required": [
+            "InvalidConstitutionPolicyHash"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Referenced voters do not exist in the ledger state",
+          "properties": {
+            "VoterDoNotExist": {
+              "properties": {
+                "missing_voter": {
+                  "description": "List of non-existent voters"
+                }
+              },
+              "required": [
+                "missing_voter"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "VoterDoNotExist"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Treasury withdrawals sum to zero (not allowed)",
+          "properties": {
+            "ZeroTreasuryWithdrawals": {
+              "properties": {
+                "gov_action": {
+                  "$ref": "#/$defs/GovernanceActionId",
+                  "description": "The governance action with zero withdrawals"
+                }
+              },
+              "required": [
+                "gov_action"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "ZeroTreasuryWithdrawals"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Proposal return account does not exist",
+          "properties": {
+            "ProposalReturnAccountDoesNotExist": {
+              "properties": {
+                "return_account": {
+                  "description": "The invalid return account",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "return_account"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "ProposalReturnAccountDoesNotExist"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Treasury withdrawal return accounts do not exist",
+          "properties": {
+            "TreasuryWithdrawalReturnAccountsDoNotExist": {
+              "properties": {
+                "missing_account": {
+                  "description": "List of non-existent return accounts",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "missing_account"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "TreasuryWithdrawalReturnAccountsDoNotExist"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Auxiliary data hash mismatch",
+          "properties": {
+            "AuxiliaryDataHashMismatch": {
+              "properties": {
+                "actual_hash": {
+                  "description": "The actual auxiliary data hash",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "expected_hash": {
+                  "description": "The expected auxiliary data hash",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "expected_hash"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "AuxiliaryDataHashMismatch"
+          ],
+          "type": "object"
+        },
+        {
+          "const": "AuxiliaryDataHashMissing",
+          "description": "Auxiliary data hash is missing",
+          "type": "string"
+        },
+        {
+          "const": "AuxiliaryDataHashPresentButNotExpected",
+          "description": "Auxiliary data hash is present but not expected",
+          "type": "string"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Unknown error",
+          "properties": {
+            "UnknownError": {
+              "properties": {
+                "message": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "message"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "UnknownError"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "MissingDatum": {
+              "properties": {
+                "datum_hash": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "datum_hash"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "MissingDatum"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "ExtraneousDatumWitnesses": {
+              "properties": {
+                "datum_hash": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "datum_hash"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "ExtraneousDatumWitnesses"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Script data hash mismatch",
+          "properties": {
+            "ScriptDataHashMismatch": {
+              "properties": {
+                "expected_decomposition": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/$defs/ScriptDataHashDecomposition"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "description": "Decomposition of the expected hash computation"
+                },
+                "expected_hash": {
+                  "description": "The expected script data hash (computed from witness set)",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "provided_hash": {
+                  "description": "The provided script data hash (from transaction body)",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                }
+              },
+              "type": "object"
+            }
+          },
+          "required": [
+            "ScriptDataHashMismatch"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "ReferenceInputOverlapsWithInput": {
+              "properties": {
+                "input": {
+                  "$ref": "#/$defs/TxInput"
+                }
+              },
+              "required": [
+                "input"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "ReferenceInputOverlapsWithInput"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "Phase1Warning": {
+      "oneOf": [
+        {
+          "enum": [
+            "InputsAreNotSorted",
+            "WithdrawalsAreNotSorted",
+            "CollateralIsUnnecessary",
+            "TotalCollateralIsNotDeclared"
+          ],
+          "type": "string"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "FeeIsBiggerThanMinFee": {
+              "properties": {
+                "actual_fee": {
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "fee_decomposition": {
+                  "$ref": "#/$defs/FeeDecomposition"
+                },
+                "min_fee": {
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "actual_fee",
+                "min_fee",
+                "fee_decomposition"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "FeeIsBiggerThanMinFee"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "The transaction's collateral input uses a reward address",
+          "properties": {
+            "InputUsesRewardAddress": {
+              "properties": {
+                "invalid_input": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "invalid_input"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "InputUsesRewardAddress"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "The transaction's collateral input uses a reward address",
+          "properties": {
+            "CollateralInputUsesRewardAddress": {
+              "properties": {
+                "invalid_collateral": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "invalid_collateral"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "CollateralInputUsesRewardAddress"
+          ],
+          "type": "object"
+        },
+        {
+          "const": "CannotCheckStakeDeregistrationRefund",
+          "description": "Cannot check stake key deregistration refund",
+          "type": "string"
+        },
+        {
+          "const": "CannotCheckDRepDeregistrationRefund",
+          "description": "Cannot check DRep deregistration refund",
+          "type": "string"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Pool already registered",
+          "properties": {
+            "PoolAlreadyRegistered": {
+              "properties": {
+                "pool_id": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "pool_id"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "PoolAlreadyRegistered"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "DRep already registered",
+          "properties": {
+            "DRepAlreadyRegistered": {
+              "properties": {
+                "drep_id": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "drep_id"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "DRepAlreadyRegistered"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Committee already authorized",
+          "properties": {
+            "CommitteeAlreadyAuthorized": {
+              "properties": {
+                "committee_key": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "committee_key"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "CommitteeAlreadyAuthorized"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "DRep not registered",
+          "properties": {
+            "DRepNotRegistered": {
+              "properties": {
+                "cert_index": {
+                  "format": "uint32",
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "cert_index"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "DRepNotRegistered"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Stake delegation targets a pool that is being retired in the same transaction.\n The delegation is still valid until the pool's retirement epoch is reached.",
+          "properties": {
+            "DelegationToRetiringPool": {
+              "properties": {
+                "cert_index": {
+                  "format": "uint32",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "pool_id": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "pool_id",
+                "cert_index"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "DelegationToRetiringPool"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Duplicate registration attempt in the same transaction",
+          "properties": {
+            "DuplicateRegistrationInTx": {
+              "properties": {
+                "cert_index": {
+                  "format": "uint32",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "entity_id": {
+                  "type": "string"
+                },
+                "entity_type": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "entity_type",
+                "entity_id",
+                "cert_index"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "DuplicateRegistrationInTx"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "DuplicateCommitteeColdResignationInTx": {
+              "properties": {
+                "cert_index": {
+                  "format": "uint32",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "committee_credential": {
+                  "$ref": "#/$defs/LocalCredential"
+                }
+              },
+              "required": [
+                "committee_credential",
+                "cert_index"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "DuplicateCommitteeColdResignationInTx"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "DuplicateCommitteeHotRegistrationInTx": {
+              "properties": {
+                "cert_index": {
+                  "format": "uint32",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "committee_credential": {
+                  "$ref": "#/$defs/LocalCredential"
+                }
+              },
+              "required": [
+                "committee_credential",
+                "cert_index"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "DuplicateCommitteeHotRegistrationInTx"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "Phase2Error": {
+      "description": "Phase 1 validation errors",
+      "oneOf": [
+        {
+          "enum": [
+            "NativeScriptIsReferencedByRedeemer"
+          ],
+          "type": "string"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "NoEnoughBudget": {
+              "properties": {
+                "actual_budget": {
+                  "$ref": "#/$defs/ExUnits"
+                },
+                "expected_budget": {
+                  "$ref": "#/$defs/ExUnits"
+                }
+              },
+              "required": [
+                "expected_budget",
+                "actual_budget"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "NoEnoughBudget"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "InvalidRedeemerIndex": {
+              "properties": {
+                "index": {
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "tag": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "tag",
+                "index"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "InvalidRedeemerIndex"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "MachineError": {
+              "properties": {
+                "error": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "error"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "MachineError"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "CostModelNotFound": {
+              "properties": {
+                "language": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "language"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "CostModelNotFound"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "ScriptDecodeError": {
+              "properties": {
+                "error": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "error"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "ScriptDecodeError"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Input referenced in the transaction was not found in the provided UTxOs",
+          "properties": {
+            "ResolvedInputNotFound": {
+              "properties": {
+                "tx_hash": {
+                  "type": "string"
+                },
+                "tx_index": {
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "tx_hash",
+                "tx_index"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "ResolvedInputNotFound"
+          ],
+          "type": "object"
+        },
+        {
+          "const": "ByronAddressNotAllowed",
+          "description": "Byron addresses are not allowed in Plutus script transactions (any version)",
+          "type": "string"
+        },
+        {
+          "const": "InlineDatumNotAllowedForPlutusV1",
+          "description": "Inline datums are not allowed when PlutusV1 scripts are present",
+          "type": "string"
+        },
+        {
+          "const": "ReferenceInputsNotAllowedForPlutusV1",
+          "description": "Reference inputs and script references are not allowed in PlutusV1",
+          "type": "string"
+        },
+        {
+          "additionalProperties": false,
+          "description": "The validity slot is too far in the past for slot-to-time conversion",
+          "properties": {
+            "SlotTooFarInThePast": {
+              "properties": {
+                "oldest_allowed": {
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "oldest_allowed"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "SlotTooFarInThePast"
+          ],
+          "type": "object"
+        },
+        {
+          "const": "NoPaymentCredential",
+          "description": "Address doesn't contain a payment credential",
+          "type": "string"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Extraneous redeemer without corresponding script element",
+          "properties": {
+            "ExtraneousRedeemer": {
+              "properties": {
+                "index": {
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "tag": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "tag",
+                "index"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "ExtraneousRedeemer"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Generic build context error (fallback for unrecognized errors)",
+          "properties": {
+            "BuildTxContextError": {
+              "properties": {
+                "error": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "error"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "BuildTxContextError"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Redeemer index points to a non-existent element (e.g., no mint policy, no input, no certificate at that index)",
+          "properties": {
+            "RedeemerIndexOutOfBounds": {
+              "properties": {
+                "index": {
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "max_index": {
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                },
+                "tag": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "tag",
+                "index"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "RedeemerIndexOutOfBounds"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Script with the given hash not found in witness set or reference inputs",
+          "properties": {
+            "MissingRequiredScript": {
+              "properties": {
+                "script_hash": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "script_hash"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "MissingRequiredScript"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Datum not found for a spending input that requires it",
+          "properties": {
+            "MissingRequiredDatum": {
+              "properties": {
+                "datum_hash": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "datum_hash"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "MissingRequiredDatum"
+          ],
+          "type": "object"
+        },
+        {
+          "const": "NonScriptWithdrawal",
+          "description": "Redeemer points to a non-script withdrawal (key-based withdrawal)",
+          "type": "string"
+        },
+        {
+          "const": "NonScriptCredential",
+          "description": "Redeemer points to a non-script credential (e.g., key-based stake credential)",
+          "type": "string"
+        },
+        {
+          "const": "UnsupportedCertificateType",
+          "description": "Redeemer points to an unsupported certificate type (StakeRegistration, PoolRetirement, PoolRegistration)",
+          "type": "string"
+        },
+        {
+          "const": "NoGuardrailScriptForProcedure",
+          "description": "No guardrail script defined for the governance proposal procedure",
+          "type": "string"
+        },
+        {
+          "const": "MissingRequiredInlineDatumOrHash",
+          "description": "Missing inline datum or datum hash in script input (datum hash required for PlutusV1, inline datum or hash for PlutusV2)",
+          "type": "string"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Generic script lookup error (fallback for unrecognized errors from uplc)",
+          "properties": {
+            "ScriptLookupError": {
+              "properties": {
+                "error": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "error"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "ScriptLookupError"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "Phase2Warning": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "BudgetIsBiggerThanExpected": {
+              "properties": {
+                "actual_budget": {
+                  "$ref": "#/$defs/ExUnits"
+                },
+                "expected_budget": {
+                  "$ref": "#/$defs/ExUnits"
+                }
+              },
+              "required": [
+                "expected_budget",
+                "actual_budget"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "BudgetIsBiggerThanExpected"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "ProtocolVersion": {
+      "properties": {
+        "major": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "minor": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "major",
+        "minor"
+      ],
+      "type": "object"
+    },
+    "RedeemerTag": {
+      "enum": [
+        "Mint",
+        "Spend",
+        "Cert",
+        "Propose",
+        "Vote",
+        "Reward"
+      ],
+      "type": "string"
+    },
+    "ScriptDataHashDecomposition": {
+      "description": "Decomposition of script_data_hash computation for debugging.\n \n The script_data_hash is computed as blake2b256 of concatenated bytes in a specific format.\n This structure provides the raw CBOR data and explains the encoding used.\n \n ## script_data_hash format (Alonzo+ ledger spec):\n \n Standard: `blake2b256(redeemers || datums || used_cost_models)`\n Datums-only: `blake2b256(0xA0 || datums || 0xA0)` (when no redeemers)\n \n All components must be serialized according to the ledger CDDL specification.\n \n ### Redeemers\n - **Pre-Conway**: array format\n - **Conway+**: map format  \n - Original format from deserialization is preserved\n \n ### Datums\n - For hash: uses CBOR set encoding (tag 258) with deduplication\n - May use indefinite length encoding\n \n ### Cost Models\n \n **Encoding rules:**\n - Keys sorted by **length first**, then lexicographically  \n - **PlutusV1 special case** (cardano-node bug workaround):\n   - Key `0` serialized as `bytes(0x00)` instead of integer\n   - Value wrapped in bytestring containing **indefinite length array**\n   - Format: `{ bytes(0x00): bytes(9F cost1 cost2 ... FF) }`\n - **PlutusV2** (key=1) and **PlutusV3** (key=2): standard integer key with array value",
+      "properties": {
+        "costModelsCbor": {
+          "description": "Cost models CBOR hex (standard map encoding)",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "datumsCbor": {
+          "description": "Datums CBOR hex (standard array encoding)\n Note: for hash computation uses set encoding (tag 258 + deduplication)",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "datumsCount": {
+          "description": "Number of datums",
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "encodingFormat": {
+          "description": "Which encoding format was used for script_data_hash\n - \"standard\": redeemers || datums || used_cost_models\n - \"datums_only\": 0xA0 || datums || 0xA0 (when no redeemers but has datums)",
+          "type": "string"
+        },
+        "hashInputDescription": {
+          "description": "Description of what is actually concatenated for hashing",
+          "type": "string"
+        },
+        "plutusVersionsUsed": {
+          "description": "Plutus versions used (e.g. [\"PlutusV1\", \"PlutusV2\", \"PlutusV3\"])",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "redeemersCbor": {
+          "description": "Redeemers CBOR hex (serialized per CDDL, preserves original Map or Array format)",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "redeemersCount": {
+          "description": "Number of redeemers",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "encodingFormat",
+        "redeemersCount",
+        "plutusVersionsUsed",
+        "hashInputDescription"
+      ],
+      "type": "object"
+    },
+    "TxInput": {
+      "properties": {
+        "outputIndex": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "txHash": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "outputIndex",
+        "txHash"
+      ],
+      "type": "object"
+    },
+    "ValidationPhase1Error": {
+      "properties": {
+        "error": {
+          "$ref": "#/$defs/Phase1Error"
+        },
+        "error_message": {
+          "type": "string"
+        },
+        "hint": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "locations": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "error",
+        "error_message",
+        "locations"
+      ],
+      "type": "object"
+    },
+    "ValidationPhase1Warning": {
+      "properties": {
+        "hint": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "locations": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "warning": {
+          "$ref": "#/$defs/Phase1Warning"
+        },
+        "warning_message": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "warning",
+        "warning_message",
+        "locations"
+      ],
+      "type": "object"
+    },
+    "ValidationPhase2Error": {
+      "properties": {
+        "error": {
+          "$ref": "#/$defs/Phase2Error"
+        },
+        "error_message": {
+          "type": "string"
+        },
+        "hint": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "locations": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "error",
+        "error_message",
+        "locations"
+      ],
+      "type": "object"
+    },
+    "ValidationPhase2Warning": {
+      "properties": {
+        "hint": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "locations": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "warning": {
+          "$ref": "#/$defs/Phase2Warning"
+        },
+        "warning_message": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "warning",
+        "warning_message",
+        "locations"
+      ],
+      "type": "object"
+    },
+    "ValidatorAsset": {
+      "properties": {
+        "asset_name": {
+          "type": "string"
+        },
+        "policy_id": {
+          "type": "string"
+        },
+        "quantity": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "policy_id",
+        "asset_name",
+        "quantity"
+      ],
+      "type": "object"
+    },
+    "Value": {
+      "properties": {
+        "assets": {
+          "$ref": "#/$defs/MultiAsset"
+        },
+        "coins": {
+          "format": "int128",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "assets",
+        "coins"
+      ],
+      "type": "object"
+    },
+    "Voter": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "constitutionalCommitteeHotScriptHash": {
+              "items": {
+                "format": "uint8",
+                "maximum": 255,
+                "minimum": 0,
+                "type": "integer"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "constitutionalCommitteeHotScriptHash"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "constitutionalCommitteeHotKeyHash": {
+              "items": {
+                "format": "uint8",
+                "maximum": 255,
+                "minimum": 0,
+                "type": "integer"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "constitutionalCommitteeHotKeyHash"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "dRepScriptHash": {
+              "items": {
+                "format": "uint8",
+                "maximum": 255,
+                "minimum": 0,
+                "type": "integer"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "dRepScriptHash"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "dRepKeyHash": {
+              "items": {
+                "format": "uint8",
+                "maximum": 255,
+                "minimum": 0,
+                "type": "integer"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "dRepKeyHash"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "stakingPoolKeyHash": {
+              "items": {
+                "format": "uint8",
+                "maximum": 255,
+                "minimum": 0,
+                "type": "integer"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "stakingPoolKeyHash"
+          ],
+          "type": "object"
+        }
+      ]
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "properties": {
+    "errors": {
+      "items": {
+        "$ref": "#/$defs/ValidationPhase1Error"
+      },
+      "type": "array"
+    },
+    "eval_redeemer_results": {
+      "items": {
+        "$ref": "#/$defs/EvalRedeemerResult"
+      },
+      "type": "array"
+    },
+    "phase2_errors": {
+      "items": {
+        "$ref": "#/$defs/ValidationPhase2Error"
+      },
+      "type": "array"
+    },
+    "phase2_warnings": {
+      "items": {
+        "$ref": "#/$defs/ValidationPhase2Warning"
+      },
+      "type": "array"
+    },
+    "warnings": {
+      "items": {
+        "$ref": "#/$defs/ValidationPhase1Warning"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "errors",
+    "warnings",
+    "phase2_errors",
+    "phase2_warnings",
+    "eval_redeemer_results"
+  ],
+  "title": "ValidationResult",
+  "type": "object"
+}

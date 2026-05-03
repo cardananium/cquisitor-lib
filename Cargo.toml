@@ -1,6 +1,6 @@
 [package]
 name = "cquisitor-lib"
-version = "0.1.0-beta.50"
+version = "0.1.0-beta.55"
 authors = ["Evgenii Lisitskii <evgeniilisitskii@gmail.com>"]
 edition = "2018"
 description = "Cardano transaction validation library"
@@ -60,6 +60,7 @@ cddl = { version = "0.10.5", default-features = false, features = [
     "json",
     "cbor",
     "ast-span",
+    "ast-comments",
     "additional-controls",
 ] }
 ciborium = "0.2.2"
@@ -67,7 +68,7 @@ ciborium-io = "0.2.2"
 ciborium-ll = "0.2.2"
 
 [patch.crates-io]
-cddl = { path = "../cddl" }
+cddl = { git = "https://github.com/lisicky/cddl.git", branch = "fix/cbor-validator-suite" }
 
 [target.'cfg(not(all(target_arch = "wasm32", not(target_os = "emscripten"))))'.dependencies]
 noop_proc_macro = "0.3.0"

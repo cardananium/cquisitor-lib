@@ -182,6 +182,28 @@ impl<'a> Mapper<'a> {
     }
 
     fn try_map_type1(&self, cbor: &CborValue, t1: &'a Type1<'a>) -> Option<Value> {
+        // `.cbor` / `.cborseq` controls — the target is a bstr whose
+        // bytes are themselves a CBOR-encoded value of the controller
+        // type. Decode and walk the embedded value.
+        if let Some(op) = &t1.operator {
+            if let cddl::ast::RangeCtlOp::CtlOp { ctrl, .. } = &op.operator {
+                match ctrl {
+                    cddl::token::ControlOperator::CBOR
+                    | cddl::token::ControlOperator::CBORSEQ => {
+                        if let CborValue::Bytes(b) = cbor {
+                            if let Ok(inner) = decode_cbor(b) {
+                                if let Some(mapped) = self.try_map_type2(&inner, &op.type2) {
+                                    return Some(mapped);
+                                }
+                                // Fall through to raw bstr representation
+                                // when the embedded shape didn't match.
+                            }
+                        }
+                    }
+                    _ => {} // .size, .bits, .regexp, etc. — value handled by type2 below
+                }
+            }
+        }
         self.try_map_type2(cbor, &t1.type2)
     }
 
@@ -231,8 +253,15 @@ impl<'a> Mapper<'a> {
                 self.try_enum_from_group(cbor, ident.ident)
             }
 
-            // Everything else we don't model yet (Unwrap, DataMajorType,
-            // byte literals, ChoiceFromInlineGroup, …) just means "no
+            Type2::Unwrap { ident, generic_args, .. } => {
+                // `~rule` in type position — transparent reference into
+                // the named rule's body. Group-position unwrapping
+                // (`{a: int, ~base}`) is handled at GroupEntry level.
+                self.try_map_typename(cbor, ident.ident, generic_args.as_ref())
+            }
+
+            // Everything else we don't model yet (DataMajorType, byte
+            // literals, ChoiceFromInlineGroup, …) just means "no
             // opinion" — caller falls through to next type choice.
             _ => None,
         }
@@ -286,14 +315,119 @@ impl<'a> Mapper<'a> {
     fn try_map_map(&self, cbor: &CborValue, group: &'a cddl::ast::Group<'a>) -> Option<Value> {
         let CborValue::Map(entries) = cbor else { return None };
 
-        // Pick the first group choice whose shape is compatible. For
-        // Cardano schemas there's usually just one choice anyway.
+        // Decide between object form (`{a: 1, b: 2}` — convenient,
+        // works with every common Cardano shape) and `@entries`
+        // (`{ @entries: [{key, value}, ...] }` — wire-order preserving,
+        // handles duplicates and complex keys without loss).
+        //
+        // Object form is OK when both:
+        //  * every cbor key is a primitive scalar (text, int, bytes,
+        //    bool, null, float) — JSON objects can't carry complex
+        //    keys without lossy stringification.
+        //  * every cbor key appears at most once — dropping duplicates
+        //    or collapsing them into a value-array would lose
+        //    interleaving order.
+        // Otherwise we fall back to `@entries`.
+        let needs_entries = entries.iter().any(|(k, _)| !is_simple_cbor_key(k))
+            || cbor_keys_have_duplicates(entries);
+        if needs_entries {
+            return self.try_map_to_entries(entries, group);
+        }
+
+        // Object form — pick the first compatible group choice.
         for choice in &group.group_choices {
             if let Some(out) = self.try_map_with_choice(entries, choice) {
                 return Some(out);
             }
         }
         None
+    }
+
+    /// Emit a map as `{"@entries": [{key, value}, ...]}` — an array of
+    /// `{key, value}` objects in **wire order**. Each entry's
+    /// `value_type` is whichever schema entry's key type accepts the
+    /// cbor key first (literals first, then type-based). Keys that
+    /// don't match any schema entry are still emitted, with `key` and
+    /// `value` as raw decoded JSON so data is never silently dropped.
+    ///
+    /// The schema entry that matched is recorded as `match`:
+    ///  * `match.via` — `"literal" | "type" | "unmatched"`
+    ///  * `match.label` — the schema's literal text (for literal
+    ///    matches) or `null` (for type-based / unmatched).
+    ///
+    /// Wire-order preservation, no key-collision collapse, no
+    /// stringification of complex keys — all keyed-data in CBOR comes
+    /// out lossless.
+    fn try_map_to_entries(
+        &self,
+        entries: &[(CborValue, CborValue)],
+        group: &'a cddl::ast::Group<'a>,
+    ) -> Option<Value> {
+        // Pick a schema entry for each cbor entry — first schema entry
+        // whose key form accepts the cbor key (preserving wire order
+        // of cbor entries for the output).
+        let pairs: Vec<Value> = entries
+            .iter()
+            .map(|(k, v)| self.match_one_entry(k, v, group))
+            .collect();
+        Some(json!({"@entries": pairs}))
+    }
+
+    fn match_one_entry(
+        &self,
+        cbor_key: &CborValue,
+        cbor_value: &CborValue,
+        group: &'a cddl::ast::Group<'a>,
+    ) -> Value {
+        for choice in &group.group_choices {
+            for (ge, _) in &choice.group_entries {
+                let GroupEntry::ValueMemberKey { ge: vmk, .. } = ge else {
+                    continue;
+                };
+                let Some(mk) = &vmk.member_key else { continue };
+
+                // 1. Try literal match first (Bareword / Value / Type1
+                //    with literal type2). Returns Some(label) on hit.
+                if let Some(label) = self.try_match_member_key(mk, cbor_key) {
+                    let key_json = raw_value(cbor_key);
+                    let value_json = self.map_type(cbor_value, &vmk.entry_type);
+                    return json!({
+                        "key": key_json,
+                        "value": value_json,
+                        "match": {
+                            "via": "literal",
+                            "label": label,
+                        },
+                    });
+                }
+                // 2. Try type-based match (Type1 with non-literal type2).
+                if let MemberKey::Type1 { t1, .. } = mk {
+                    if self.type1_accepts(t1, cbor_key) {
+                        let key_json = self
+                            .try_map_type1(cbor_key, t1)
+                            .unwrap_or_else(|| raw_value(cbor_key));
+                        let value_json = self.map_type(cbor_value, &vmk.entry_type);
+                        return json!({
+                            "key": key_json,
+                            "value": value_json,
+                            "match": {
+                                "via": "type",
+                                "label": Value::Null,
+                            },
+                        });
+                    }
+                }
+            }
+        }
+        // No schema entry took it — emit raw.
+        json!({
+            "key": raw_value(cbor_key),
+            "value": raw_value(cbor_value),
+            "match": {
+                "via": "unmatched",
+                "label": Value::Null,
+            },
+        })
     }
 
     fn try_map_with_choice(
@@ -346,8 +480,8 @@ impl<'a> Mapper<'a> {
             GroupEntry::ValueMemberKey { ge, .. } => {
                 let vmk = ge.as_ref();
                 let is_optional = is_occur_optional(vmk.occur.as_ref());
-                let (field_name, key_matcher) = match &vmk.member_key {
-                    Some(mk) => member_key_to_matcher(mk),
+                let mk = match &vmk.member_key {
+                    Some(m) => m,
                     None => {
                         // No member_key in a *map* context is unusual;
                         // treat as homogeneous "* type" pair — skip for
@@ -355,42 +489,52 @@ impl<'a> Mapper<'a> {
                         return Some(());
                     }
                 };
+                // Pre-compute a fallback field-name from the member_key
+                // declaration itself — used when the entry is
+                // *required* but absent (we still emit the field so
+                // partial output is informative).
+                let declarative_label = member_key_label(mk);
 
                 let mut found_any = false;
                 for (i, (k, v)) in entries.iter().enumerate() {
                     if used[i] {
                         continue;
                     }
-                    if key_matcher.matches(k) {
-                        let mapped = self.map_type(v, &vmk.entry_type);
-                        match vmk.occur.as_ref().map(|o| &o.occur) {
-                            Some(Occur::ZeroOrMore { .. }) | Some(Occur::OneOrMore { .. }) => {
-                                let arr = out
-                                    .entry(field_name.clone())
-                                    .or_insert_with(|| Value::Array(Vec::new()));
-                                if let Value::Array(a) = arr {
-                                    a.push(mapped);
-                                }
-                            }
-                            _ => {
-                                out.insert(field_name.clone(), mapped);
-                            }
+                    let Some(field_name) = self.try_match_member_key(mk, k) else {
+                        continue;
+                    };
+                    let mapped = self.map_type(v, &vmk.entry_type);
+                    // Insert directly when the field hasn't been used
+                    // before; on collision (multiple cbor entries
+                    // matched the same field name — happens for
+                    // literal-key with `*` or `+`) wrap into an array.
+                    // Type-based keys (`<type1> => …`) generate unique
+                    // names per actual key value, so they won't collide
+                    // and stay as plain values.
+                    match out.remove(&field_name) {
+                        None => {
+                            out.insert(field_name.clone(), mapped);
                         }
-                        used[i] = true;
-                        found_any = true;
-                        if !matches!(
-                            vmk.occur.as_ref().map(|o| &o.occur),
-                            Some(Occur::ZeroOrMore { .. }) | Some(Occur::OneOrMore { .. })
-                        ) {
-                            break;
+                        Some(Value::Array(mut existing)) => {
+                            existing.push(mapped);
+                            out.insert(field_name.clone(), Value::Array(existing));
+                        }
+                        Some(prev) => {
+                            out.insert(field_name.clone(), Value::Array(vec![prev, mapped]));
                         }
                     }
+                    used[i] = true;
+                    found_any = true;
+                    // CBOR allows duplicate keys (RFC 8949 §5.6 — non-
+                    // canonical, but legal). Don't stop after the first
+                    // match: keep iterating so all duplicates land in
+                    // the same field via the collision-array logic
+                    // above. This way no data slips into `@extra` just
+                    // because the wire is non-canonical.
                 }
 
                 if !found_any && !is_optional {
-                    // Required field missing — still succeed so the
-                    // caller sees the partial result, but note the gap.
-                    out.insert(field_name, Value::Null);
+                    out.insert(declarative_label, Value::Null);
                 }
                 Some(())
             }
@@ -635,7 +779,7 @@ impl<'a> Mapper<'a> {
         &self,
         items: &[CborValue],
         cursor: &mut usize,
-        ge: &TypeGroupnameEntry<'a>,
+        ge: &'a TypeGroupnameEntry<'a>,
         named: &mut Map<String, Value>,
         unnamed: &mut Vec<Value>,
         any_named: &mut bool,
@@ -661,7 +805,11 @@ impl<'a> Mapper<'a> {
             // entries into `unnamed`.
             while *cursor < items.len() {
                 let v = &items[*cursor];
-                let mapped = self.map_by_rule_or_prelude(v, name);
+                let mapped = self.map_by_rule_or_prelude_with_args(
+                    v,
+                    name,
+                    ge.generic_args.as_ref(),
+                );
                 if mapped.is_none() {
                     break;
                 }
@@ -677,11 +825,19 @@ impl<'a> Mapper<'a> {
             // standard prelude (uint, tstr, …) it isn't semantic, so
             // keep that case unnamed.
             let v = &items[*cursor];
-            let mapped = self.map_by_rule_or_prelude(v, name);
+            let mapped =
+                self.map_by_rule_or_prelude_with_args(v, name, ge.generic_args.as_ref());
             match mapped {
                 Some(val) => {
                     *cursor += 1;
-                    if prelude_accepts(name, v).is_some() {
+                    // Don't label by `name` when it's just a generic
+                    // parameter (e.g. `pair<k,v> = [k, v]` — `k` and `v`
+                    // are param names, not semantic field labels) or a
+                    // prelude type (`uint`/`tstr`/…). Both go into the
+                    // unnamed list to preserve order, including the
+                    // case `[a, a]` where labelling would collide.
+                    let is_bound_param = self.lookup_binding(name).is_some();
+                    if prelude_accepts(name, v).is_some() || is_bound_param {
                         unnamed.push(val);
                     } else {
                         *any_named = true;
@@ -718,19 +874,41 @@ impl<'a> Mapper<'a> {
         builder.push_raw(raw_value(cbor));
     }
 
-    fn map_by_rule_or_prelude(&self, cbor: &CborValue, name: &str) -> Option<Value> {
+    fn map_by_rule_or_prelude_with_args(
+        &self,
+        cbor: &CborValue,
+        name: &str,
+        generic_args: Option<&'a GenericArgs<'a>>,
+    ) -> Option<Value> {
         // Bound generic param wins over both prelude and rule-index.
-        if let Some(t1) = self.lookup_binding(name) {
-            return self.try_map_type1(cbor, t1);
-        }
-        if let Some(v) = try_prelude(cbor, name) {
-            return Some(v);
+        if generic_args.is_none() {
+            if let Some(t1) = self.lookup_binding(name) {
+                return self.try_map_type1(cbor, t1);
+            }
+            if let Some(v) = try_prelude(cbor, name) {
+                return Some(v);
+            }
         }
         match self.rules.get(name) {
-            Some(Rule::Type { rule, .. }) => Some(self.map_type(cbor, &rule.value)),
+            Some(Rule::Type { rule, .. }) => {
+                // Push a fresh binding frame when the call-site supplies
+                // generic arguments — without this, body uses of the
+                // rule's parameters would be unbound and fall back to
+                // raw values.
+                let pushed = self.push_frame(&rule.generic_params, generic_args);
+                let result = Some(self.map_type(cbor, &rule.value));
+                if pushed {
+                    self.pop_frame();
+                }
+                result
+            }
             Some(Rule::Group { rule, .. }) => {
+                let pushed = self.push_frame(&rule.generic_params, generic_args);
                 let mut builder = ObjectBuilder::new();
                 self.map_group_entry(cbor, &rule.entry, &mut builder, &mut 0);
+                if pushed {
+                    self.pop_frame();
+                }
                 Some(builder.finish())
             }
             None => None,
@@ -819,81 +997,169 @@ fn bareword_name<'a>(mk: &'a MemberKey<'a>) -> Option<&'a str> {
     }
 }
 
-/// Describes how to recognise a map key in the CBOR data.
-enum KeyMatcher {
-    IntLiteral(i128),
-    TextLiteral(String),
+
+/// O(n²) scan for duplicate CBOR keys (RFC 8949 §5.6 — legal but
+/// non-canonical). When there are dups we can't represent the map as
+/// a JSON object without losing interleaving order, so we switch to
+/// `@entries` form.
+fn cbor_keys_have_duplicates(entries: &[(CborValue, CborValue)]) -> bool {
+    for i in 0..entries.len() {
+        for j in (i + 1)..entries.len() {
+            if entries[i].0 == entries[j].0 {
+                return true;
+            }
+        }
+    }
+    false
 }
 
-impl KeyMatcher {
-    fn matches(&self, k: &CborValue) -> bool {
-        match (self, k) {
-            (KeyMatcher::IntLiteral(n), CborValue::Integer(i)) => {
-                // ciborium::value::Integer doesn't expose i128 directly;
-                // try u64 then i64 then fail.
-                if let Ok(u) = u64::try_from(*i) {
-                    (u as i128) == *n
-                } else if let Ok(s) = i64::try_from(*i) {
-                    (s as i128) == *n
-                } else {
-                    false
-                }
+/// True if the cbor key has a primitive type that flattens cleanly to
+/// a JSON object key. Complex values (Array, Map, Tag, non-standard
+/// Simple) are treated as "complex" and trigger the `@entries`
+/// fallback shape.
+fn is_simple_cbor_key(k: &CborValue) -> bool {
+    matches!(
+        k,
+        CborValue::Text(_)
+            | CborValue::Integer(_)
+            | CborValue::Bytes(_)
+            | CborValue::Bool(_)
+            | CborValue::Null
+            | CborValue::Float(_)
+    )
+}
+
+/// Stringify a CBOR key to use as a JSON object field. Bytes get a
+/// `0x` prefix to distinguish them from numeric or text keys.
+fn cbor_key_to_field_name(k: &CborValue) -> String {
+    match k {
+        CborValue::Text(s) => s.clone(),
+        CborValue::Integer(i) => {
+            if let Ok(u) = u64::try_from(*i) {
+                u.to_string()
+            } else if let Ok(s) = i64::try_from(*i) {
+                s.to_string()
+            } else {
+                let v: i128 = (*i).into();
+                v.to_string()
             }
-            (KeyMatcher::TextLiteral(s), CborValue::Text(t)) => s == t,
-            _ => false,
         }
+        CborValue::Bytes(b) => format!("0x{}", hex::encode(b)),
+        CborValue::Bool(b) => b.to_string(),
+        CborValue::Null => "null".to_string(),
+        other => format!("{:?}", other),
     }
 }
 
-fn member_key_to_matcher<'a>(mk: &MemberKey<'a>) -> (String, KeyMatcher) {
+/// Field-name to use as a placeholder when a *required* member is
+/// absent from the actual data (so the consumer still sees the slot).
+/// For literal keys this is the literal text; for type-based keys
+/// it's the type's source representation.
+fn member_key_label(mk: &MemberKey<'_>) -> String {
     match mk {
-        MemberKey::Bareword { ident, .. } => {
-            let name = ident.ident.to_string();
-            (name.clone(), KeyMatcher::TextLiteral(name))
-        }
+        MemberKey::Bareword { ident, .. } => ident.ident.to_string(),
         MemberKey::Value { value, .. } => match value {
-            cddl::token::Value::UINT(u) => {
-                (u.to_string(), KeyMatcher::IntLiteral(*u as i128))
-            }
-            cddl::token::Value::INT(i) => {
-                (i.to_string(), KeyMatcher::IntLiteral(*i as i128))
-            }
-            cddl::token::Value::TEXT(s) => {
-                let name = s.to_string();
-                (name.clone(), KeyMatcher::TextLiteral(name))
-            }
-            other => (other.to_string(), KeyMatcher::TextLiteral(other.to_string())),
+            cddl::token::Value::TEXT(s) => s.to_string(),
+            cddl::token::Value::UINT(u) => u.to_string(),
+            cddl::token::Value::INT(n) => n.to_string(),
+            other => other.to_string(),
         },
-        MemberKey::Type1 { t1, .. } => {
-            // `type1 =>` map key — pick a best-effort name from the
-            // type2 shape.
-            match &t1.type2 {
-                Type2::UintValue { value, .. } => (
-                    value.to_string(),
-                    KeyMatcher::IntLiteral(*value as i128),
-                ),
-                Type2::IntValue { value, .. } => {
-                    (value.to_string(), KeyMatcher::IntLiteral(*value as i128))
-                }
-                Type2::TextValue { value, .. } => (
-                    value.as_ref().to_string(),
-                    KeyMatcher::TextLiteral(value.as_ref().to_string()),
-                ),
-                other => (other.to_string(), KeyMatcher::TextLiteral(other.to_string())),
-            }
-        }
-        MemberKey::NonMemberKey { .. } => (
-            "@non_member_key".into(),
-            KeyMatcher::TextLiteral("@non_member_key".into()),
-        ),
+        MemberKey::Type1 { t1, .. } => match &t1.type2 {
+            Type2::UintValue { value, .. } => value.to_string(),
+            Type2::IntValue { value, .. } => value.to_string(),
+            Type2::TextValue { value, .. } => value.as_ref().to_string(),
+            other => other.to_string(),
+        },
+        MemberKey::NonMemberKey { .. } => "@non_member_key".to_string(),
     }
 }
+
 
 impl<'a> Mapper<'a> {
     /// Best-effort `true` if `value` could plausibly match `ty` under the
     /// current generic-binding frames. Used for array-entry
     /// disambiguation where we have to decide whether to consume a
     /// positional slot or skip (optional). Conservative on "unknown".
+    /// Returns the JSON field name to use when a CBOR map key matches
+    /// the schema's `MemberKey`, or `None` if it doesn't match. For
+    /// literal keys (`bareword:`, `0:`, `"text":`) the field name is
+    /// the literal itself. For type-constrained keys (`<type1> =>`)
+    /// we accept any cbor key that conforms to the type and use the
+    /// key's actual value as the JSON field name (e.g. `0xpolicy_id`
+    /// for a `policy_id => …` schema where `policy_id` is a bstr type).
+    fn try_match_member_key(
+        &self,
+        mk: &'a MemberKey<'a>,
+        cbor_key: &CborValue,
+    ) -> Option<String> {
+        use cddl::token::Value as TV;
+        match mk {
+            MemberKey::Bareword { ident, .. } => match cbor_key {
+                CborValue::Text(s) if s == ident.ident => Some(ident.ident.to_string()),
+                _ => None,
+            },
+            MemberKey::Value { value, .. } => match (value, cbor_key) {
+                (TV::TEXT(s), CborValue::Text(t)) if t == s.as_ref() => Some(s.to_string()),
+                (TV::UINT(u), CborValue::Integer(i)) => {
+                    if u64::try_from(*i).ok() == Some(*u as u64) {
+                        Some(u.to_string())
+                    } else {
+                        None
+                    }
+                }
+                (TV::INT(n), CborValue::Integer(i)) => {
+                    let as_i128: i128 = (*i).into();
+                    if as_i128 == *n as i128 {
+                        Some(n.to_string())
+                    } else {
+                        None
+                    }
+                }
+                _ => None,
+            },
+            MemberKey::Type1 { t1, .. } => {
+                // Literal type1's first (UintValue / IntValue / TextValue).
+                use cddl::ast::Type2 as T2;
+                match &t1.type2 {
+                    T2::UintValue { value, .. } => match cbor_key {
+                        CborValue::Integer(i) if u64::try_from(*i).ok() == Some(*value as u64) => {
+                            Some(value.to_string())
+                        }
+                        _ => None,
+                    },
+                    T2::IntValue { value, .. } => match cbor_key {
+                        CborValue::Integer(i) => {
+                            let as_i128: i128 = (*i).into();
+                            if as_i128 == *value as i128 {
+                                Some(value.to_string())
+                            } else {
+                                None
+                            }
+                        }
+                        _ => None,
+                    },
+                    T2::TextValue { value, .. } => match cbor_key {
+                        CborValue::Text(s) if s == value.as_ref() => {
+                            Some(value.as_ref().to_string())
+                        }
+                        _ => None,
+                    },
+                    // Otherwise: type-based match. Accept any key
+                    // conforming to the type and use the key's value
+                    // as the field name.
+                    _ => {
+                        if self.type1_accepts(t1, cbor_key) {
+                            Some(cbor_key_to_field_name(cbor_key))
+                        } else {
+                            None
+                        }
+                    }
+                }
+            }
+            MemberKey::NonMemberKey { .. } => None,
+        }
+    }
+
     fn type_accepts(&self, ty: &'a Type<'a>, value: &CborValue) -> bool {
         for choice in &ty.type_choices {
             if self.type1_accepts(&choice.type1, value) {
@@ -1283,18 +1549,20 @@ mod tests {
 
     #[test]
     fn zero_or_more_field_collects_multiple_values() {
-        // a2 00 01 00 02 = {0: 1, 0: 2}. CDDL: * 0: int (repeated).
-        // This is an unusual shape; verify the mapper accumulates.
+        // a2 00 01 00 02 = {0: 1, 0: 2}. CDDL: * 0 => uint.
+        // CBOR has the literal key `0` twice — duplicates trigger
+        // the `@entries` shape which preserves wire order.
         let out = run(
             "t = { * 0 => uint }",
             "t",
             "a20001000 2".replace(' ', "").as_str(),
         );
-        // With repeating int-keys 0 we expect the mapper to gather them
-        // all under "0" as an array.
-        let zero = &out["0"];
-        assert!(zero.is_array(), "got {}", out);
-        assert_eq!(zero, &json!([1, 2]));
+        let entries = out["@entries"].as_array().unwrap();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0]["key"], json!(0));
+        assert_eq!(entries[0]["value"], json!(1));
+        assert_eq!(entries[1]["key"], json!(0));
+        assert_eq!(entries[1]["value"], json!(2));
     }
 
     #[test]
@@ -1545,6 +1813,198 @@ mod tests {
     }
 
     #[test]
+    fn cbor_control_decodes_embedded_value_against_inner_type() {
+        // bstr .cbor [a: int, b: int]: outer is a bstr containing the
+        // CBOR bytes of `[1, 2]`. The mapper should decode the bstr
+        // and label the inner array.
+        let schema = "x = bstr .cbor inner\n\
+                      inner = [a: int, b: int]";
+        // 42 8201 02 = bstr(2: 8201 02 = [1, 2])
+        let cbor = "4382 01 02".replace(' ', "");
+        let bytes = hex::decode(&cbor).unwrap();
+        let out = decode_cbor_against_cddl(&bytes, schema, "x").unwrap();
+        let _ = out; // shape varies by inner type; assertions below
+        // Walk inline test:
+        let inline_schema = "x = bstr .cbor [a: int, b: int]";
+        let out2 = decode_cbor_against_cddl(&bytes, inline_schema, "x").unwrap();
+        assert_eq!(out2, json!({"a": 1, "b": 2}));
+    }
+
+    #[test]
+    fn cbor_control_falls_back_to_raw_when_inner_does_not_match() {
+        // bstr .cbor uint, but the bstr contains a tstr — should fall
+        // back to a raw representation (hex) rather than crashing.
+        let schema = "x = bstr .cbor uint";
+        // 43 6168 00 = bstr(3: "ah\0") — encodes as text "ah" + null byte? bypass.
+        // Use 41 18 — bstr(1) containing [0x18] which is invalid CBOR.
+        let bytes = hex::decode("4118").unwrap();
+        let out = decode_cbor_against_cddl(&bytes, schema, "x").unwrap();
+        assert_eq!(out, json!("18"), "fall-back should be raw hex");
+    }
+
+    #[test]
+    fn unwrap_resolves_into_referenced_rule_body() {
+        // `wrapped = ~base` where `base = [a: int, b: int]`. CBOR is
+        // [1, 2]. Mapper should treat ~base transparently.
+        let schema = "wrapped = ~base\n\
+                      base = [a: int, b: int]";
+        // 82 01 02 = [1, 2]
+        let bytes = hex::decode("820102").unwrap();
+        let out = decode_cbor_against_cddl(&bytes, schema, "wrapped").unwrap();
+        assert_eq!(out, json!({"a": 1, "b": 2}));
+    }
+
+    #[test]
+    fn generic_typegroupname_in_array_passes_args_to_inner_type_with_labels() {
+        // outer = [* wrapper<inner>] where wrapper<a> = a passes the
+        // argument through, and inner = [k: int, v: int] has named
+        // positional fields. Bound: each item -> {"k": …, "v": …}.
+        // Unbound (the bug): inner's `a` resolves to nothing, falls
+        // back to raw `[k, v]`, output is `[[1,2]]` instead of
+        // `[{"k": 1, "v": 2}]`.
+        let schema = "outer = [* wrapper<inner>]\n\
+                      wrapper<a> = a\n\
+                      inner = [k: int, v: int]";
+        // 81 82 01 02 = [[1, 2]]
+        let out = run(schema, "outer", "8182010 2".replace(' ', "").as_str());
+        assert_eq!(out, json!([{"k": 1, "v": 2}]));
+    }
+
+    #[test]
+    fn generic_typegroupname_in_array_passes_args_through() {
+        // outer = [* set<int>] with set<a> = [* a]. CBOR is [[1,2],[3,4]].
+        // The entry `set<int>` is a TypeGroupname with generic_args=[int].
+        // If we don't pass them through, `set`'s body sees `a` unbound
+        // and the inner arrays come back empty.
+        let schema = "outer = [* set<int>]\nset<a> = [* a]";
+        // 82 82 01 02 82 03 04 = [[1, 2], [3, 4]]
+        let out = run(schema, "outer", "82820102820304");
+        assert_eq!(out, json!([[1, 2], [3, 4]]));
+    }
+
+    #[test]
+    fn map_with_duplicate_literal_keys_uses_entries_form() {
+        // CBOR allows duplicates (RFC 8949 §5.6 — legal but
+        // non-canonical). Object form would either drop the second or
+        // collapse into a value-array, both of which lose interleaving
+        // order. We switch to `@entries` to preserve wire shape.
+        // a2 6161 01 6161 02 = {"a": 1, "a": 2}
+        let bytes = hex::decode("a26161 01 6161 02".replace(' ', "").as_str()).unwrap();
+        let out = decode_cbor_against_cddl(&bytes, "thing = {a: int}", "thing").unwrap();
+        let entries = out["@entries"].as_array().expect("@entries on dups");
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0]["key"], json!("a"));
+        assert_eq!(entries[0]["value"], json!(1));
+        assert_eq!(entries[1]["key"], json!("a"));
+        assert_eq!(entries[1]["value"], json!(2));
+    }
+
+    #[test]
+    fn map_with_three_duplicate_keys_keeps_wire_order() {
+        // a3 0001 0002 0003 — three entries with the same uint key 0,
+        // in that order. `@entries` keeps them in wire order.
+        let bytes = hex::decode("a3 00 01 00 02 00 03".replace(' ', "").as_str()).unwrap();
+        let out = decode_cbor_against_cddl(&bytes, "thing = {0: int}", "thing").unwrap();
+        let entries = out["@entries"].as_array().unwrap();
+        assert_eq!(entries.len(), 3);
+        let values: Vec<_> = entries.iter().map(|e| e["value"].clone()).collect();
+        assert_eq!(values, vec![json!(1), json!(2), json!(3)]);
+    }
+
+    #[test]
+    fn map_without_duplicates_keeps_object_form() {
+        // {"a": 1, "b": 2} — no duplicates, all simple keys → object.
+        let bytes = hex::decode("a26161 01 6162 02".replace(' ', "").as_str()).unwrap();
+        let out = decode_cbor_against_cddl(
+            &bytes,
+            "thing = {a: int, b: int}",
+            "thing",
+        )
+        .unwrap();
+        assert_eq!(out, json!({"a": 1, "b": 2}));
+    }
+
+    #[test]
+    fn map_with_complex_key_uses_entries_fallback() {
+        // Schema: `m = { [int, int] => tstr }` — key is a 2-element
+        // int array. CBOR: a2 8201 02 6361 8203 04 6362
+        //   = {[1,2]: "a", [3,4]: "b"}
+        let schema = "m = { [int, int] => tstr }";
+        // a2 82 01 02 6161 82 03 04 6162  (two pairs)
+        let bytes = hex::decode("a282 01 02 6161 82 03 04 6162".replace(' ', "").as_str()).unwrap();
+        let out = decode_cbor_against_cddl(&bytes, schema, "m").unwrap();
+        let entries = out
+            .get("@entries")
+            .unwrap_or_else(|| panic!("expected @entries fallback, got {}", out));
+        let arr = entries.as_array().expect("@entries is array");
+        assert_eq!(arr.len(), 2);
+        assert_eq!(arr[0]["key"], json!([1, 2]));
+        assert_eq!(arr[0]["value"], json!("a"));
+        assert_eq!(arr[1]["key"], json!([3, 4]));
+        assert_eq!(arr[1]["value"], json!("b"));
+    }
+
+    #[test]
+    fn map_with_tag_key_uses_entries_fallback() {
+        // Schema: `m = { #6.42(uint) => tstr }`. CBOR: a1 d82a01 6178
+        let schema = "m = { #6.42(uint) => tstr }";
+        let bytes = hex::decode("a1 d82a 01 6178".replace(' ', "").as_str()).unwrap();
+        let out = decode_cbor_against_cddl(&bytes, schema, "m").unwrap();
+        let entries = out
+            .get("@entries")
+            .unwrap_or_else(|| panic!("expected @entries, got {}", out));
+        let arr = entries.as_array().unwrap();
+        assert_eq!(arr.len(), 1);
+        // key gets walked against `#6.42(uint)` — emits {@tag, @value}.
+        assert_eq!(arr[0]["key"]["@tag"], json!(42));
+        assert_eq!(arr[0]["value"], json!("x"));
+    }
+
+    /// Real Cardano tx through the official Conway CDDL — verifies
+    /// that `mint = multiasset<nonZeroInt64>` (with type-keyed
+    /// `+ policy_id => +asset_name => …` map) labels the policy_id
+    /// hash and asset_name hex correctly instead of dumping them into
+    /// `@extra`.
+    #[test]
+    fn real_tx_mint_field_uses_actual_keys_not_extra_bucket() {
+        let Ok(cddl) = std::fs::read_to_string("/tmp/conway.cddl") else {
+            eprintln!("skipping — /tmp/conway.cddl missing");
+            return;
+        };
+        let Ok(hex_text) = std::fs::read_to_string("/Users/lisicky/svc/cddl/test_cbor") else {
+            eprintln!("skipping — /Users/lisicky/svc/cddl/test_cbor missing");
+            return;
+        };
+        let bytes = hex::decode(hex_text.trim()).unwrap();
+        let out = decode_cbor_against_cddl(&bytes, &cddl, "transaction").unwrap();
+        let mint = out
+            .get("transaction_body")
+            .and_then(|b| b.get("9"))
+            .expect("body[9] (mint) must be present in this fixture");
+        assert!(
+            mint.get("@extra").is_none(),
+            "mint should not leak into @extra, got {}",
+            mint
+        );
+        // Exactly one policy_id is minted; it's a 28-byte bstr, so the
+        // JSON key is `0x` + 56 hex chars.
+        let mint_obj = mint.as_object().expect("mint should be a map");
+        let policy_keys: Vec<&String> = mint_obj.keys().collect();
+        assert_eq!(policy_keys.len(), 1, "expected one policy in mint");
+        let policy = policy_keys[0];
+        assert!(
+            policy.starts_with("0x") && policy.len() == 2 + 56,
+            "policy key should be 0x<28 bytes hex>, got {:?}",
+            policy
+        );
+        // Each policy maps to {asset_name => quantity}. The quantity
+        // here is `1` (the asset_name is empty so its hex key is `0x`).
+        let assets = mint[policy].as_object().expect("inner asset map");
+        assert!(assets.contains_key("0x"), "expected `0x` (empty asset_name) in {:?}", assets);
+        assert_eq!(assets["0x"], json!(1));
+    }
+
+    #[test]
     fn extras_are_preserved_as_at_extra_bucket() {
         // a2 00 01 02 03 = {0: 1, 2: 3}. Schema only covers key 0.
         let out = run("t = {0: uint}", "t", "a200010203");
@@ -1552,5 +2012,623 @@ mod tests {
             out,
             json!({"0": 1, "@extra": {"2": 3}})
         );
+    }
+
+    // ========================================================
+    // Generics
+    // ========================================================
+
+    #[test]
+    fn set_generic_chained_through_multiple_rules() {
+        // set<a> wrapped through an alias chain: tagged_set -> set -> hash.
+        // CBOR: tag 258 [bstr(4: 01020304), bstr(4: 0a0b0c0d)]
+        // d9 0102 82 4401020304 4 40a0b0c0d
+        let schema = "
+            hash       = bstr
+            set<a>     = #6.258([* a])
+            tagged_set = set<hash>
+            wrapper    = tagged_set
+        ";
+        let cbor = "d9010282 4401020304 440a0b0c0d".replace(' ', "");
+        let out = run(schema, "wrapper", &cbor);
+        // Tag is unwrapped via TaggedData branch; result is array of hashes.
+        // Could be plain array (preferred) or {@tag, @value} fallback.
+        let arr = out
+            .as_array()
+            .cloned()
+            .or_else(|| out.get("@value").and_then(Value::as_array).cloned())
+            .expect("expected an array of hashes");
+        assert_eq!(arr, vec![json!("01020304"), json!("0a0b0c0d")]);
+    }
+
+    #[test]
+    fn nested_generic_pair_bstr_uint() {
+        // pair<k, v> = [k, v] used as pair<bstr, uint>.
+        // [bstr(4: 0a0b0c0d), 7]: 82 4 40a0b0c0d 07
+        //
+        // BUG (pinning current behaviour): generic parameter names that
+        // appear as array entries get treated as field labels by
+        // `consume_array_typegroupname` (the prelude-check there sees
+        // the *parameter name* `k`/`v`, which isn't a prelude type, so
+        // a previous version of the mapper promoted those slots to
+        // named fields keyed by the parameter idents. Now that bound
+        // generic parameters are excluded from name-based labelling,
+        // the slots flow into the unnamed positional list.
+        let schema = "
+            pair<k, v> = [k, v]
+            kv         = pair<bstr, uint>
+        ";
+        let cbor = "82440a0b0c0d07";
+        let out = run(schema, "kv", cbor);
+        assert_eq!(out, json!(["0a0b0c0d", 7]));
+    }
+
+    #[test]
+    fn pair_generic_with_named_positions() {
+        // pair<k, v> = [key: k, value: v] — names attach in array.
+        // [bstr(4: deadbeef), 99]: 82 44 deadbeef 18 63
+        let schema = "
+            pair<k, v> = [key: k, value: v]
+            kv         = pair<bstr, uint>
+        ";
+        let cbor = "8244deadbeef1863";
+        let out = run(schema, "kv", cbor);
+        assert_eq!(out, json!({"key": "deadbeef", "value": 99}));
+    }
+
+    #[test]
+    fn multiple_generic_params_used_in_different_positions() {
+        // entry<k, v> = {key: k, val: v}; concrete = entry<tstr, uint>.
+        // {"key":"abc","val":7}: a2 63 6b6579 63 616263 63 76616c 07
+        let schema = "
+            entry<k, v> = {key: k, val: v}
+            concrete    = entry<tstr, uint>
+        ";
+        let cbor = "a2636b657963616263637661 6c07".replace(' ', "");
+        let out = run(schema, "concrete", &cbor);
+        assert_eq!(out, json!({"key": "abc", "val": 7}));
+    }
+
+    #[test]
+    fn generic_param_rebound_in_subrule() {
+        // outer<x> = inner<x>; inner<y> = [y, y] — y is fresh in inner,
+        // bound from x at the call site.
+        // CBOR [5, 5]: 82 05 05
+        //
+        // Both array slots reference the generic parameter `y`. With
+        // bound generic params excluded from labelling, both slots end
+        // up in the unnamed array — no collision, no data loss.
+        let schema = "
+            outer<x>  = inner<x>
+            inner<y>  = [y, y]
+            wrap      = outer<uint>
+        ";
+        let out = run(schema, "wrap", "820505");
+        assert_eq!(out, json!([5, 5]));
+    }
+
+    // ========================================================
+    // Type choices
+    // ========================================================
+
+    #[test]
+    fn three_way_choice_second_alternative_wins() {
+        // (uint / tstr / bstr); given a tstr → tstr branch wins.
+        // tstr "yo": 62 796f
+        let out = run("v = uint / tstr / bstr", "v", "62796f");
+        assert_eq!(out, json!("yo"));
+    }
+
+    #[test]
+    fn choice_between_map_and_array_shapes_picks_map() {
+        // shape = {a: uint} / [uint]. Given {"a":1} → a1 6161 01.
+        let out = run("shape = {a: uint} / [uint]", "shape", "a1616101");
+        assert_eq!(out, json!({"a": 1}));
+    }
+
+    #[test]
+    fn choice_between_map_and_array_picks_array() {
+        // shape = {a: uint} / [uint]. Given [3] → 81 03.
+        let out = run("shape = {a: uint} / [uint]", "shape", "8103");
+        assert_eq!(out, json!([3]));
+    }
+
+    #[test]
+    fn choice_with_literal_discriminator_matches_first_alternative() {
+        // {type: "a", value: int} / {type: "b", value: tstr}.
+        // CBOR {"type":"a","value":7}:
+        //   a2 64 74797065 61 61 65 76616c7565 07
+        let schema = r#"
+            tagged = {type: "a", value: int} / {type: "b", value: tstr}
+        "#;
+        let cbor = "a26474797065616165 76616c756507".replace(' ', "");
+        let out = run(schema, "tagged", &cbor);
+        assert_eq!(out, json!({"type": "a", "value": 7}));
+    }
+
+    #[test]
+    fn choice_with_literal_discriminator_matches_second_alternative() {
+        // Second alternative {"type":"b","value":"hi"}:
+        //   a2 64 74797065 61 62 65 76616c7565 62 6869
+        let schema = r#"
+            tagged = {type: "a", value: int} / {type: "b", value: tstr}
+        "#;
+        let cbor = "a26474797065616265 76616c7565626869".replace(' ', "");
+        let out = run(schema, "tagged", &cbor);
+        assert_eq!(out, json!({"type": "b", "value": "hi"}));
+    }
+
+    #[test]
+    fn choice_with_no_alternative_matching_falls_back_to_raw() {
+        // v = uint / tstr; given a bool → should fall back to raw bool.
+        let out = run("v = uint / tstr", "v", "f5"); // true
+        assert_eq!(out, json!(true));
+    }
+
+    // ========================================================
+    // Tags
+    // ========================================================
+
+    #[test]
+    fn custom_tag_emits_tag_and_value_object() {
+        // #6.99(uint) — tag 99 wrapping an int.
+        // d8 63 18 2a = tag(99, 42)
+        let out = run("x = #6.99(uint)", "x", "d863182a");
+        assert_eq!(out, json!({"@tag": 99, "@value": 42}));
+    }
+
+    #[test]
+    fn tag_wrapping_a_generic_set() {
+        // #6.42(set<a>) where set<a> = #6.258([* a]).
+        // Outer tag 42 wrapping tag 258 [uint, uint]:
+        //   d8 2a   d9 0102   82 01 02
+        let schema = "
+            set<a> = #6.258([* a])
+            wrap   = #6.42(set<uint>)
+        ";
+        let cbor = "d82ad9010282 01 02".replace(' ', "");
+        let out = run(schema, "wrap", &cbor);
+        // Outer custom tag yields {@tag: 42, @value: <inner>}.
+        assert_eq!(out["@tag"], json!(42));
+        // Inner is set<uint> — unwrapped via TaggedData → just the array.
+        let inner = &out["@value"];
+        let arr = inner
+            .as_array()
+            .cloned()
+            .or_else(|| inner.get("@value").and_then(Value::as_array).cloned())
+            .expect("inner set should be an array");
+        assert_eq!(arr, vec![json!(1), json!(2)]);
+    }
+
+    #[test]
+    fn negative_bignum_tag_three_round_trip() {
+        // tag 3 with bytes 0x01 represents -(0x01) - 1 = -2.
+        // c3 41 01
+        let out = run("n = #6.3(bstr)", "n", "c34101");
+        assert_eq!(out, json!("-2"));
+    }
+
+    #[test]
+    fn negative_bignum_tag_three_large() {
+        // tag 3 + bytes 0x0100000000000000 (2^56) -> -(2^56) - 1.
+        // c3 48 0100000000000000
+        let out = run("n = #6.3(bstr)", "n", "c3480100000000000000");
+        // Magnitude is 72057594037927936; result is -(72057594037927936) - 1.
+        assert_eq!(out, json!("-72057594037927937"));
+    }
+
+    #[test]
+    fn mismatched_tag_falls_back_to_raw_value() {
+        // Schema wants #6.99 but CBOR has tag 17. Mapper has no matching
+        // alternative under this Type → falls back to raw_value, which
+        // emits {"@tag":17, "@value":42}.
+        // d1 18 2a = tag(17, 42)
+        let out = run("x = #6.99(uint)", "x", "d1182a");
+        assert_eq!(out, json!({"@tag": 17, "@value": 42}));
+    }
+
+    // ========================================================
+    // Maps (more variants)
+    // ========================================================
+
+    #[test]
+    fn map_keys_mixing_bareword_numeric_and_text_literals() {
+        // {a: uint, 5: bstr, "k": tstr}
+        // CBOR: {"a": 1, 5: bytes(02), "k": "v"}
+        //   a3 61 61 01 05 41 02 61 6b 61 76
+        let schema = r#"t = {a: uint, 5: bstr, "k": tstr}"#;
+        let cbor = "a36161010541026 16b6176".replace(' ', "");
+        let out = run(schema, "t", &cbor);
+        assert_eq!(out, json!({"a": 1, "5": "02", "k": "v"}));
+    }
+
+    #[test]
+    fn map_keys_with_cut_indicator() {
+        // `^` cut indicator ("foo" ^ => uint) — semantics: this key is
+        // matched exclusively. The mapper should still produce a labelled
+        // field. CBOR: {"foo": 1, "bar": "x"}.
+        //   a2 63 666f6f 01 63 626172 61 78
+        let schema = r#"t = { "foo" ^ => uint, * tstr => any }"#;
+        let cbor = "a263666f6f0163626172 6178".replace(' ', "");
+        let out = run(schema, "t", &cbor);
+        assert_eq!(out["foo"], json!(1));
+        // The `* tstr => any` branch in the mapper currently is treated
+        // as having no member_key match it can use as a name (it's a
+        // type1-key, not a literal/bareword), so "bar" likely lands in
+        // @extra. We assert that the data is preserved either way.
+        let preserved = out.get("bar").is_some()
+            || out
+                .get("@extra")
+                .and_then(|e| e.get("bar"))
+                .is_some();
+        assert!(preserved, "lost the 'bar' entry: {}", out);
+    }
+
+    #[test]
+    fn map_open_ended_tstr_to_any_falls_back_to_extra() {
+        // `* tstr => any` open-ended map. Mapper currently doesn't model
+        // type1-key glob-collection — entries fall into @extra. This
+        // pins the fallback path; if support lands, this test will fail
+        // and we'll update it.
+        // {"x": 1, "y": "hi"}: a2 61 78 01 61 79 62 6869
+        let schema = "t = { * tstr => any }";
+        let cbor = "a26178016179626869";
+        let out = run(schema, "t", cbor);
+        // Either direct labelling (future) or @extra fallback (today).
+        let extras = out.get("@extra");
+        if let Some(extras) = extras {
+            assert_eq!(extras["x"], json!(1));
+            assert_eq!(extras["y"], json!("hi"));
+        } else {
+            assert_eq!(out["x"], json!(1));
+            assert_eq!(out["y"], json!("hi"));
+        }
+    }
+
+    #[test]
+    fn map_required_optional_and_repeating_together() {
+        // a: required uint, ? b: optional bstr, * 9 => uint.
+        // CBOR has duplicate key `9` — entries form preserves order.
+        // {a: 1, 9: 7, 9: 8}: a3 61 61 01 09 07 09 08
+        let schema = "t = { a: uint, ? b: bstr, * 9 => uint }";
+        let cbor = "a361610109070908";
+        let out = run(schema, "t", cbor);
+        let entries = out["@entries"].as_array().unwrap();
+        assert_eq!(entries.len(), 3);
+        // First wire entry: bareword "a" → 1.
+        assert_eq!(entries[0]["key"], json!("a"));
+        assert_eq!(entries[0]["value"], json!(1));
+        // Then two duplicate `9 => …` entries.
+        assert_eq!(entries[1]["key"], json!(9));
+        assert_eq!(entries[1]["value"], json!(7));
+        assert_eq!(entries[2]["key"], json!(9));
+        assert_eq!(entries[2]["value"], json!(8));
+    }
+
+    // ========================================================
+    // Arrays (more variants)
+    // ========================================================
+
+    #[test]
+    fn positional_array_with_optional_trailing_elements() {
+        // [a: uint, b: uint, ? c: uint] — give it [1, 2].
+        // 82 01 02
+        let schema = "t = [a: uint, b: uint, ? c: uint]";
+        let out = run(schema, "t", "820102");
+        assert_eq!(out, json!({"a": 1, "b": 2}));
+    }
+
+    #[test]
+    fn positional_array_with_optional_present() {
+        // Same schema; include c. 83 01 02 03
+        let schema = "t = [a: uint, b: uint, ? c: uint]";
+        let out = run(schema, "t", "83010203");
+        assert_eq!(out, json!({"a": 1, "b": 2, "c": 3}));
+    }
+
+    #[test]
+    fn array_one_or_more_homogeneous_tail() {
+        // [head: uint, + uint] — at least one tail item.
+        // 84 01 02 03 04 = [1, 2, 3, 4]
+        let schema = "t = [head: uint, + uint]";
+        let out = run(schema, "t", "8401020304");
+        // head labelled, tail items lack a name → @positional.
+        assert_eq!(out["head"], json!(1));
+        // The remaining items go to @positional.
+        let pos = out.get("@positional").expect("expected @positional");
+        assert_eq!(pos, &json!([2, 3, 4]));
+    }
+
+    #[test]
+    fn array_mixed_named_and_unnamed_entries() {
+        // [a: uint, uint, b: uint] — middle slot is unnamed.
+        // 83 01 02 03
+        let schema = "t = [a: uint, uint, b: uint]";
+        let out = run(schema, "t", "83010203");
+        assert_eq!(out["a"], json!(1));
+        assert_eq!(out["b"], json!(3));
+        let pos = out.get("@positional").expect("@positional present");
+        assert_eq!(pos, &json!([2]));
+    }
+
+    #[test]
+    fn empty_array_against_zero_or_more_yields_empty_json_array() {
+        // [* uint] given empty CBOR array (0x80) → [].
+        let out = run("t = [* uint]", "t", "80");
+        assert_eq!(out, json!([]));
+    }
+
+    // ========================================================
+    // Unwrap
+    // ========================================================
+
+    #[test]
+    fn unwrap_referencing_rule_with_multiple_choices() {
+        // base = uint / tstr; wrapped = ~base. Given a tstr it should
+        // resolve to the tstr branch.
+        // "hey": 63 686579
+        let schema = "
+            base    = uint / tstr
+            wrapped = ~base
+        ";
+        let out = run(schema, "wrapped", "63686579");
+        assert_eq!(out, json!("hey"));
+    }
+
+    #[test]
+    fn unwrap_referenced_from_inside_a_generic() {
+        // generic<a> = [a, a]; base = [b: bstr]; wrap = generic<~base>.
+        // Each element is an unwrapped base = a positional array.
+        // CBOR: [[bstr(4: 01020304)], [bstr(4: 0a0b0c0d)]]
+        //   82  81 4401020304  81 440a0b0c0d
+        //
+        // BUG (pinning current behaviour): same as
+        // `generic_param_rebound_in_subrule` — both `a` slots are now
+        // recognised as bound generic params and stay in the unnamed
+        // array, preserving order and both elements.
+        let schema = "
+            base       = [b: bstr]
+            generic<a> = [a, a]
+            wrap       = generic<~base>
+        ";
+        let cbor = "8281 4401020304 81 440a0b0c0d".replace(' ', "");
+        let out = run(schema, "wrap", &cbor);
+        assert_eq!(
+            out,
+            json!([{"b": "01020304"}, {"b": "0a0b0c0d"}])
+        );
+    }
+
+    #[test]
+    fn unwrap_chain_a_unwraps_b_unwraps_c() {
+        // a = ~b; b = ~c; c = [int]. Should resolve through both unwraps.
+        // CBOR [42]: 81 18 2a
+        let schema = "
+            a = ~b
+            b = ~c
+            c = [int]
+        ";
+        let out = run(schema, "a", "81182a");
+        assert_eq!(out, json!([42]));
+    }
+
+    // ========================================================
+    // .cbor / .cborseq
+    // ========================================================
+
+    #[test]
+    fn cborseq_decodes_embedded_array_value() {
+        // bstr .cborseq inner; inner = [a: int, b: int].
+        // Outer bstr containing CBOR bytes for [1,2]: 43 82 01 02
+        let schema = "x = bstr .cborseq inner\ninner = [a: int, b: int]";
+        let out = run(schema, "x", "43820102");
+        let labelled = out.get("a").is_some() && out.get("b").is_some();
+        let raw_hex = out.as_str().map_or(false, |s| s.contains("82"));
+        assert!(
+            labelled || raw_hex,
+            ".cborseq should decode or fall back, got {}",
+            out
+        );
+    }
+
+    #[test]
+    fn cbor_control_with_generic_inner_type() {
+        // x = bstr .cbor maybe<uint>; maybe<a> = a / null.
+        // bstr containing CBOR `7` → 41 07.
+        let schema = "
+            maybe<a> = a / null
+            x        = bstr .cbor maybe<uint>
+        ";
+        let out = run(schema, "x", "4107");
+        assert_eq!(out, json!(7));
+    }
+
+    #[test]
+    fn cbor_control_with_tagged_inner_type() {
+        // x = bstr .cbor #6.0(tstr). Outer bstr contains CBOR for
+        // tag 0 "2024-01-01T00:00:00Z" — c0 74 32303234... .
+        // Outer hex: 41 + 0x16 byte payload = 56 bytes total? Let's
+        // construct precisely:
+        //   payload = c0 74 32303234 2d30312d30315430303a30303a30305a
+        //           = 22 bytes total: 1 (c0) + 1 (74) + 20 (string)
+        //   bstr header for 22 bytes = 0x56 (major 2, length 22).
+        let outer_hex = "56c074323032342d30312d30315430303a30303a30305a";
+        let schema = "x = bstr .cbor #6.0(tstr)";
+        let out = run(schema, "x", outer_hex);
+        assert_eq!(out, json!("2024-01-01T00:00:00Z"));
+    }
+
+    // ========================================================
+    // Edge cases
+    // ========================================================
+
+    #[test]
+    fn empty_cddl_errors_meaningfully() {
+        let err = decode_cbor_against_cddl(b"\x01", "", "x")
+            .err()
+            .expect("expected error for empty CDDL");
+        // Empty CDDL fails to parse OR returns rule-not-found.
+        let msg = err.as_string().unwrap();
+        assert!(
+            msg.to_lowercase().contains("parse")
+                || msg.contains("does not define a rule"),
+            "unexpected error: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn malformed_cddl_errors() {
+        let err = decode_cbor_against_cddl(b"\x01", "x = = =", "x")
+            .err()
+            .expect("expected parse error");
+        assert!(err.as_string().unwrap().to_lowercase().contains("parse"));
+    }
+
+    #[test]
+    fn cbor_does_not_match_schema_falls_back_to_raw() {
+        // Schema expects an array; CBOR is an int. No alternative → raw.
+        let out = run("x = [a: uint]", "x", "182a");
+        // raw_value over an Integer just returns the number.
+        assert_eq!(out, json!(42));
+    }
+
+    #[test]
+    fn indefinite_length_array_against_homogeneous_schema() {
+        // 9f 01 02 03 ff = indefinite-length array [1, 2, 3].
+        let out = run("t = [* uint]", "t", "9f010203ff");
+        assert_eq!(out, json!([1, 2, 3]));
+    }
+
+    #[test]
+    fn indefinite_length_map_against_named_schema() {
+        // bf 61 61 01 61 62 02 ff = indefinite map {"a":1, "b":2}.
+        let out = run("t = {a: uint, b: uint}", "t", "bf6161016162 02ff".replace(' ', "").as_str());
+        assert_eq!(out, json!({"a": 1, "b": 2}));
+    }
+
+    // ========================================================
+    // Cardano-flavoured integration
+    // ========================================================
+
+    #[test]
+    fn multiasset_value_coin_only_branch() {
+        // value = coin / [coin, multiasset<coin>]
+        // Plain coin (uint 1000): 19 03e8
+        let schema = "
+            coin            = uint
+            multiasset<a>   = { * bstr => { * bstr => a } }
+            value           = coin / [coin, multiasset<coin>]
+        ";
+        let out = run(schema, "value", "1903e8");
+        assert_eq!(out, json!(1000));
+    }
+
+    #[test]
+    fn multiasset_value_pair_branch() {
+        // [coin, multiasset<coin>]:
+        //   [1000, {bstr(0): {bstr(0): 5}}]
+        //   82 1903e8 a1 40 a1 40 05
+        let schema = "
+            coin            = uint
+            multiasset<a>   = { * bstr => { * bstr => a } }
+            value           = coin / [coin, multiasset<coin>]
+        ";
+        let cbor = "82 1903e8 a1 40 a1 40 05".replace(' ', "");
+        let out = run(schema, "value", &cbor);
+        // First slot is coin (unnamed → @positional or unnamed array
+        // entry); without bareword names the array stays unlabelled.
+        // We assert the coin amount is preserved somewhere recognisable.
+        let coin_in_array = out.as_array().map_or(false, |a| a[0] == json!(1000));
+        let coin_positional = out
+            .get("@positional")
+            .and_then(Value::as_array)
+            .map_or(false, |a| a[0] == json!(1000));
+        assert!(
+            coin_in_array || coin_positional,
+            "expected 1000 to be the first element, got {}",
+            out
+        );
+    }
+
+    #[test]
+    fn language_range_type_in_range() {
+        // language = 0..2; given uint 1.
+        let schema = "language = 0..2";
+        let out = run(schema, "language", "01");
+        // Range types aren't fully modelled — we expect the prelude/raw
+        // path to surface the integer somehow. Pin current behaviour.
+        assert_eq!(out, json!(1));
+    }
+
+    #[test]
+    fn language_range_type_out_of_range_still_returns_value() {
+        // Same schema given uint 9 (out of range). Mapper does not
+        // enforce ranges; it returns the raw int.
+        let schema = "language = 0..2";
+        let out = run(schema, "language", "09");
+        assert_eq!(out, json!(9));
+    }
+
+    // ========================================================
+    // Additional misc / bonus coverage
+    // ========================================================
+
+    #[test]
+    fn nested_optional_record_inside_named_array_field() {
+        // tx = [body: {a: uint, ? b: uint}, ok: bool]
+        // CBOR: [{a:1}, true]: 82 a1 61 61 01 f5
+        let schema = "tx = [body: {a: uint, ? b: uint}, ok: bool]";
+        let out = run(schema, "tx", "82a16161 01f5".replace(' ', "").as_str());
+        assert_eq!(out, json!({"body": {"a": 1}, "ok": true}));
+    }
+
+    #[test]
+    fn deep_generic_substitution_within_array() {
+        // wrapper<a> = [* a]; pair<x> = [x, x]; concrete = wrapper<pair<uint>>.
+        // CBOR [[1,2], [3,4]]: 82 82 01 02 82 03 04
+        //
+        // Inside `pair<x>`, both slots are bound generic params and
+        // flow into the unnamed list, preserving both pair elements.
+        // The outer `wrapper<a>` produces a homogeneous array.
+        let schema = "
+            wrapper<a> = [* a]
+            pair<x>    = [x, x]
+            concrete   = wrapper<pair<uint>>
+        ";
+        let out = run(schema, "concrete", "8282010282030 4".replace(' ', "").as_str());
+        assert_eq!(out, json!([[1, 2], [3, 4]]));
+    }
+
+    #[test]
+    fn null_value_against_optional_field_inside_array() {
+        // tx = [aux: auxiliary_data / null]; CBOR [null]: 81 f6
+        let schema = "
+            auxiliary_data = #6.259({})
+            tx             = [aux: auxiliary_data / null]
+        ";
+        let out = run(schema, "tx", "81f6");
+        assert_eq!(out, json!({"aux": null}));
+    }
+
+    #[test]
+    fn float_primitive_round_trip() {
+        // x = float; CBOR fb 4000000000000000 = float64(2.0).
+        let out = run("x = float", "x", "fb4000000000000000");
+        assert_eq!(out, json!(2.0));
+    }
+
+    #[test]
+    fn bool_primitive_false() {
+        // CBOR f4 = false
+        let out = run("x = bool", "x", "f4");
+        assert_eq!(out, json!(false));
+    }
+
+    #[test]
+    fn null_primitive() {
+        // CBOR f6 = null; schema is `null`.
+        let out = run("x = null", "x", "f6");
+        assert_eq!(out, json!(null));
     }
 }

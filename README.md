@@ -25,9 +25,13 @@ Functions:
 ### CBOR Decoder & CDDL Validation
 
 - `cbor_to_json(cbor_hex)` - Converts raw CBOR to JSON with positional information, supporting indefinite arrays/maps and all CBOR types. Each node carries an optional `oddities` array flagging deviations from RFC 8949 deterministic encoding (overlong integers/floats, indefinite length, unsorted/duplicate map keys, non-canonical bignums). Never throws on malformed input — returns a `{ok, value}` / `{ok: false, error, partial?}` union where `error` is a structured `CborDecodeError` (kind / byte offset / byte span / semantic `path`) and `partial` is the sub-tree decoded before the failure, with every unfinished container flagged `incomplete: true`.
-- `validate_cddl(cddl)` - Parses a CDDL schema; reports parse errors and unresolved rule references (e.g. `thing = [unknown_rule, int]` → `kind: "unresolved_references"`).
-- `validate_cbor_against_cddl(cbor_hex, cddl, rule_name)` - Validates a CBOR payload against a named rule. Errors carry `kind`, `expected`, semantic `path`, byte/anchor spans, and an `additional` array when multiple violations fire.
+- `validate_cddl(cddl)` - Parses a CDDL schema; reports parse errors (with a `byte_span` for editor squiggles) and unresolved rule references (e.g. `thing = [unknown_rule, int]` → `kind: "unresolved_references"`).
+- `validate_cbor_against_cddl(cbor_hex, cddl, rule_name)` - Validates a CBOR payload against a named rule. Errors carry `kind`, `expected`, semantic `path`, byte/anchor spans, a `cddl_byte_span` pointing at the failing CDDL type, and an `additional` array when multiple violations fire.
 - `decode_cbor_against_cddl(cbor_hex, cddl, rule_name)` - Maps decoded CBOR onto a CDDL schema and returns labelled JSON (e.g. Cardano `[body, witness_set, bool, aux]` becomes `{transaction_body, transaction_witness_set, ...}`). Handles generics (`set<a>`), tagged sets, type rules used as field labels, and a few well-known tags (bignum → string number, datetime → ISO string). Sub-structures the schema doesn't cover surface under `@extra` / `@positional` so partial matches don't lose data.
+- `cddl_outline(cddl)` - Returns one `{name, kind, span, name_span}` entry per top-level rule. Editor outline view, breadcrumbs, fuzzy "go to rule".
+- `cddl_references(cddl, name)` - Returns `{definition, uses[]}` byte ranges for a rule name. Powers find-references and same-name highlighting on cursor.
+- `cddl_symbol_at(cddl, offset)` - Returns the symbol under the cursor (or `null`), with `role: "definition" | "use"` and a `definition_span` pointing at its rule. Powers hover and Cmd-click go-to-definition.
+- `cddl_format(cddl)` - Pretty-prints CDDL by round-tripping through the AST. Useful for format-on-save.
 
 ### Plutus Script Decoder
 
@@ -349,9 +353,15 @@ validate_cddl("thing = {n: uint}");
 validate_cddl("thing = [unknown_rule, int]");
 // { valid: false, error: { kind: "unresolved_references",
 //                           message: "missing definition for rule unknown_rule" } }
+
+validate_cddl("; only a comment\n");
+// { valid: false, error: { kind: "no_rules",
+//                           message: "CDDL document defines no rules" } }
 ```
 
-`error.kind` values: `"parse_error"`, `"unresolved_references"`.
+Parser errors include a `byte_span: {offset, length, line}` so editors can squiggle the exact position pest tripped on.
+
+`error.kind` values: `"parse_error"`, `"unresolved_references"`, `"no_rules"`.
 
 #### `validate_cbor_against_cddl(cbor_hex: string, cddl: string, rule_name: string): { valid: boolean, error?: object }`
 
@@ -366,12 +376,17 @@ validate_cbor_against_cddl("01", "thing = tstr", "thing");
 //     expected: "tstr",
 //     path: "$",
 //     byte_spans: [{ offset: 0, length: 1 }],
+//     cddl_byte_span: { offset: 8, length: 4, line: 1 },  // points at `tstr`
 //     message: "expected type tstr, got Integer(Integer(1))"
 //   }
 // }
 ```
 
-`error.kind` values: `"parse_error"`, `"unresolved_references"`, `"missing_rule"`, `"input_parse"`, `"mismatch"`, `"map_cut"`, `"generic"`. When multiple violations fire, the headline goes in the top-level fields and the rest land in `error.additional`.
+`error.cddl_byte_span` carries the byte range in the **CDDL source** pointing at the type the validator tried (and failed) to apply — useful for highlighting the offending rule in an editor. It's synthesised by walking the AST in parallel with `path`, so it's available for any error that has a meaningful `path`. When the `rule_name` you passed isn't the first rule of the document, the offsets are still expressed in *your* CDDL coordinates (the wrapper we use internally is invisible to callers).
+
+`error.kind` values: `"parse_error"`, `"unresolved_references"`, `"no_rules"`, `"missing_rule"`, `"input_parse"`, `"mismatch"`, `"map_cut"`, `"generic"`. When multiple violations fire, the headline goes in the top-level fields and the rest land in `error.additional`.
+
+`anchor_spans` is always populated — for container values (Map / Array / Tag / indefinite strings) it covers the whole structure; for scalars it falls back to `position_info` so a UI's halo highlight always has something to draw.
 
 #### `decode_cbor_against_cddl(cbor_hex: string, cddl: string, rule_name: string): unknown`
 
@@ -394,6 +409,49 @@ decode_cbor_against_cddl(txHex, conwayCddl, "transaction");
 ```
 
 Recognised features: type choices (first match wins), generics (`set<a>`), tagged data (well-known tags 0/2/3 specialised to ISO date / bignum string), rule references, optionals/repetitions, prelude scalars. Sub-structures the schema doesn't cover or that don't match any choice fall back to a raw form under `@extra` (maps) or `@positional` (arrays) so data is never silently dropped.
+
+#### CDDL editor primitives
+
+For embedding a CDDL editor / inspector. All four functions parse the document with the same checked parser as `validate_cddl` and throw on parse errors.
+
+```typescript
+// Document outline — list every rule with its byte range.
+cddl_outline("alpha = uint\nbeta = (a: int)");
+// [
+//   {name: "alpha", kind: "type",  span: {offset: 0,  length: 12, line: 1},
+//                                  name_span: {offset: 0, length: 5, line: 1}},
+//   {name: "beta",  kind: "group", span: {offset: 13, length: 14, line: 2},
+//                                  name_span: {offset: 13, length: 4, line: 2}}
+// ]
+
+// Find every use of a rule — the IDE "Find references" affordance.
+cddl_references("coin = uint\noutput = [bstr, coin]\nfee = coin", "coin");
+// {definition: {offset: 0, length: 4, line: 1},
+//  uses: [
+//    {offset: 26, length: 4, line: 2},
+//    {offset: 38, length: 4, line: 3}
+//  ]}
+
+// Symbol at cursor — hover info and Cmd-click target.
+cddl_symbol_at("coin = uint\nfee = coin", /* offset = */ 18);
+// {name: "coin", kind: "rule_reference", role: "use",
+//  span: {offset: 18, length: 4, line: 2},
+//  definition_span: {offset: 0, length: 4, line: 1},
+//  rule_span: {offset: 0, length: 11, line: 1}}
+
+// Re-format — round-trip via Display. Comments survive
+// (both standalone `; …` and trailing `; …`).
+cddl_format("; header\nalpha   =   uint ; trailing");
+// "; header\nalpha = uint ; trailing\n"
+```
+
+`validate_cddl` itself returns a `byte_span` on parser errors so editor-side squiggles can underline the offending position directly:
+
+```typescript
+validate_cddl("alpha = ");
+// {valid: false,
+//  error: {kind: "parse_error", message: "...", byte_span: {offset: 8, length: 0, line: 1}}}
+```
 
 ### Plutus Script Decoder
 

@@ -172,6 +172,203 @@ export function validate_cbor_against_cddl(
 ): CborValidationResult;
 
 /**
+ * **CDDL spans carry both byte and char offsets.** `offset`/`length`
+ * count UTF-8 bytes (what `pest` reports); `char_offset`/`char_length`
+ * count UTF-16 code units — the unit JS strings, `string.slice`,
+ * editor APIs, and the LSP protocol use. For ASCII-only sources the
+ * two pairs are identical.
+ *
+ * **CBOR spans are byte offsets only** — into the decoded CBOR buffer.
+ * If you have a hex string, multiply by 2 to slice the hex view:
+ * `hex.slice(off*2, (off+len)*2)`.
+ */
+export interface SourceSpan {
+    /** UTF-8 byte offset in the source. */
+    offset: number;
+    /** UTF-8 byte length. */
+    length: number;
+    /** UTF-16 code unit offset (= `string.slice`-friendly). */
+    char_offset: number;
+    /** UTF-16 code unit length. */
+    char_length: number;
+    /** 1-indexed line. */
+    line: number;
+}
+
+/** Outline entry — one rule from `cddl_outline`. */
+export interface CddlOutlineEntry {
+    /** Rule name (`transaction_body`, `set`, …). */
+    name: string;
+    /** `"type"` for `=`, `"group"` for `( … )`. */
+    kind: "type" | "group";
+    /** Byte range covering the whole `name = …` rule definition. */
+    span: SourceSpan;
+    /** Byte range of just the rule's name identifier. */
+    name_span: SourceSpan;
+}
+
+/** Result of `cddl_symbol_at`. `null` when the cursor isn't on an identifier. */
+export type CddlSymbolAtResult =
+    | null
+    | {
+          name: string;
+          kind: "type" | "group" | "rule_reference" | "prelude_or_unknown";
+          role: "definition" | "use";
+          span: SourceSpan;
+          definition_span: SourceSpan | null;
+          rule_span: SourceSpan | null;
+      };
+
+/** Result of `cddl_references`. */
+export interface CddlReferencesResult {
+    definition: SourceSpan | null;
+    uses: SourceSpan[];
+}
+
+/**
+ * Returns one entry per top-level rule (`{name, kind, span, name_span}`).
+ * Used for editor outline view, breadcrumbs, fuzzy "go to rule".
+ * @param cddl
+ */
+export function cddl_outline(cddl: string): CddlOutlineEntry[];
+
+/**
+ * Returns `{definition, uses[]}` byte ranges for the rule named `name`.
+ * Powers find-references and rename-aware highlighting.
+ * @param cddl
+ * @param name
+ */
+export function cddl_references(cddl: string, name: string): CddlReferencesResult;
+
+/**
+ * Returns the symbol under `offset` (or `null` if none). For uses,
+ * `definition_span` points at the rule's name — the "go to definition"
+ * target.
+ * @param cddl
+ * @param offset
+ */
+export function cddl_symbol_at(cddl: string, offset: number): CddlSymbolAtResult;
+
+/**
+ * Pretty-prints the CDDL by parsing it and serialising via `Display`.
+ * Useful for "format on save". Throws on invalid input.
+ * @param cddl
+ */
+export function cddl_format(cddl: string): string;
+
+/** One entry from `map_cbor_to_cddl`: a single position of a CBOR
+ *  node, the type that matched it, and the path it ends up at in the
+ *  output of `decode_cbor_against_cddl`.
+ *
+ *  ## `decoded_path` conventions
+ *
+ *  Every node addressable in the JSON tree returned by
+ *  `decode_cbor_against_cddl` has at least one entry here — including
+ *  the synthetic keys the decoder inserts when the data shape doesn't
+ *  fit a plain JSON object. UI consumers can right-click any tree row
+ *  and look up `entries.find(e => e.decoded_path === path)` to find
+ *  the matching CBOR + CDDL spans.
+ *
+ *  Synthetic-key paths:
+ *
+ *  * `<wrapper>["@tag"]` — the tag-number row of an unspecialised
+ *    tagged value (decoder represents these as `{@tag, @value}`).
+ *    `cbor_byte_span` covers just the tag header bytes (`d9 0102`,
+ *    not the whole `Tag(258, …)` extent); `cddl_byte_span` covers the
+ *    `#6.NNN(...)` form. Tags 0/2/3 are specialised to scalars and
+ *    don't get this row.
+ *  * `<wrapper>["@value"]` — the inner value of an unspecialised tag.
+ *    Resolves to the inner type's CDDL location.
+ *  * `<arr>["@positional"]` — wrapper row over the unlabelled slots
+ *    of a mixed (labelled + unlabelled) tuple. No `cddl_byte_span`.
+ *    `cbor_byte_span` / `cbor_anchor_span` cover the unlabelled items'
+ *    combined byte extent.
+ *  * `<arr>["@positional"][N]` — individual unlabelled slot at array
+ *    index N (kept under `@positional` because the named slots
+ *    occupy the object level).
+ *  * `<arr>["@extra"]` — wrapper row over array items past the schema
+ *    cursor (overlong arrays). No `cddl_byte_span`. `<arr>["@extra"][N]`
+ *    addresses each leftover item.
+ *  * `<map>["@extra"]` — wrapper row over map keys not declared in
+ *    the schema (object form only). `<map>["@extra"][<key>]`
+ *    addresses each leftover entry's value.
+ *  * `<map>["@entries"]` — wrapper row over the wire-order array form
+ *    used when the map has complex keys or duplicate keys (see
+ *    `decode_cbor_against_cddl` docs). No `cddl_byte_span`.
+ *  * `<map>["@entries"][N]` — each pair as a single addressable row
+ *    (covers key+value bytes, `cbor_type: "map_entry"`, `cddl_byte_span`
+ *    = matched MemberKey's declaration if any).
+ *  * `<map>["@entries"][N]["key"]` — key bytes of the Nth pair.
+ *    `entry_role: "key"`.
+ *  * `<map>["@entries"][N]["value"]` — value bytes of the Nth pair,
+ *    plus deeper rows under it walking the matched member's value
+ *    type.
+ *
+ *  Wrapper rows (`@entries`, `@positional`, `@extra`) carry a
+ *  `cbor_type` like `"map_entries"` / `"array_positional"` /
+ *  `"map_extra"` / `"array_extra"` and intentionally omit
+ *  `cddl_byte_span` — they are JSON-shape artefacts with no CDDL
+ *  counterpart. */
+export interface CborCddlMapEntry {
+    /** Path into the *raw* CBOR tree (numeric map keys are bracketed). */
+    cbor_path: string;
+    /** Path into the labelled JSON returned by `decode_cbor_against_cddl`.
+     *  Numeric map keys come back as bracket-quoted strings (`["0"]`)
+     *  because decoded JSON has only string keys; identifier-safe keys
+     *  use dot notation (`.name`). For unspecialised tags (anything
+     *  except 0 / 2 / 3) the inner gets an extra `["@value"]` segment
+     *  to match the `{@tag, @value}` wrapper the decoder emits.
+     *
+     *  See the interface comment for the full list of synthetic-key
+     *  segments (`@tag`, `@value`, `@positional`, `@extra`, `@entries`). */
+    decoded_path: string;
+    /** Whether this entry describes the value at `cbor_path`, or the
+     *  *key* of a map entry at that path. Map entries with named keys
+     *  produce both a `"key"` entry (CBOR span = key bytes, CDDL span
+     *  = `name:` / `<value>:` declaration) and a `"value"` entry; both
+     *  carry the same `cbor_path` / `decoded_path`. Array slots, tag
+     *  payloads, and root nodes are always `"value"`. */
+    entry_role: "key" | "value";
+    /** Header byte range of the CBOR node. */
+    cbor_byte_span: { offset: number; length: number };
+    /** Whole-structure byte range (= `cbor_byte_span` for scalars). */
+    cbor_anchor_span: { offset: number; length: number };
+    /** Byte range in the CDDL source describing this position. Omitted
+     *  on synthetic wrapper rows (`@entries`, `@positional`, `@extra`)
+     *  which have no CDDL counterpart. */
+    cddl_byte_span?: SourceSpan;
+    /** Name of the CDDL rule that matched, if a rule boundary was crossed. */
+    rule_name?: string;
+    /** CBOR node's wire type (`U8`, `Bytes`, `Map`, `Array`, `Tag`, …),
+     *  or — for synthetic wrapper rows — a label describing the
+     *  wrapper's role: `"map_entries"`, `"map_extra"`,
+     *  `"array_positional"`, `"array_extra"`, `"map_entry"` (per-pair
+     *  row in `@entries` form). */
+    cbor_type?: string;
+}
+
+/**
+ * Returns a flat list of mapping entries pairing each visited CBOR node
+ * with the CDDL position that describes it. Use it to wire
+ * bidirectional highlight between a CBOR panel and a CDDL panel without
+ * needing a validation error to trigger it.
+ *
+ * Order is depth-first pre-order, so a parent's entry precedes its
+ * children's. Tags in the CBOR are transparent to the path grammar
+ * (anweiss-style): `Tag(258, [...])` is walked as if the tag wrapper
+ * weren't there when matching against `[* a]`-shaped schemas.
+ *
+ * @param cbor_hex
+ * @param cddl
+ * @param rule_name
+ */
+export function map_cbor_to_cddl(
+    cbor_hex: string,
+    cddl: string,
+    rule_name: string
+): CborCddlMapEntry[];
+
+/**
  * Maps decoded CBOR onto a CDDL schema and returns labelled JSON. Where
  * `cbor_to_json` returns positional CBOR (numeric map keys, raw arrays),
  * this walks the schema in parallel and replaces them with the named
@@ -182,6 +379,29 @@ export function validate_cbor_against_cddl(
  * Sub-structures the schema doesn't cover fall back to a raw
  * representation (under `@extra` for maps / `@positional` for arrays),
  * so partial matches still yield useful output.
+ *
+ * **Map output shape**: by default we emit JSON objects (`{a: 1, b: 2}`)
+ * for the convenient case. We switch to a wire-order-preserving array
+ * form `{ "@entries": [{ key, value, match: { via, label } }, ...] }`
+ * when the JSON object form would lose information:
+ *
+ *  * any cbor key is a complex value (Array / Map / Tag / non-standard
+ *    Simple) — JSON objects can only have string keys.
+ *  * the cbor map has duplicate keys (RFC 8949 §5.6 — non-canonical
+ *    but legal). Collapsing into a value-array would drop the
+ *    interleaving order with surrounding entries.
+ *
+ * In `@entries` form, each pair carries a `match` field describing how
+ * the cbor key was matched against the schema:
+ *  * `match.via: "literal"` — bareword / literal value match;
+ *    `match.label` is the literal text.
+ *  * `match.via: "type"` — `<type1> => …` schema, the key conforms
+ *    to a type (e.g. `policy_id => …`); `match.label` is `null`.
+ *  * `match.via: "unmatched"` — no schema entry accepted this key,
+ *    `key` and `value` are raw decoded forms; `match.label` is `null`.
+ *
+ * Almost all Cardano maps (txbody, multiasset, witness_set) use object
+ * form; the `@entries` form only kicks in for the unusual cases above.
  * @param {string} cbor_hex
  * @param {string} cddl
  * @param {string} rule_name
@@ -408,6 +628,11 @@ export type CddlValidationResult =
 export interface CddlErrorInfo {
     kind: string;
     message: string;
+    /**
+     * Byte range in the CDDL source the parser tripped over, when the
+     * error has positional info. Useful for IDE squiggly underlines.
+     */
+    byte_span?: SourceSpan;
 }
 
 export type CborValidationResult =
@@ -418,6 +643,7 @@ export type CborValidationResult =
  * `kind` categorises the failure:
  *  - "parse_error" — the CDDL itself failed to parse
  *  - "unresolved_references" — the CDDL references a rule name that isn't defined
+ *  - "no_rules" — the CDDL parsed but defined no rules (empty / comment-only document)
  *  - "missing_rule" — the rule name passed to `validate_cbor_against_cddl` is not in the CDDL
  *  - "input_parse" — the CBOR bytes themselves are malformed
  *  - "mismatch" / "map_cut" — a data mismatch; inspect `expected`, `path`,
@@ -428,9 +654,21 @@ export interface CborValidationErrorInfo {
     kind: string;
     message: string;
     expected?: string;
+    /** Semantic path into the CBOR (e.g. `$.b[0]`). */
     path?: string;
+    /** Byte range in the CBOR input that triggered the error. */
     byte_spans?: CborPosition[];
+    /** Byte range covering the whole containing CBOR structure. */
     anchor_spans?: CborPosition[];
+    /**
+     * Byte range in the CDDL **source** pointing at the type the
+     * validator tried to apply when it failed (synthesised by walking
+     * the AST in parallel with `path`). Useful for highlighting the
+     * offending CDDL rule in editors.
+     */
+    cddl_byte_span?: SourceSpan;
+    /** Other validation errors reported in the same run. */
+    additional?: CborValidationErrorInfo[];
 }
 
 export interface DecodingParams {

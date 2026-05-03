@@ -3,9 +3,12 @@ use crate::js_error::JsError;
 use crate::js_value::{from_serde_json_value, JsValue};
 use serde_json::{Map, Value};
 
+mod cbor_cddl_map;
+mod cddl_tools;
 mod decoder;
 mod errors;
 mod schema_mapper;
+mod source_index;
 mod tags;
 mod validation;
 
@@ -61,6 +64,57 @@ pub fn validate_cbor_against_cddl(
 ) -> Result<JsValue, JsError> {
     let cbor = validation::decode_hex(cbor_hex)?;
     let value = validation::validate_cbor_bytes_against_cddl(&cbor, cddl, rule_name);
+    from_serde_json_value(&value).map_err(|e| JsError::new(&e))
+}
+
+/// Returns `[{name, kind, span, name_span}]` for every top-level rule
+/// in the CDDL document. Use it for editor outline / breadcrumbs /
+/// fuzzy-pick-rule navigation.
+#[wasm_bindgen]
+pub fn cddl_outline(cddl: &str) -> Result<JsValue, JsError> {
+    let value = cddl_tools::outline(cddl)?;
+    from_serde_json_value(&value).map_err(|e| JsError::new(&e))
+}
+
+/// Returns `{definition: span | null, uses: span[]}` for the rule
+/// `name`. Powers find-references and rename-aware highlighting.
+#[wasm_bindgen]
+pub fn cddl_references(cddl: &str, name: &str) -> Result<JsValue, JsError> {
+    let value = cddl_tools::references(cddl, name)?;
+    from_serde_json_value(&value).map_err(|e| JsError::new(&e))
+}
+
+/// Returns the symbol under `offset` (`null` if the cursor isn't on an
+/// identifier), with `role: "definition" | "use"`, `kind`, `span`, and
+/// `definition_span` (the rule's name span — the go-to-definition
+/// target).
+#[wasm_bindgen]
+pub fn cddl_symbol_at(cddl: &str, offset: u32) -> Result<JsValue, JsError> {
+    let value = cddl_tools::symbol_at(cddl, offset as usize)?;
+    from_serde_json_value(&value).map_err(|e| JsError::new(&e))
+}
+
+/// Re-format the CDDL document by parsing and serialising via `Display`.
+/// Useful for "format on save". Returns the parse error message on
+/// invalid input.
+#[wasm_bindgen]
+pub fn cddl_format(cddl: &str) -> Result<String, JsError> {
+    cddl_tools::format(cddl)
+}
+
+/// Returns a flat list of `{cbor_path, cbor_byte_span, cbor_anchor_span,
+/// cddl_byte_span, rule_name?}` entries — one per node visited during a
+/// parallel CBOR ↔ CDDL traversal. Use it to wire bidirectional
+/// highlight between a CBOR panel and a CDDL panel without needing a
+/// validation error to trigger it.
+#[wasm_bindgen]
+pub fn map_cbor_to_cddl(
+    cbor_hex: &str,
+    cddl: &str,
+    rule_name: &str,
+) -> Result<JsValue, JsError> {
+    let cbor = validation::decode_hex(cbor_hex)?;
+    let value = cbor_cddl_map::map_cbor_to_cddl(&cbor, cddl, rule_name)?;
     from_serde_json_value(&value).map_err(|e| JsError::new(&e))
 }
 

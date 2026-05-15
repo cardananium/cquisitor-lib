@@ -65,6 +65,11 @@ pub fn eval_redeemer(
             .into_script_context(redeemer, datum.as_ref())
             .expect("couldn't create script context from transaction?");
 
+        let script_context_data = script_context.to_plutus_data();
+        let script_context_bytes = uplc::plutus_data_to_bytes(&script_context_data)
+            .ok()
+            .map(hex::encode);
+
         let program = match script_context {
             ScriptContext::V1V2 { .. } => if let Some(datum) = datum {
                 program.apply_data(datum)
@@ -72,9 +77,9 @@ pub fn eval_redeemer(
                 program
             }
             .apply_data(redeemer.data.clone())
-            .apply_data(script_context.to_plutus_data()),
+            .apply_data(script_context_data),
 
-            ScriptContext::V3 { .. } => program.apply_data(script_context.to_plutus_data()),
+            ScriptContext::V3 { .. } => program.apply_data(script_context_data),
         };
 
         let eval_result = if let Some(costs) = cost_mdl_opt {
@@ -107,6 +112,7 @@ pub fn eval_redeemer(
             success: error.as_ref().is_none(),
             error: error.as_ref().map(|e| e.to_string()),
             logs: logs,
+            script_context_bytes,
         };
 
         (new_redeemer, error)
@@ -213,6 +219,7 @@ fn eval_redeemer_result(
         success: false,
         error: Some(error.to_string()),
         logs: vec![],
+        script_context_bytes: None,
     };
     (new_redeemer, Some(error))
 }

@@ -28,6 +28,7 @@ pub struct EvalRedeemerResult {
     pub logs: Vec<String>,
     pub success: bool,
     pub error: Option<String>,
+    pub script_context_bytes: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, JsonSchema, Clone, Debug)]

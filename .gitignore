@@ -6,5 +6,6 @@ wasm-pack.log
 .npmrc
 node_modules/
 package-lock.json
+types/index.ts
 .idea/
 .DS_Store

@@ -25,6 +25,13 @@
         "provided_ex_units": {
           "$ref": "#/$defs/ExUnits"
         },
+        "script_context": {
+          "description": "The mapped script context, serialized as a JSON string.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "script_context_bytes": {
           "type": [
             "string",

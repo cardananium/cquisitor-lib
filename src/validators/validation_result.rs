@@ -29,6 +29,8 @@ pub struct EvalRedeemerResult {
     pub success: bool,
     pub error: Option<String>,
     pub script_context_bytes: Option<String>,
+    /// The mapped script context, serialized as a JSON string.
+    pub script_context: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, JsonSchema, Clone, Debug)]

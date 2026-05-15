@@ -2,6 +2,7 @@ use schemars::{schema_for};
 use serde_json;
 use std::collections::HashMap;
 
+use crate::script_context::SerializableScriptContext;
 use crate::validators::input_contexts::{NecessaryInputData, ValidationInputContext};
 use crate::validators::validation_result::ValidationResult;
 
@@ -32,7 +33,17 @@ pub fn generate_schemas() -> Result<HashMap<String, serde_json::Value>, String> 
         serde_json::to_value(validation_input_context_schema)
             .map_err(|e| format!("Failed to serialize ValidationInputContext schema: {}", e))?
     );
-    
+
+    // Generate schema for SerializableScriptContext. It is not reachable from
+    // the three root types (EvalRedeemerResult exposes it as a JSON string),
+    // so it is registered standalone to keep its TypeScript types generated.
+    let script_context_schema = schema_for!(SerializableScriptContext);
+    schemas.insert(
+        "SerializableScriptContext".to_string(),
+        serde_json::to_value(script_context_schema)
+            .map_err(|e| format!("Failed to serialize SerializableScriptContext schema: {}", e))?
+    );
+
     Ok(schemas)
 }
 

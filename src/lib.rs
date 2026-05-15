@@ -7,12 +7,8 @@ pub mod check_signatures;
 mod js_value;
 pub mod validators;
 pub mod common;
+pub mod script_context;
 pub mod schema_generator;
 pub mod tx_utils;
 pub mod hash_extractor;
-// When the `wee_alloc` feature is enabled, use `wee_alloc` as the global
-// allocator.
-#[cfg(feature = "wee_alloc")]
-#[global_allocator]
-static ALLOC: wee_alloc::WeeAlloc = wee_alloc::WeeAlloc::INIT;
 

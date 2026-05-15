@@ -941,6 +941,527 @@ export interface NecessaryInputData {
   utxos: TxInput[];
 }
 
+export type SerializableScriptContext =
+  | {
+      purpose: SerializableScriptPurpose;
+      script_context_version: "V1V2";
+      tx_info: SerializableTxInfo;
+    }
+  | {
+      purpose: SerializableScriptInfo;
+      redeemer: SerializablePlutusData;
+      script_context_version: "V3";
+      tx_info: SerializableTxInfo;
+    };
+export type SerializableScriptPurpose =
+  | {
+      policy_id: string;
+      purpose_type: "Minting";
+    }
+  | {
+      purpose_type: "Spending";
+      utxo_ref: SerializableTransactionInput;
+    }
+  | {
+      purpose_type: "Rewarding";
+      stake_credential: SerializableStakeCredential;
+    }
+  | {
+      certificate: SerializableCertificate;
+      index: bigint;
+      purpose_type: "Certifying";
+    }
+  | {
+      purpose_type: "Voting";
+      voter: SerializableVoter;
+    }
+  | {
+      index: bigint;
+      proposal: SerializableProposalProcedure;
+      purpose_type: "Proposing";
+    };
+export type SerializableStakeCredential =
+  | {
+      credential_type: "KeyHash";
+      hash: string;
+    }
+  | {
+      credential_type: "ScriptHash";
+      hash: string;
+    };
+export type SerializableCertificate =
+  | {
+      certificate_type: "StakeRegistration";
+      stake_credential: SerializableStakeCredential;
+    }
+  | {
+      certificate_type: "StakeDeregistration";
+      stake_credential: SerializableStakeCredential;
+    }
+  | {
+      certificate_type: "StakeDelegation";
+      pool_keyhash: string;
+      stake_credential: SerializableStakeCredential;
+    }
+  | {
+      certificate_type: "PoolRegistration";
+      pool_params: SerializablePoolParams;
+    }
+  | {
+      certificate_type: "PoolRetirement";
+      epoch: bigint;
+      pool_keyhash: string;
+    }
+  | {
+      certificate_type: "Reg";
+      deposit: bigint;
+      stake_credential: SerializableStakeCredential;
+    }
+  | {
+      certificate_type: "UnReg";
+      refund: bigint;
+      stake_credential: SerializableStakeCredential;
+    }
+  | {
+      certificate_type: "VoteDeleg";
+      drep: SerializableDRep;
+      stake_credential: SerializableStakeCredential;
+    }
+  | {
+      certificate_type: "StakeVoteDeleg";
+      drep: SerializableDRep;
+      pool_keyhash: string;
+      stake_credential: SerializableStakeCredential;
+    }
+  | {
+      certificate_type: "StakeRegDeleg";
+      deposit: bigint;
+      pool_keyhash: string;
+      stake_credential: SerializableStakeCredential;
+    }
+  | {
+      certificate_type: "VoteRegDeleg";
+      deposit: bigint;
+      drep: SerializableDRep;
+      stake_credential: SerializableStakeCredential;
+    }
+  | {
+      certificate_type: "StakeVoteRegDeleg";
+      deposit: bigint;
+      drep: SerializableDRep;
+      pool_keyhash: string;
+      stake_credential: SerializableStakeCredential;
+    }
+  | {
+      certificate_type: "AuthCommitteeHot";
+      committee_cold_credential: SerializableStakeCredential;
+      committee_hot_credential: SerializableStakeCredential;
+    }
+  | {
+      anchor?: SerializableAnchor | null;
+      certificate_type: "ResignCommitteeCold";
+      committee_cold_credential: SerializableStakeCredential;
+    }
+  | {
+      anchor?: SerializableAnchor | null;
+      certificate_type: "RegDRepCert";
+      deposit: bigint;
+      drep_credential: SerializableStakeCredential;
+    }
+  | {
+      certificate_type: "UnRegDRepCert";
+      drep_credential: SerializableStakeCredential;
+      refund: bigint;
+    }
+  | {
+      anchor?: SerializableAnchor | null;
+      certificate_type: "UpdateDRepCert";
+      drep_credential: SerializableStakeCredential;
+    };
+export type SerializableRelay =
+  | {
+      ipv4?: string | null;
+      ipv6?: string | null;
+      port?: number | null;
+      relay_type: "SingleHostAddr";
+    }
+  | {
+      hostname: string;
+      port?: number | null;
+      relay_type: "SingleHostName";
+    }
+  | {
+      hostname: string;
+      relay_type: "MultiHostName";
+    };
+export type SerializableDRep =
+  | {
+      drep_type: "Key";
+      hash: string;
+    }
+  | {
+      drep_type: "Script";
+      hash: string;
+    }
+  | {
+      drep_type: "Abstain";
+    }
+  | {
+      drep_type: "NoConfidence";
+    };
+export type SerializableVoter =
+  | {
+      hash: string;
+      voter_type: "ConstitutionalCommitteeScript";
+    }
+  | {
+      hash: string;
+      voter_type: "ConstitutionalCommitteeKey";
+    }
+  | {
+      hash: string;
+      voter_type: "DRepScript";
+    }
+  | {
+      hash: string;
+      voter_type: "DRepKey";
+    }
+  | {
+      hash: string;
+      voter_type: "StakePoolKey";
+    };
+export type SerializableGovAction =
+  | {
+      action_type: "ParameterChange";
+      gov_action_id?: SerializableGovActionId | null;
+      policy_hash?: string | null;
+      protocol_params_update: SerializableProtocolParamsUpdate;
+    }
+  | {
+      action_type: "HardForkInitiation";
+      gov_action_id?: SerializableGovActionId | null;
+      protocol_version: ProtocolVersion;
+    }
+  | {
+      action_type: "TreasuryWithdrawals";
+      policy_hash?: string | null;
+      withdrawals: [unknown, unknown][];
+    }
+  | {
+      action_type: "NoConfidence";
+      gov_action_id?: SerializableGovActionId | null;
+    }
+  | {
+      action_type: "UpdateCommittee";
+      gov_action_id?: SerializableGovActionId | null;
+      members_to_add: [unknown, unknown][];
+      members_to_remove: SerializableStakeCredential[];
+      quorum_threshold: SubCoin;
+    }
+  | {
+      action_type: "NewConstitution";
+      constitution: SerializableConstitution;
+      gov_action_id?: SerializableGovActionId | null;
+    }
+  | {
+      action_type: "Information";
+    };
+export type SerializableTxInfo =
+  | {
+      V1: SerializableTxInfoV1;
+    }
+  | {
+      V2: SerializableTxInfoV2;
+    }
+  | {
+      V3: SerializableTxInfoV3;
+    };
+export type SerializableCardanoValue =
+  | {
+      amount: bigint;
+      value_type: "Coin";
+    }
+  | {
+      assets: SerializableAsset[];
+      coin: bigint;
+      value_type: "Multiasset";
+    };
+export type SerializableTransactionOutput =
+  | {
+      address: string;
+      datum_hash?: string | null;
+      output_format: "Legacy";
+      value: SerializableCardanoValue;
+    }
+  | {
+      address: string;
+      datum_option?: SerializableDatumOption | null;
+      output_format: "PostAlonzo";
+      script_ref?: SerializableScriptRef | null;
+      value: SerializableCardanoValue;
+    };
+export type SerializableDatumOption =
+  | {
+      datum_type: "Hash";
+      hash: string;
+    }
+  | {
+      data: SerializablePlutusData;
+      datum_type: "Data";
+    };
+/**
+ * Serializable version of PlutusData that can be converted to/from JSON
+ */
+export type SerializablePlutusData =
+  | {
+      any_constructor?: number | null;
+      fields: SerializablePlutusData[];
+      tag: bigint;
+      type: "Constr";
+    }
+  | {
+      key_value_pairs: SerializableKeyValuePair[];
+      type: "Map";
+    }
+  | (
+      | {
+          Int: string;
+        }
+      | {
+          BigUInt: string;
+        }
+      | {
+          BigNInt: string;
+        }
+    )
+  | {
+      type: "BoundedBytes";
+      value: string;
+    }
+  | {
+      type: "Array";
+      values: SerializablePlutusData[];
+    };
+export type SerializableScriptRef =
+  | {
+      script: string;
+      script_type: "NativeScript";
+    }
+  | {
+      script: string;
+      script_type: "PlutusV1Script";
+    }
+  | {
+      script: string;
+      script_type: "PlutusV2Script";
+    }
+  | {
+      script: string;
+      script_type: "PlutusV3Script";
+    };
+export type SerializableScriptInfo =
+  | {
+      policy_id: string;
+      script_info_type: "Minting";
+    }
+  | {
+      datum?: SerializablePlutusData | null;
+      script_info_type: "Spending";
+      utxo_ref: SerializableTransactionInput;
+    }
+  | {
+      script_info_type: "Rewarding";
+      stake_credential: SerializableStakeCredential;
+    }
+  | {
+      certificate: SerializableCertificate;
+      index: bigint;
+      script_info_type: "Certifying";
+    }
+  | {
+      script_info_type: "Voting";
+      voter: SerializableVoter;
+    }
+  | {
+      index: bigint;
+      proposal: SerializableProposalProcedure;
+      script_info_type: "Proposing";
+    };
+
+export interface SerializableTransactionInput {
+  index: bigint;
+  transaction_id: string;
+}
+export interface SerializablePoolParams {
+  cost: bigint;
+  margin: SubCoin;
+  operator: string;
+  pledge: bigint;
+  pool_metadata?: SerializablePoolMetadata | null;
+  pool_owners: string[];
+  relays: SerializableRelay[];
+  reward_account: string;
+  vrf_keyhash: string;
+}
+
+export interface SerializablePoolMetadata {
+  hash: string;
+  url: string;
+}
+export interface SerializableAnchor {
+  data_hash: string;
+  url: string;
+}
+export interface SerializableProposalProcedure {
+  anchor: SerializableAnchor;
+  deposit: bigint;
+  gov_action: SerializableGovAction;
+  reward_account: string;
+}
+export interface SerializableGovActionId {
+  action_index: number;
+  transaction_id: string;
+}
+export interface SerializableProtocolParamsUpdate {
+  ada_per_utxo_byte?: number | null;
+  collateral_percentage?: number | null;
+  committee_term_limit?: number | null;
+  cost_models_for_script_languages?: SerializableCostModels | null;
+  desired_number_of_stake_pools?: number | null;
+  drep_deposit?: number | null;
+  drep_inactivity_period?: number | null;
+  drep_voting_thresholds?: SerializableDRepVotingThresholds | null;
+  execution_costs?: SerializableExUnitPrices | null;
+  expansion_rate?: SubCoin | null;
+  governance_action_deposit?: number | null;
+  governance_action_validity_period?: number | null;
+  key_deposit?: number | null;
+  max_block_body_size?: number | null;
+  max_block_ex_units?: ExUnits | null;
+  max_block_header_size?: number | null;
+  max_collateral_inputs?: number | null;
+  max_transaction_size?: number | null;
+  max_tx_ex_units?: ExUnits | null;
+  max_value_size?: number | null;
+  maximum_epoch?: number | null;
+  min_committee_size?: number | null;
+  min_pool_cost?: number | null;
+  minfee_a?: number | null;
+  minfee_b?: number | null;
+  minfee_refscript_cost_per_byte?: SubCoin | null;
+  pool_deposit?: number | null;
+  pool_pledge_influence?: SubCoin | null;
+  pool_voting_thresholds?: SerializablePoolVotingThresholds | null;
+  treasury_growth_rate?: SubCoin | null;
+}
+export interface SerializableCostModels {
+  plutus_v1?: number[] | null;
+  plutus_v2?: number[] | null;
+  plutus_v3?: number[] | null;
+}
+export interface SerializableDRepVotingThresholds {
+  committee_no_confidence: SubCoin;
+  committee_normal: SubCoin;
+  hard_fork_initiation: SubCoin;
+  motion_no_confidence: SubCoin;
+  pp_economic_group: SubCoin;
+  pp_governance_group: SubCoin;
+  pp_network_group: SubCoin;
+  pp_technical_group: SubCoin;
+  treasury_withdrawal: SubCoin;
+  update_constitution: SubCoin;
+}
+export interface SerializableExUnitPrices {
+  mem_price: SubCoin;
+  step_price: SubCoin;
+}
+
+export interface SerializablePoolVotingThresholds {
+  committee_no_confidence: SubCoin;
+  committee_normal: SubCoin;
+  hard_fork_initiation: SubCoin;
+  motion_no_confidence: SubCoin;
+  security_voting_threshold: SubCoin;
+}
+
+export interface SerializableConstitution {
+  anchor: SerializableAnchor;
+  guardrail_script?: string | null;
+}
+export interface SerializableTxInfoV1 {
+  certificates: SerializableCertificate[];
+  data: [unknown, unknown][];
+  fee: SerializableCardanoValue;
+  id: string;
+  inputs: SerializableTxInInfo[];
+  mint: SerializableMintValue;
+  outputs: SerializableTransactionOutput[];
+  redeemers: [unknown, unknown][];
+  signatories: string[];
+  valid_range: SerializableTimeRange;
+  withdrawals: [unknown, unknown][];
+}
+export interface SerializableAsset {
+  policy_id: string;
+  tokens: SerializableToken[];
+}
+export interface SerializableToken {
+  asset_name: string;
+  /**
+   * Decimal string. Held as a string because the value range spans both
+   *  negative mint/burn amounts and `Value` amounts up to `u64::MAX` —
+   *  no fixed-width integer type covers both without loss.
+   */
+  quantity: string;
+}
+export interface SerializableTxInInfo {
+  out_ref: SerializableTransactionInput;
+  resolved: SerializableTransactionOutput;
+}
+export interface SerializableKeyValuePair {
+  key: SerializablePlutusData;
+  value: SerializablePlutusData;
+}
+export interface SerializableMintValue {
+  mint_value: SerializableAsset[];
+}
+export interface SerializableTimeRange {
+  lower_bound?: number | null;
+  upper_bound?: number | null;
+}
+export interface SerializableTxInfoV2 {
+  certificates: SerializableCertificate[];
+  data: [unknown, unknown][];
+  fee: SerializableCardanoValue;
+  id: string;
+  inputs: SerializableTxInInfo[];
+  mint: SerializableMintValue;
+  outputs: SerializableTransactionOutput[];
+  redeemers: [unknown, unknown][];
+  reference_inputs: SerializableTxInInfo[];
+  signatories: string[];
+  valid_range: SerializableTimeRange;
+  withdrawals: [unknown, unknown][];
+}
+export interface SerializableTxInfoV3 {
+  certificates: SerializableCertificate[];
+  current_treasury_amount?: number | null;
+  data: [unknown, unknown][];
+  fee: bigint;
+  id: string;
+  inputs: SerializableTxInInfo[];
+  mint: SerializableMintValue;
+  outputs: SerializableTransactionOutput[];
+  proposal_procedures: SerializableProposalProcedure[];
+  redeemers: [unknown, unknown][];
+  reference_inputs: SerializableTxInInfo[];
+  signatories: string[];
+  treasury_donation?: number | null;
+  valid_range: SerializableTimeRange;
+  votes: [unknown, unknown][];
+  withdrawals: [unknown, unknown][];
+}
+
 export type GovernanceActionType =
   | "parameterChangeAction"
   | "hardForkInitiationAction"
@@ -1937,6 +2458,10 @@ export interface EvalRedeemerResult {
   index: bigint;
   logs: string[];
   provided_ex_units: ExUnits;
+  /**
+   * The mapped script context, serialized as a JSON string.
+   */
+  script_context?: string | null;
   script_context_bytes?: string | null;
   success: boolean;
   tag: RedeemerTag;

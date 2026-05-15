@@ -1,3 +1,4 @@
+use std::convert::TryFrom;
 use pallas_codec::utils::Bytes;
 use pallas_primitives::conway::{CostModel, CostModels, Language, MintedTx, Redeemer, RedeemerTag};
 use uplc::{
@@ -16,6 +17,7 @@ use uplc::{
 
 use crate::{
     common::ExUnits,
+    script_context::SerializableScriptContext,
     validators::{
         common::NetworkType, phase_2::errors::Phase2Error, validation_result::EvalRedeemerResult,
     },
@@ -68,6 +70,9 @@ pub fn eval_redeemer(
         let script_context_data = script_context.to_plutus_data();
         let script_context_bytes =
             Some(hex::encode(uplc::plutus_data_to_bytes(&script_context_data)));
+        let script_context_json = SerializableScriptContext::try_from(&script_context)
+            .ok()
+            .and_then(|ctx| serde_json::to_string(&ctx).ok());
 
         let program = match script_context {
             ScriptContext::V1V2 { .. } => if let Some(datum) = datum {
@@ -112,6 +117,7 @@ pub fn eval_redeemer(
             error: error.as_ref().map(|e| e.to_string()),
             logs: logs,
             script_context_bytes,
+            script_context: script_context_json,
         };
 
         (new_redeemer, error)
@@ -219,6 +225,7 @@ fn eval_redeemer_result(
         error: Some(error.to_string()),
         logs: vec![],
         script_context_bytes: None,
+        script_context: None,
     };
     (new_redeemer, Some(error))
 }

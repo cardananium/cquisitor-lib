@@ -20,6 +20,7 @@ fn main() {
             println!("  - {}/NecessaryInputData.schema.json", output_dir);
             println!("  - {}/ValidationResult.schema.json", output_dir);
             println!("  - {}/ValidationInputContext.schema.json", output_dir);
+            println!("  - {}/SerializableScriptContext.schema.json", output_dir);
         },
         Err(e) => {
             eprintln!("❌ Error generating schemas: {}", e);

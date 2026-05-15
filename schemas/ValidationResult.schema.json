@@ -25,6 +25,12 @@
         "provided_ex_units": {
           "$ref": "#/$defs/ExUnits"
         },
+        "script_context_bytes": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "success": {
           "type": "boolean"
         },

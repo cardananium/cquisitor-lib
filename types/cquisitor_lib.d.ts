@@ -1937,6 +1937,7 @@ export interface EvalRedeemerResult {
   index: bigint;
   logs: string[];
   provided_ex_units: ExUnits;
+  script_context_bytes?: string | null;
   success: boolean;
   tag: RedeemerTag;
 }

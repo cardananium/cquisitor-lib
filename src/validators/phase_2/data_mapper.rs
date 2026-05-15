@@ -2,11 +2,11 @@ use std::collections::HashMap;
 use std::convert::{TryFrom, TryInto};
 use cardano_serialization_lib::Address;
 use pallas_codec::utils::{Bytes, CborWrap, NonEmptyKeyValuePairs, PositiveCoin};
-use uplc::{tx::ResolvedInput, TransactionInput, Hash};
+use uplc::{tx::ResolvedInput, TransactionInput};
 use pallas_primitives::{conway::{
     AssetName, Coin, DatumOption, PlutusData, PolicyId,
     PostAlonzoTransactionOutput, ScriptRef, TransactionOutput, Value,
-}, DatumHash, Fragment};
+}, DatumHash, Fragment, Hash};
 use crate::js_error::JsError;
 use crate::common::{Asset, CostModels, TxOutput};
 use crate::validators::helpers::normalize_script_ref_raw;

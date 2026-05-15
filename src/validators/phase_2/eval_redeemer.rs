@@ -66,9 +66,8 @@ pub fn eval_redeemer(
             .expect("couldn't create script context from transaction?");
 
         let script_context_data = script_context.to_plutus_data();
-        let script_context_bytes = uplc::plutus_data_to_bytes(&script_context_data)
-            .ok()
-            .map(hex::encode);
+        let script_context_bytes =
+            Some(hex::encode(uplc::plutus_data_to_bytes(&script_context_data)));
 
         let program = match script_context {
             ScriptContext::V1V2 { .. } => if let Some(datum) = datum {

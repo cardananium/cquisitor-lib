@@ -8,9 +8,9 @@ use pallas_primitives::{
         AssetName, Coin, DatumOption, PlutusData, PolicyId, PostAlonzoTransactionOutput,
         ScriptRef, TransactionOutput, Value,
     },
-    DatumHash, Fragment,
+    DatumHash, Fragment, Hash,
 };
-use uplc::{tx::ResolvedInput, Hash, TransactionInput};
+use uplc::{tx::ResolvedInput, TransactionInput};
 
 use crate::common::{Asset, CostModels, TxOutput, UTxO};
 use crate::js_error::JsError;

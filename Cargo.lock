@@ -517,7 +517,7 @@ dependencies = [
 
 [[package]]
 name = "cquisitor-lib"
-version = "0.1.0-beta.56"
+version = "0.1.0-beta.57"
 dependencies = [
  "anyhow",
  "bech32 0.11.1",

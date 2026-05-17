@@ -81,6 +81,12 @@ const CUSTOM_DISPATCH: CustomDispatch[] = [
  * CSL classes whose generated code would not compile — either generated wasm
  * wrappers without the from_* methods we expect, or overlapping with fixed-*
  * variants we deliberately never expose via the universal decoder.
+ *
+ * Also lists degenerate sub-shapes of PlutusData: a top-level Constr / list /
+ * map is already fully decodable (with a proper to_json tree) as `PlutusData`.
+ * These classes lack `to_json`, so they only ever produced a stub
+ * `{"hex": ...}` echo of the input and — because they parse any matching
+ * top-level shape — hijacked autodetection away from `PlutusData`.
  */
 const IGNORE_TYPES = new Set<string>([
     'FixedBlock',
@@ -89,6 +95,9 @@ const IGNORE_TYPES = new Set<string>([
     'FixedTransactionBody',
     'FixedVersionedBlock',
     'FixedTxWitnessesSet',
+    'ConstrPlutusData',
+    'PlutusList',
+    'PlutusMap',
 ]);
 
 /**

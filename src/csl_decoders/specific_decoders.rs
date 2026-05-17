@@ -306,6 +306,9 @@ pub fn map_schema(schema: Option<PlutusDataSchema>) -> csl::PlutusDatumSchema {
     match schema {
         Some(PlutusDataSchema::BasicConversions) => csl::PlutusDatumSchema::BasicConversions,
         Some(PlutusDataSchema::DetailedSchema) => csl::PlutusDatumSchema::DetailedSchema,
-        None => csl::PlutusDatumSchema::BasicConversions,
+        // DetailedSchema is the only schema that can represent constructors,
+        // which virtually every real plutus datum/redeemer contains.
+        // BasicConversions errors out on them ("constructors are not allowed").
+        None => csl::PlutusDatumSchema::DetailedSchema,
     }
 }

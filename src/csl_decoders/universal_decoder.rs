@@ -665,27 +665,6 @@ fn decode_constitution(
     Err("Failed to decode".to_string())
 }
 
-fn decode_constr_plutus_data(
-    input: &str,
-    is_hex: bool,
-    is_bech32: bool,
-    is_base58: bool,
-    _params: &DecodingParams,
-) -> Result<JsValue, String> {
-    let _ = (is_hex, is_bech32, is_base58);
-    if is_hex {
-        if let Ok(decoded) = csl::ConstrPlutusData::from_hex(input) {
-            let value = Ok::<serde_json::Value, String>(serde_json::json!({
-                "hex": decoded.to_hex()
-            }))?;
-            return from_serde_json_value(&value)
-                .map_err(|e| format!("Failed to convert to JsValue: {}", e));
-        }
-    }
-
-    Err("Failed to decode".to_string())
-}
-
 fn decode_costmdls(
     input: &str,
     is_hex: bool,
@@ -1979,48 +1958,6 @@ fn decode_parameter_change_action(
                     serde_json::from_str(&json)
                         .map_err(|e| format!("Failed to parse JSON: {}", e))
                 })?;
-            return from_serde_json_value(&value)
-                .map_err(|e| format!("Failed to convert to JsValue: {}", e));
-        }
-    }
-
-    Err("Failed to decode".to_string())
-}
-
-fn decode_plutus_list(
-    input: &str,
-    is_hex: bool,
-    is_bech32: bool,
-    is_base58: bool,
-    _params: &DecodingParams,
-) -> Result<JsValue, String> {
-    let _ = (is_hex, is_bech32, is_base58);
-    if is_hex {
-        if let Ok(decoded) = csl::PlutusList::from_hex(input) {
-            let value = Ok::<serde_json::Value, String>(serde_json::json!({
-                "hex": decoded.to_hex()
-            }))?;
-            return from_serde_json_value(&value)
-                .map_err(|e| format!("Failed to convert to JsValue: {}", e));
-        }
-    }
-
-    Err("Failed to decode".to_string())
-}
-
-fn decode_plutus_map(
-    input: &str,
-    is_hex: bool,
-    is_bech32: bool,
-    is_base58: bool,
-    _params: &DecodingParams,
-) -> Result<JsValue, String> {
-    let _ = (is_hex, is_bech32, is_base58);
-    if is_hex {
-        if let Ok(decoded) = csl::PlutusMap::from_hex(input) {
-            let value = Ok::<serde_json::Value, String>(serde_json::json!({
-                "hex": decoded.to_hex()
-            }))?;
             return from_serde_json_value(&value)
                 .map_err(|e| format!("Failed to convert to JsValue: {}", e));
         }
@@ -3840,7 +3777,7 @@ fn decode_withdrawals(
 fn decoders() -> &'static HashMap<&'static str, DecoderFn> {
     static DECODERS: OnceLock<HashMap<&'static str, DecoderFn>> = OnceLock::new();
     DECODERS.get_or_init(|| {
-        let mut m: HashMap<&'static str, DecoderFn> = HashMap::with_capacity(152);
+        let mut m: HashMap<&'static str, DecoderFn> = HashMap::with_capacity(149);
         m.insert("Address", decode_address_shim as DecoderFn);
         m.insert("Anchor", decode_anchor as DecoderFn);
         m.insert("AnchorDataHash", decode_anchor_data_hash as DecoderFn);
@@ -3865,7 +3802,6 @@ fn decoders() -> &'static HashMap<&'static str, DecoderFn> {
         m.insert("CommitteeColdResign", decode_committee_cold_resign as DecoderFn);
         m.insert("CommitteeHotAuth", decode_committee_hot_auth as DecoderFn);
         m.insert("Constitution", decode_constitution as DecoderFn);
-        m.insert("ConstrPlutusData", decode_constr_plutus_data as DecoderFn);
         m.insert("Costmdls", decode_costmdls as DecoderFn);
         m.insert("CostModel", decode_cost_model as DecoderFn);
         m.insert("Credential", decode_credential as DecoderFn);
@@ -3918,8 +3854,6 @@ fn decoders() -> &'static HashMap<&'static str, DecoderFn> {
         m.insert("OperationalCert", decode_operational_cert as DecoderFn);
         m.insert("ParameterChangeAction", decode_parameter_change_action as DecoderFn);
         m.insert("PlutusData", decode_plutus_data_shim as DecoderFn);
-        m.insert("PlutusList", decode_plutus_list as DecoderFn);
-        m.insert("PlutusMap", decode_plutus_map as DecoderFn);
         m.insert("PlutusScript", decode_plutus_script_shim as DecoderFn);
         m.insert("PlutusScripts", decode_plutus_scripts as DecoderFn);
         m.insert("PointerAddress", decode_address_shim as DecoderFn);

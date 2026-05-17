@@ -56,20 +56,58 @@ fn test_validate_transaction() {
     let validation_result = validate_transaction(tx_hex, validation_context);
     assert!(validation_result.is_ok(), "Transaction validation failed: {:?}", validation_result.err());
     let validation_result = validation_result.unwrap();
-    for error in validation_result.errors {
+    for error in &validation_result.errors {
         println!("{:?}", error);
     }
-    for warning in validation_result.warnings {
+    for warning in &validation_result.warnings {
         println!("{:?}", warning);
     }
-    for phase2_error in validation_result.phase2_errors {
-        println!("{:?}", phase2_error);
-    }
-    for phase2_warning in validation_result.phase2_warnings {
-        println!("{:?}", phase2_warning);
-    }
-    for redeemers_evals in validation_result.eval_redeemer_results {
-        println!("{:?}", redeemers_evals);
+
+    // Phase 2 must have evaluated both plutus redeemers carried by this tx.
+    assert!(
+        validation_result.phase2_errors.is_empty(),
+        "unexpected phase 2 errors: {:?}",
+        validation_result.phase2_errors
+    );
+    let evals = &validation_result.eval_redeemer_results;
+    assert_eq!(
+        evals.len(),
+        2,
+        "expected 2 redeemer evaluations, got {}: {:?}",
+        evals.len(),
+        evals
+    );
+    for eval in evals {
+        assert!(
+            eval.success && eval.error.is_none(),
+            "redeemer {:?}#{} did not evaluate successfully: {:?}",
+            eval.tag,
+            eval.index,
+            eval.error
+        );
+        assert!(
+            eval.calculated_ex_units.mem > 0 && eval.calculated_ex_units.steps > 0,
+            "redeemer {:?}#{} reported zero ex units: {:?}",
+            eval.tag,
+            eval.index,
+            eval.calculated_ex_units
+        );
+        assert!(
+            eval.script_context_bytes.is_some(),
+            "redeemer {:?}#{} is missing script_context_bytes",
+            eval.tag,
+            eval.index
+        );
+        // The mapped script context must be present and valid JSON.
+        let ctx_json = eval.script_context.as_ref().unwrap_or_else(|| {
+            panic!("redeemer {:?}#{} is missing script_context", eval.tag, eval.index)
+        });
+        serde_json::from_str::<serde_json::Value>(ctx_json).unwrap_or_else(|e| {
+            panic!(
+                "redeemer {:?}#{} script_context is not valid JSON: {}",
+                eval.tag, eval.index, e
+            )
+        });
     }
 }
 

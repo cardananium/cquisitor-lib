@@ -160,6 +160,81 @@ fn necessary_data_includes_proposal_return_account() {
     );
 }
 
+/// Completeness check for vote validation: for every voter kind the validator
+/// looks up a context (drep / pool / committee-hot) and every voted-on gov
+/// action, `get_necessary_data_list` must list the matching entity so the caller
+/// fetches it. The derivations here mirror check_voter_existence exactly.
+#[test]
+fn necessary_data_collects_all_voters() {
+    use crate::validators::common::{GovernanceActionId, LocalCredential};
+    use crate::validators::validator::get_necessary_data_list;
+    use cardano_serialization_lib as csl;
+
+    let key_cred =
+        |b: u8| csl::Credential::from_keyhash(&csl::Ed25519KeyHash::from_bytes(vec![b; 28]).unwrap());
+
+    let mut proc = csl::VotingProcedures::new();
+    let yes = csl::VotingProcedure::new(csl::VoteKind::Yes);
+
+    // DRep (key-hash) voter on action [0x01;32]#0.
+    let drep_cred = key_cred(0xA0);
+    let drep_voter = csl::Voter::new_drep_credential(&drep_cred);
+    let drep_action =
+        csl::GovernanceActionId::new(&csl::TransactionHash::from_bytes(vec![0x01; 32]).unwrap(), 0);
+    proc.insert(&drep_voter, &drep_action, &yes);
+
+    // Stake-pool voter on action [0x02;32]#1.
+    let pool_key = csl::Ed25519KeyHash::from_bytes(vec![0xB0; 28]).unwrap();
+    let pool_voter = csl::Voter::new_stake_pool_key_hash(&pool_key);
+    let pool_action =
+        csl::GovernanceActionId::new(&csl::TransactionHash::from_bytes(vec![0x02; 32]).unwrap(), 1);
+    proc.insert(&pool_voter, &pool_action, &yes);
+
+    // Constitutional-committee hot (key-hash) voter on action [0x03;32]#2.
+    let hot_cred = key_cred(0xCC);
+    let cc_voter = csl::Voter::new_constitutional_committee_hot_credential(&hot_cred);
+    let cc_action =
+        csl::GovernanceActionId::new(&csl::TransactionHash::from_bytes(vec![0x03; 32]).unwrap(), 2);
+    proc.insert(&cc_voter, &cc_action, &yes);
+
+    let mut body = csl::TransactionBody::new_tx_body(
+        &csl::TransactionInputs::new(),
+        &csl::TransactionOutputs::new(),
+        &csl::BigNum::from(0u64),
+    );
+    body.set_voting_procedures(&proc);
+    let tx_hex = csl::Transaction::new(&body, &csl::TransactionWitnessSet::new(), None).to_hex();
+
+    let nd = get_necessary_data_list(&tx_hex, NetworkType::Preview)
+        .expect("get_necessary_data_list should succeed");
+
+    // DRep voter → fetch its registration (same bech32 the validator looks up).
+    let drep_bech = csl::DRep::new_from_credential(&drep_cred).to_bech32(true).unwrap();
+    assert!(nd.d_reps.contains(&drep_bech), "missing drep voter: {:?}", nd.d_reps);
+
+    // Stake-pool voter → fetch its registration (hex, as the validator looks up).
+    assert!(nd.pools.contains(&pool_key.to_hex()), "missing pool voter: {:?}", nd.pools);
+
+    // Committee-hot voter → collect its hot credential for the roster lookup.
+    assert!(
+        nd.committee_members_hot.contains(&LocalCredential::KeyHash(vec![0xCC; 28])),
+        "missing committee-hot voter: {:?}",
+        nd.committee_members_hot
+    );
+
+    // Every voted-on gov action must be fetched so its existence/active/matrix
+    // checks have data.
+    for (hash_byte, index) in [(0x01u8, 0u32), (0x02, 1), (0x03, 2)] {
+        let expected = GovernanceActionId { tx_hash: vec![hash_byte; 32], index };
+        assert!(
+            nd.gov_actions.contains(&expected),
+            "missing voted-on gov action {:?} in {:?}",
+            expected,
+            nd.gov_actions
+        );
+    }
+}
+
 fn get_test_protocol_parameters() -> ProtocolParameters {
     ProtocolParameters {
         min_fee_coefficient_a: 44,

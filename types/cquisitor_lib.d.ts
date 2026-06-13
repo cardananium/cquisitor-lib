@@ -480,6 +480,30 @@ export function add_vkey_witnesses_to_tx(tx_hex: string, vkey_witnesses_hex: str
  */
 export function add_witness_set_to_tx(tx_hex: string, witness_set_hex: string): string;
 
+/**
+ * Like `add_witnesses_to_tx`, but cryptographically verifies each vkey witness
+ * against the transaction body and returns a detailed report. Only valid,
+ * non-duplicate vkey witnesses are inserted; a witness whose signature does not
+ * match this transaction is skipped and counted as `invalid`.
+ * @param {string} tx_hex
+ * @param {string[]} witnesses
+ * @returns {AddWitnessesReport}
+ */
+export function add_witnesses_to_tx_with_report(tx_hex: string, witnesses: string[]): AddWitnessesReport;
+
+export interface AddWitnessesReport {
+    /** Hex of the resulting transaction (unchanged if nothing was added). */
+    tx_hex: string;
+    /** Vkey witnesses newly inserted. */
+    added: number;
+    /** Vkey witnesses skipped because that public key was already present. */
+    duplicates: number;
+    /** Vkey witnesses skipped because their signature did not verify against this transaction. */
+    invalid: number;
+    /** blake2b-224 (hex) key hashes of each newly added vkey witness. */
+    added_key_hashes: string[];
+}
+
 export interface CborPosition {
     offset: number;
     length: number;

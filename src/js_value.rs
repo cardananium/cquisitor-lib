@@ -42,6 +42,25 @@ pub fn from_serde_json_value(value: &JsonValue) -> Result<JsValue, String> {
     }
 }
 
+/// Serialize a value directly to a `JsValue`. Prefer this over
+/// `from_serde_json_value(&serde_json::to_value(..)?)`: round-tripping through
+/// `serde_json::Value` makes `serde_wasm_bindgen` emit numbers as the internal
+/// `{ "$serde_json::private::Number": "0" }` artifact instead of plain numbers.
+#[cfg(all(target_arch = "wasm32", not(target_os = "emscripten")))]
+pub fn to_js_value<T: serde::Serialize>(value: &T) -> Result<JsValue, String> {
+    let serializer = serde_wasm_bindgen::Serializer::json_compatible();
+    value
+        .serialize(&serializer)
+        .map_err(|err| format!("Failed to serialize to JsValue: {:?}", err))
+}
+
+#[cfg(not(all(target_arch = "wasm32", not(target_os = "emscripten"))))]
+pub fn to_js_value<T: serde::Serialize>(value: &T) -> Result<JsValue, String> {
+    Ok(JsValue::new(
+        &serde_json::to_string(value).map_err(|e| e.to_string())?,
+    ))
+}
+
 #[cfg(all(target_arch = "wasm32", not(target_os = "emscripten")))]
 pub fn from_js_value<T>(js_value: &JsValue) -> Result<T, String>
 where

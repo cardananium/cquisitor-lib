@@ -2,9 +2,12 @@ use base64::Engine;
 use cardano_serialization_lib::{
     BootstrapWitness, FixedTransaction, TransactionWitnessSet, Vkeywitness,
 };
+use serde::Serialize;
+use std::collections::HashSet;
 
 use crate::bingen::wasm_bindgen;
 use crate::js_error::JsError;
+use crate::js_value::{to_js_value, JsValue};
 
 /// Witnesses extracted from a single user-provided input, ready to be spliced
 /// into a transaction.
@@ -87,6 +90,95 @@ pub fn add_witness_set_to_tx(tx_hex: &str, witness_set_hex: &str) -> Result<Stri
     apply_witnesses(&mut tx, &witnesses_from_set(&witness_set));
 
     Ok(tx.to_hex())
+}
+
+/// A detailed report from [`add_witnesses_to_tx_with_report`].
+#[derive(Serialize)]
+struct AddWitnessesReport {
+    /// Hex of the resulting transaction (unchanged if nothing was added).
+    tx_hex: String,
+    /// Vkey witnesses newly inserted.
+    added: usize,
+    /// Vkey witnesses skipped because that public key was already present.
+    duplicates: usize,
+    /// Vkey witnesses skipped because their signature did not verify against
+    /// this transaction's body.
+    invalid: usize,
+    /// blake2b-224 (hex) key hashes of each newly added vkey witness — these
+    /// match the `missing_key_hash` the validator reports.
+    added_key_hashes: Vec<String>,
+}
+
+/// Like [`add_witnesses_to_tx`], but cryptographically verifies each vkey
+/// witness against the transaction body and returns a report. Only valid,
+/// non-duplicate vkey witnesses are inserted; a witness whose signature does
+/// not match this transaction is skipped and counted as `invalid`. Bootstrap
+/// witnesses are inserted as-is (their Byron signing scheme is not verified).
+#[wasm_bindgen]
+pub fn add_witnesses_to_tx_with_report(
+    tx_hex: &str,
+    witnesses: Vec<String>,
+) -> Result<JsValue, JsError> {
+    let report =
+        add_witnesses_with_report_internal(tx_hex, &witnesses).map_err(|e| JsError::new(&e))?;
+    to_js_value(&report).map_err(|e| JsError::new(&e))
+}
+
+fn add_witnesses_with_report_internal(
+    tx_hex: &str,
+    witnesses: &[String],
+) -> Result<AddWitnessesReport, String> {
+    let mut tx = FixedTransaction::from_hex(tx_hex)
+        .map_err(|e| format!("Failed to parse transaction: {:?}", e))?;
+    let tx_hash = tx.transaction_hash().to_bytes();
+
+    // Public keys already in the witness set — used to dedupe and to count
+    // duplicates (CSL also dedupes on insert, but doesn't report it).
+    let mut present: HashSet<Vec<u8>> = HashSet::new();
+    if let Some(vkeys) = tx.witness_set().vkeys() {
+        for i in 0..vkeys.len() {
+            present.insert(vkeys.get(i).vkey().public_key().as_bytes());
+        }
+    }
+
+    let mut added = 0usize;
+    let mut duplicates = 0usize;
+    let mut invalid = 0usize;
+    let mut added_key_hashes = Vec::new();
+
+    for (i, input) in witnesses.iter().enumerate() {
+        let extracted = extract_witnesses(input)
+            .map_err(|e| format!("Failed to parse witness at index {}: {}", i, e))?;
+
+        for vkey in &extracted.vkeys {
+            let pk = vkey.vkey().public_key();
+            // The signature must verify against this transaction's body hash.
+            if !pk.verify(&tx_hash, &vkey.signature()) {
+                invalid += 1;
+                continue;
+            }
+            // `insert` returns false if the key was already present.
+            if !present.insert(pk.as_bytes()) {
+                duplicates += 1;
+                continue;
+            }
+            tx.add_vkey_witness(vkey);
+            added += 1;
+            added_key_hashes.push(pk.hash().to_hex());
+        }
+
+        for bootstrap in &extracted.bootstraps {
+            tx.add_bootstrap_witness(bootstrap);
+        }
+    }
+
+    Ok(AddWitnessesReport {
+        tx_hex: tx.to_hex(),
+        added,
+        duplicates,
+        invalid,
+        added_key_hashes,
+    })
 }
 
 fn apply_witnesses(tx: &mut FixedTransaction, extracted: &ExtractedWitnesses) {
@@ -358,5 +450,36 @@ mod tests {
     #[test]
     fn rejects_garbage_input() {
         assert!(add_witnesses_to_tx(TX_HEX, vec!["not a witness".to_string()]).is_err());
+    }
+
+    #[test]
+    fn report_verifies_and_counts() {
+        use cardano_serialization_lib::{make_vkey_witness, TransactionHash};
+        let good = fresh_witness();
+        // A witness over a different hash → fails verification against TX_HEX.
+        let sk = PrivateKey::from_normal_bytes(&[8u8; 32]).unwrap();
+        let wrong_hash = TransactionHash::from_bytes(vec![0u8; 32]).unwrap();
+        let bad = make_vkey_witness(&wrong_hash, &sk);
+
+        let report = add_witnesses_with_report_internal(
+            TX_HEX,
+            &[good.to_hex(), good.to_hex(), bad.to_hex()],
+        )
+        .unwrap();
+
+        assert_eq!(report.added, 1, "one valid witness added");
+        assert_eq!(report.duplicates, 1, "second copy of the good witness is a duplicate");
+        assert_eq!(report.invalid, 1, "bad signature counted as invalid");
+        assert_eq!(report.added_key_hashes.len(), 1);
+        assert_body_preserved(TX_HEX, &report.tx_hex);
+        assert_eq!(vkey_count(&report.tx_hex), vkey_count(TX_HEX) + 1);
+    }
+
+    #[test]
+    fn report_added_key_hash_matches_pubkey() {
+        let good = fresh_witness();
+        let report = add_witnesses_with_report_internal(TX_HEX, &[good.to_hex()]).unwrap();
+        let expected = good.vkey().public_key().hash().to_hex();
+        assert_eq!(report.added_key_hashes, vec![expected]);
     }
 }

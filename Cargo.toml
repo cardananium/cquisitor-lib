@@ -1,6 +1,6 @@
 [package]
 name = "cquisitor-lib"
-version = "0.1.0-beta.57"
+version = "0.1.0-beta.58"
 authors = ["Evgenii Lisitskii <evgeniilisitskii@gmail.com>"]
 edition = "2018"
 description = "Cardano transaction validation library"

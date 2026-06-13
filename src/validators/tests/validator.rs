@@ -137,6 +137,29 @@ fn test_validate_transaction2() {
     }
 }
 
+/// Regression test for issue #17: a proposal procedure's deposit return account
+/// must appear in the necessary-data list so the caller fetches its registration
+/// status. Before the fix `accounts` was empty for governance-action transactions,
+/// so validation always reported ProposalReturnAccountDoesNotExist.
+#[test]
+fn necessary_data_includes_proposal_return_account() {
+    // Tx from issue #17: a single NoConfidence proposal whose deposit return
+    // account is stake_test1up4xt9hftul97kwz9wjfuldvf86hcjjcu9833x5rgltly7s9xkkn9.
+    let tx_hex = "84a400d90102828258201300574bf2d1b05fb1efd9673c535c79fc769ceda97c529e8b9c3c2f6a65e11403825820df914805042554b9b781f86baf94dad503faf6e36b31e21d900ae99ba94ff5e101018182583900e687e094095a3445e7aba47f4feed18c0ef0da3807379a99ab67170c6a6596e95f3e5f59c22ba49e7dac49f57c4a58e14f189a8347d7f27a1b0000000d134a8d5f021a0002a80114d9010281841b000000174876e800581de06a6596e95f3e5f59c22ba49e7dac49f57c4a58e14f189a8347d7f27a8203f682784668747470733a2f2f7261772e67697468756275736572636f6e74656e742e636f6d2f5279756e312f6d657461646174612f6d61696e2f6369703130302f67612e6a736f6e6c645820d57d30d2d03298027fde6d1c887c65da2b98b7ddefab189dcadab9a1d6792feea100d90102818258204697416e68428ee6d2d121136c22967e762b394eb64c7855ccd5d3646cab53b15840b4003d86b8fbafb24d4969666fd53283562c3aa087a2492fb04fb361183b8120ad049ed73265b94ca2afcbe772363ff56c611a687f7bed236bf4451e196ce309f5f6";
+
+    let necessary_data =
+        crate::validators::validator::get_necessary_data_list(tx_hex, NetworkType::Preprod)
+            .expect("get_necessary_data_list should succeed");
+
+    assert!(
+        necessary_data.accounts.contains(
+            &"stake_test1up4xt9hftul97kwz9wjfuldvf86hcjjcu9833x5rgltly7s9xkkn9".to_string()
+        ),
+        "proposal return account missing from necessary data: {:?}",
+        necessary_data.accounts
+    );
+}
+
 fn get_test_protocol_parameters() -> ProtocolParameters {
     ProtocolParameters {
         min_fee_coefficient_a: 44,

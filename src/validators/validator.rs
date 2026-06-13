@@ -260,6 +260,19 @@ pub fn get_necessary_data_list(tx_hex: &str, network_type: NetworkType) -> Resul
     if let Some(voting_proposals) = tx_body.voting_proposals() {
         for i in 0..voting_proposals.len() {
             let proposal = voting_proposals.get(i);
+
+            // Every proposal procedure has a deposit return account that must be a
+            // registered stake account (checked in validate_proposals). Collect it so the
+            // caller fetches its registration status; without this the account context is
+            // missing and validation always reports ProposalReturnAccountDoesNotExist.
+            accounts.insert(
+                proposal
+                    .reward_account()
+                    .to_address()
+                    .to_bech32(None)
+                    .unwrap_or_else(|_| "".to_string()),
+            );
+
             let gov_action = proposal.governance_action();
 
             // Determine governance action type and add to last enacted if needed

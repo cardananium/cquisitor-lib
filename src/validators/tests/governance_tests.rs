@@ -105,6 +105,53 @@ fn unregistered_drep_voter_is_flagged() {
 }
 
 #[test]
+fn voter_error_uses_hex_hash_not_byte_array() {
+    let drep_cred = key_cred(0xA0);
+    let voter = csl::Voter::new_drep_credential(&drep_cred);
+
+    let mut proc = csl::VotingProcedures::new();
+    let action_id = csl::GovernanceActionId::new(
+        &csl::TransactionHash::from_bytes(vec![0x01; 32]).unwrap(),
+        0,
+    );
+    proc.insert(&voter, &action_id, &csl::VotingProcedure::new(csl::VoteKind::Yes));
+
+    let mut body = empty_body();
+    body.set_voting_procedures(&proc);
+
+    let mut ctx = preview_simple_context();
+    ctx.utxo_set.clear();
+    ctx.gov_action_contexts.push(GovActionInputContext {
+        action_id: GovernanceActionId {
+            tx_hash: vec![0x01; 32],
+            index: 0,
+        },
+        action_type: GovernanceActionType::InfoAction,
+        is_active: true,
+    });
+
+    let result = GovernanceValidator::new(&body, &ctx).validate(&body, &ctx);
+    let err = result
+        .errors
+        .iter()
+        .find(|e| matches!(e.error, Phase1Error::VoterDoNotExist { .. }))
+        .expect("expected VoterDoNotExist");
+
+    let json = serde_json::to_string(&err.error).unwrap();
+    // The DRep key hash must serialize as a hex string, not a `[160, ...]` array.
+    assert!(
+        json.contains(&"a0".repeat(28)),
+        "voter hash should be hex-encoded, got: {}",
+        json
+    );
+    assert!(
+        !json.contains("[160,"),
+        "voter hash should not be a raw byte array, got: {}",
+        json
+    );
+}
+
+#[test]
 fn registered_drep_voter_passes_existence_check() {
     let drep_cred = key_cred(0xA1);
     let voter = csl::Voter::new_drep_credential(&drep_cred);

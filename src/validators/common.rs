@@ -53,11 +53,13 @@ impl Display for LocalCredential {
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub enum Voter {
-    ConstitutionalCommitteeHotScriptHash(Vec<u8>),
-    ConstitutionalCommitteeHotKeyHash(Vec<u8>),
-    DRepScriptHash(Vec<u8>),
-    DRepKeyHash(Vec<u8>),
-    StakingPoolKeyHash(Vec<u8>),
+    // Hashes are hex-encoded strings (not raw byte arrays) so error payloads
+    // surface a readable hash rather than `[44, 193, ...]`.
+    ConstitutionalCommitteeHotScriptHash(String),
+    ConstitutionalCommitteeHotKeyHash(String),
+    DRepScriptHash(String),
+    DRepKeyHash(String),
+    StakingPoolKeyHash(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]

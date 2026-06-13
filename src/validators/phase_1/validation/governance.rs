@@ -62,43 +62,43 @@ impl GovernanceValidator {
 fn err_voter_from_csl(voter: &csl::Voter) -> ErrVoter {
     match voter.kind() {
         csl::VoterKind::ConstitutionalCommitteeHotKeyHash => {
-            let bytes = voter
+            let hash = voter
                 .to_constitutional_committee_hot_credential()
                 .and_then(|c| c.to_keyhash())
-                .map(|k| k.to_bytes())
+                .map(|k| k.to_hex())
                 .unwrap_or_default();
-            ErrVoter::ConstitutionalCommitteeHotKeyHash(bytes)
+            ErrVoter::ConstitutionalCommitteeHotKeyHash(hash)
         }
         csl::VoterKind::ConstitutionalCommitteeHotScriptHash => {
-            let bytes = voter
+            let hash = voter
                 .to_constitutional_committee_hot_credential()
                 .and_then(|c| c.to_scripthash())
-                .map(|h| h.to_bytes())
+                .map(|h| h.to_hex())
                 .unwrap_or_default();
-            ErrVoter::ConstitutionalCommitteeHotScriptHash(bytes)
+            ErrVoter::ConstitutionalCommitteeHotScriptHash(hash)
         }
         csl::VoterKind::DRepKeyHash => {
-            let bytes = voter
+            let hash = voter
                 .to_drep_credential()
                 .and_then(|c| c.to_keyhash())
-                .map(|k| k.to_bytes())
+                .map(|k| k.to_hex())
                 .unwrap_or_default();
-            ErrVoter::DRepKeyHash(bytes)
+            ErrVoter::DRepKeyHash(hash)
         }
         csl::VoterKind::DRepScriptHash => {
-            let bytes = voter
+            let hash = voter
                 .to_drep_credential()
                 .and_then(|c| c.to_scripthash())
-                .map(|h| h.to_bytes())
+                .map(|h| h.to_hex())
                 .unwrap_or_default();
-            ErrVoter::DRepScriptHash(bytes)
+            ErrVoter::DRepScriptHash(hash)
         }
         csl::VoterKind::StakingPoolKeyHash => {
-            let bytes = voter
+            let hash = voter
                 .to_stake_pool_key_hash()
-                .map(|k| k.to_bytes())
+                .map(|k| k.to_hex())
                 .unwrap_or_default();
-            ErrVoter::StakingPoolKeyHash(bytes)
+            ErrVoter::StakingPoolKeyHash(hash)
         }
     }
 }

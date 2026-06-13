@@ -3022,13 +3022,7 @@
           "additionalProperties": false,
           "properties": {
             "constitutionalCommitteeHotScriptHash": {
-              "items": {
-                "format": "uint8",
-                "maximum": 255,
-                "minimum": 0,
-                "type": "integer"
-              },
-              "type": "array"
+              "type": "string"
             }
           },
           "required": [
@@ -3040,13 +3034,7 @@
           "additionalProperties": false,
           "properties": {
             "constitutionalCommitteeHotKeyHash": {
-              "items": {
-                "format": "uint8",
-                "maximum": 255,
-                "minimum": 0,
-                "type": "integer"
-              },
-              "type": "array"
+              "type": "string"
             }
           },
           "required": [
@@ -3058,13 +3046,7 @@
           "additionalProperties": false,
           "properties": {
             "dRepScriptHash": {
-              "items": {
-                "format": "uint8",
-                "maximum": 255,
-                "minimum": 0,
-                "type": "integer"
-              },
-              "type": "array"
+              "type": "string"
             }
           },
           "required": [
@@ -3076,13 +3058,7 @@
           "additionalProperties": false,
           "properties": {
             "dRepKeyHash": {
-              "items": {
-                "format": "uint8",
-                "maximum": 255,
-                "minimum": 0,
-                "type": "integer"
-              },
-              "type": "array"
+              "type": "string"
             }
           },
           "required": [
@@ -3094,13 +3070,7 @@
           "additionalProperties": false,
           "properties": {
             "stakingPoolKeyHash": {
-              "items": {
-                "format": "uint8",
-                "maximum": 255,
-                "minimum": 0,
-                "type": "integer"
-              },
-              "type": "array"
+              "type": "string"
             }
           },
           "required": [

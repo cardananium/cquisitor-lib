@@ -83,6 +83,19 @@
       ],
       "type": "object"
     },
+    "ConstitutionContext": {
+      "description": "Current on-chain constitution, as far as the caller can supply it. Only the\n guardrails (constitution policy) script hash matters for validation.",
+      "properties": {
+        "guardrailScriptHash": {
+          "description": "Guardrails script hash (hex). `None` means the constitution defines no\n guardrails script.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
     "CostModels": {
       "properties": {
         "plutusV1": {
@@ -572,6 +585,18 @@
         "$ref": "#/$defs/AccountInputContext"
       },
       "type": "array"
+    },
+    "constitution": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ConstitutionContext"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "Current constitution. When present, enables the ParameterChange /\n TreasuryWithdrawals guardrails-policy-hash check; when absent (older\n callers, or a provider that can't supply it) that check is skipped."
     },
     "currentCommitteeMembers": {
       "items": {

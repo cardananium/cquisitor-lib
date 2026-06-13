@@ -1474,6 +1474,12 @@ export type NetworkType = "mainnet" | "preview" | "preprod";
 
 export interface ValidationInputContext {
   accountContexts: AccountInputContext[];
+  /**
+   * Current constitution. When present, enables the ParameterChange /
+   *  TreasuryWithdrawals guardrails-policy-hash check; when absent (older
+   *  callers, or a provider that can't supply it) that check is skipped.
+   */
+  constitution?: ConstitutionContext | null;
   currentCommitteeMembers: CommitteeInputContext[];
   drepContexts: DrepInputContext[];
   govActionContexts: GovActionInputContext[];
@@ -1493,6 +1499,17 @@ export interface AccountInputContext {
   delegatedToPool?: string | null;
   isRegistered: boolean;
   payedDeposit?: number | null;
+}
+/**
+ * Current on-chain constitution, as far as the caller can supply it. Only the
+ *  guardrails (constitution policy) script hash matters for validation.
+ */
+export interface ConstitutionContext {
+  /**
+   * Guardrails script hash (hex). `None` means the constitution defines no
+   *  guardrails script.
+   */
+  guardrailScriptHash?: string | null;
 }
 export interface CommitteeInputContext {
   committeeMemberCold: LocalCredential;

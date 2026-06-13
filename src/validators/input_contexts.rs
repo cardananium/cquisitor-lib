@@ -71,6 +71,16 @@ pub struct CommitteeInputContext {
     pub is_resigned: bool,
 }
 
+/// Current on-chain constitution, as far as the caller can supply it. Only the
+/// guardrails (constitution policy) script hash matters for validation.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ConstitutionContext {
+    /// Guardrails script hash (hex). `None` means the constitution defines no
+    /// guardrails script.
+    pub guardrail_script_hash: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ValidationInputContext {
@@ -86,6 +96,11 @@ pub struct ValidationInputContext {
     pub potential_committee_members: Vec<CommitteeInputContext>,
     pub treasury_value: u64,
     pub network_type: NetworkType,
+    /// Current constitution. When present, enables the ParameterChange /
+    /// TreasuryWithdrawals guardrails-policy-hash check; when absent (older
+    /// callers, or a provider that can't supply it) that check is skipped.
+    #[serde(default)]
+    pub constitution: Option<ConstitutionContext>,
 }
 
 impl ValidationInputContext {
@@ -116,6 +131,7 @@ impl ValidationInputContext {
             network_type,
             current_committee_members,
             potential_committee_members,
+            constitution: None,
         }
     }
 

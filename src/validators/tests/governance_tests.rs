@@ -10,8 +10,8 @@ use crate::validators::common::{
     GovernanceActionId, GovernanceActionType, LocalCredential,
 };
 use crate::validators::input_contexts::{
-    AccountInputContext, CommitteeInputContext, DrepInputContext, GovActionInputContext,
-    PoolInputContext,
+    AccountInputContext, CommitteeInputContext, ConstitutionContext, DrepInputContext,
+    GovActionInputContext, PoolInputContext,
 };
 use crate::validators::phase_1::errors::Phase1Error;
 use crate::validators::phase_1::validation::GovernanceValidator;
@@ -424,6 +424,157 @@ fn proposal_with_unregistered_return_account_is_flagged() {
             Phase1Error::ProposalReturnAccountDoesNotExist { .. }
         )),
         "expected ProposalReturnAccountDoesNotExist, got: {:?}",
+        result.errors
+    );
+}
+
+// --- Guardrails (constitution policy) script hash checks ------------------
+
+fn guardrail() -> csl::ScriptHash {
+    csl::ScriptHash::from_bytes(vec![0x11; 28]).unwrap()
+}
+
+/// Builds a single-proposal body carrying a ParameterChange action with the
+/// given (optional) guardrails policy hash, returning the deposit to `reward_cred`.
+fn param_change_body(
+    policy_hash: Option<&csl::ScriptHash>,
+    reward_cred: &csl::Credential,
+) -> csl::TransactionBody {
+    let ppu = csl::ProtocolParamUpdate::new();
+    let action = match policy_hash {
+        Some(h) => csl::ParameterChangeAction::new_with_policy_hash(&ppu, h),
+        None => csl::ParameterChangeAction::new(&ppu),
+    };
+    let gov_action = csl::GovernanceAction::new_parameter_change_action(&action);
+    let reward_addr = csl::RewardAddress::new(preview_id(), reward_cred);
+    let proposal = csl::VotingProposal::new(
+        &gov_action,
+        &anchor(),
+        &reward_addr,
+        &csl::BigNum::from(100_000_000_000u64),
+    );
+    let mut proposals = csl::VotingProposals::new();
+    proposals.add(&proposal);
+    let mut body = empty_body();
+    body.set_voting_proposals(&proposals);
+    body
+}
+
+fn has_policy_hash_error(result: &crate::validators::validation_result::ValidationResult) -> bool {
+    result.errors.iter().any(|e| {
+        matches!(e.error, Phase1Error::InvalidConstitutionPolicyHash { .. })
+    })
+}
+
+fn with_guardrail(
+    ctx: &mut crate::validators::input_contexts::ValidationInputContext,
+    hash: Option<String>,
+) {
+    ctx.constitution = Some(ConstitutionContext {
+        guardrail_script_hash: hash,
+    });
+}
+
+#[test]
+fn param_change_with_matching_guardrail_passes() {
+    let reward_cred = key_cred(0xF0);
+    let body = param_change_body(Some(&guardrail()), &reward_cred);
+
+    let mut ctx = preview_simple_context();
+    ctx.utxo_set.clear();
+    register_return_account(&mut ctx, &reward_cred);
+    with_guardrail(&mut ctx, Some(guardrail().to_hex()));
+
+    let result = GovernanceValidator::new(&body, &ctx).validate(&body, &ctx);
+    assert!(
+        !has_policy_hash_error(&result),
+        "unexpected InvalidConstitutionPolicyHash, got: {:?}",
+        result.errors
+    );
+}
+
+#[test]
+fn param_change_missing_guardrail_is_flagged() {
+    let reward_cred = key_cred(0xF1);
+    // Action carries no policy hash, but the constitution has a guardrails script.
+    let body = param_change_body(None, &reward_cred);
+
+    let mut ctx = preview_simple_context();
+    ctx.utxo_set.clear();
+    register_return_account(&mut ctx, &reward_cred);
+    with_guardrail(&mut ctx, Some(guardrail().to_hex()));
+
+    let result = GovernanceValidator::new(&body, &ctx).validate(&body, &ctx);
+    assert!(
+        has_policy_hash_error(&result),
+        "expected InvalidConstitutionPolicyHash for missing guardrail, got: {:?}",
+        result.errors
+    );
+}
+
+#[test]
+fn param_change_wrong_guardrail_is_flagged() {
+    let reward_cred = key_cred(0xF2);
+    let wrong = csl::ScriptHash::from_bytes(vec![0x22; 28]).unwrap();
+    let body = param_change_body(Some(&wrong), &reward_cred);
+
+    let mut ctx = preview_simple_context();
+    ctx.utxo_set.clear();
+    register_return_account(&mut ctx, &reward_cred);
+    with_guardrail(&mut ctx, Some(guardrail().to_hex()));
+
+    let result = GovernanceValidator::new(&body, &ctx).validate(&body, &ctx);
+    assert!(
+        has_policy_hash_error(&result),
+        "expected InvalidConstitutionPolicyHash for wrong guardrail, got: {:?}",
+        result.errors
+    );
+}
+
+#[test]
+fn guardrail_check_skipped_when_constitution_absent() {
+    let reward_cred = key_cred(0xF3);
+    // No policy hash on the action and NO constitution supplied → check skipped.
+    let body = param_change_body(None, &reward_cred);
+
+    let mut ctx = preview_simple_context();
+    ctx.utxo_set.clear();
+    register_return_account(&mut ctx, &reward_cred);
+    // ctx.constitution stays None.
+
+    let result = GovernanceValidator::new(&body, &ctx).validate(&body, &ctx);
+    assert!(
+        !has_policy_hash_error(&result),
+        "guardrail check should be skipped without constitution, got: {:?}",
+        result.errors
+    );
+}
+
+#[test]
+fn info_action_not_subject_to_guardrail() {
+    let reward_cred = key_cred(0xF4);
+    let gov_action = csl::GovernanceAction::new_info_action(&csl::InfoAction::new());
+    let reward_addr = csl::RewardAddress::new(preview_id(), &reward_cred);
+    let proposal = csl::VotingProposal::new(
+        &gov_action,
+        &anchor(),
+        &reward_addr,
+        &csl::BigNum::from(100_000_000_000u64),
+    );
+    let mut proposals = csl::VotingProposals::new();
+    proposals.add(&proposal);
+    let mut body = empty_body();
+    body.set_voting_proposals(&proposals);
+
+    let mut ctx = preview_simple_context();
+    ctx.utxo_set.clear();
+    register_return_account(&mut ctx, &reward_cred);
+    with_guardrail(&mut ctx, Some(guardrail().to_hex()));
+
+    let result = GovernanceValidator::new(&body, &ctx).validate(&body, &ctx);
+    assert!(
+        !has_policy_hash_error(&result),
+        "InfoAction is not subject to guardrails, got: {:?}",
         result.errors
     );
 }

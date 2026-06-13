@@ -410,6 +410,43 @@ fn validate_proposals(
 
         let gov_action = proposal.governance_action();
         let proposal_index = i as u32;
+
+        // Guardrails (constitution policy) script hash. When the caller supplied
+        // the current constitution, ParameterChange and TreasuryWithdrawals
+        // actions must carry exactly the constitution's guardrails script hash
+        // (and none when the constitution defines none). Other action kinds are
+        // not subject to the guardrails script.
+        if let Some(constitution) = &ctx.constitution {
+            let supplied = match gov_action.kind() {
+                csl::GovernanceActionKind::ParameterChangeAction => Some(
+                    gov_action
+                        .as_parameter_change_action()
+                        .and_then(|a| a.policy_hash())
+                        .map(|h| h.to_hex()),
+                ),
+                csl::GovernanceActionKind::TreasuryWithdrawalsAction => Some(
+                    gov_action
+                        .as_treasury_withdrawals_action()
+                        .and_then(|a| a.policy_hash())
+                        .map(|h| h.to_hex()),
+                ),
+                _ => None,
+            };
+            if let Some(supplied_hash) = supplied {
+                let expected_hash = constitution.guardrail_script_hash.clone();
+                let norm = |h: &Option<String>| h.as_ref().map(|s| s.to_lowercase());
+                if norm(&supplied_hash) != norm(&expected_hash) {
+                    errors.push(ValidationPhase1Error::new(
+                        Phase1Error::InvalidConstitutionPolicyHash {
+                            supplied_hash,
+                            expected_hash,
+                        },
+                        location.clone(),
+                    ));
+                }
+            }
+        }
+
         match gov_action.kind() {
             csl::GovernanceActionKind::TreasuryWithdrawalsAction => {
                 if let Some(action) = gov_action.as_treasury_withdrawals_action() {

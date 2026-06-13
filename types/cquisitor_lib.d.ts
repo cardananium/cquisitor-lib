@@ -445,6 +445,41 @@ export function decode_plutus_program_pretty_uplc(hex: string): string;
  */
 export function get_ref_script_bytes(tx_hex: string, output_index: number): string;
 
+/**
+ * Add witnesses to an already built transaction, accepting witnesses in many
+ * shapes. The transaction body bytes (and therefore the transaction id and every
+ * existing signature) are preserved exactly.
+ *
+ * Each entry of `witnesses` is auto-detected and may be a single Vkeywitness, a
+ * single BootstrapWitness, a whole TransactionWitnessSet (e.g. a CIP-30 `signTx`
+ * result), or a whole transaction (its vkey/bootstrap witnesses are taken) —
+ * encoded as hex, base64, or a cardano-cli JSON text-envelope (`{ "cborHex": ... }`).
+ * Only vkey and bootstrap witnesses are merged; duplicates are ignored.
+ * @param {string} tx_hex
+ * @param {string[]} witnesses
+ * @returns {string}
+ */
+export function add_witnesses_to_tx(tx_hex: string, witnesses: string[]): string;
+
+/**
+ * Strict helper: add vkey witnesses, each the CBOR-hex of a single Vkeywitness
+ * (`[ vkey, signature ]`). Use `add_witnesses_to_tx` if the input format may vary.
+ * @param {string} tx_hex
+ * @param {string[]} vkey_witnesses_hex
+ * @returns {string}
+ */
+export function add_vkey_witnesses_to_tx(tx_hex: string, vkey_witnesses_hex: string[]): string;
+
+/**
+ * Strict helper: merge a whole TransactionWitnessSet (CBOR-hex) into a transaction.
+ * This is the canonical shape returned by a CIP-30 `signTx`.
+ * Use `add_witnesses_to_tx` if the input format may vary.
+ * @param {string} tx_hex
+ * @param {string} witness_set_hex
+ * @returns {string}
+ */
+export function add_witness_set_to_tx(tx_hex: string, witness_set_hex: string): string;
+
 export interface CborPosition {
     offset: number;
     length: number;

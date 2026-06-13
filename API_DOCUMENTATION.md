@@ -3,6 +3,7 @@
 ## Table of Contents
 - [get_necessary_data_list_js](#get_necessary_data_list_js)
 - [validate_transaction_js](#validate_transaction_js)
+- [add_witnesses_to_tx](#add_witnesses_to_tx)
 
 ---
 
@@ -390,3 +391,73 @@ async function validateTransaction(txHex: string) {
 5. **Log redeemer execution results** for debugging script issues
 6. **Validate transactions before submission** to avoid rejection by the network
 7. **Check Phase 2 errors separately** from Phase 1 errors for better error handling
+
+---
+
+## add_witnesses_to_tx
+
+### Overview
+Adds witnesses to an already built transaction (e.g. signatures produced by a hardware wallet, a CIP-30 `signTx` call, or `cardano-cli`). The transaction body bytes — and therefore the transaction id and every existing signature — are preserved exactly: internally the function uses CSL's `FixedTransaction`, which keeps the original body bytes and only re-encodes the witness set. There is no need to rebuild the transaction by hand.
+
+### Signature
+```typescript
+function add_witnesses_to_tx(
+    tx_hex: string,
+    witnesses: string[]
+): string
+```
+
+There are also two strict helpers when the input format is known in advance:
+
+```typescript
+// each entry is the CBOR-hex of a single Vkeywitness ([ vkey, signature ])
+function add_vkey_witnesses_to_tx(tx_hex: string, vkey_witnesses_hex: string[]): string
+
+// witness_set_hex is the CBOR-hex of a TransactionWitnessSet (e.g. a CIP-30 signTx result)
+function add_witness_set_to_tx(tx_hex: string, witness_set_hex: string): string
+```
+
+### Parameters
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `tx_hex` | `string` | Hexadecimal-encoded Cardano transaction in CBOR format |
+| `witnesses` | `string[]` | List of witness inputs. Each entry is auto-detected (see below). |
+
+### Accepted witness formats
+Each entry of `witnesses` is auto-detected by both its encoding and its CBOR shape.
+
+**Encoding** (any of):
+- hex
+- base64 (standard or url-safe)
+- a `cardano-cli` JSON text-envelope: `{ "type": ..., "description": ..., "cborHex": "..." }`
+
+**Shape** (any of):
+- a single `Vkeywitness` (`[ vkey, signature ]`)
+- a single `BootstrapWitness`
+- a whole `TransactionWitnessSet` (the canonical shape returned by a CIP-30 `signTx`)
+- a whole transaction (signed or not) — its vkey/bootstrap witnesses are extracted
+- a `cardano-cli` key-witness wrapper: `[ 0, vkeywitness ]` (vkey) or `[ 1, bootstrap_witness ]` (bootstrap)
+
+Only vkey and bootstrap witnesses are merged (the parts a signer can contribute). Duplicate witnesses are ignored. Other fields of the original transaction's witness set are left untouched.
+
+### Returns
+Returns the hex-encoded resulting transaction. The transaction id is unchanged.
+
+### Example Usage
+```typescript
+import { add_witnesses_to_tx } from "cquisitor-lib";
+
+// A wallet returned a witness set from signTx (CIP-30):
+const signedTx = add_witnesses_to_tx(unsignedTxHex, [walletWitnessSetHex]);
+
+// Mixing sources and encodings in one call:
+const tx = add_witnesses_to_tx(unsignedTxHex, [
+    vkeyWitnessHex,                          // hex Vkeywitness
+    walletWitnessSetBase64,                  // base64 TransactionWitnessSet
+    JSON.stringify(cardanoCliWitnessFile),   // cardano-cli text-envelope
+]);
+```
+
+### Error Handling
+Throws if `tx_hex` cannot be parsed as a transaction, or if any witness entry cannot be decoded as any of the accepted formats. The error message includes the index of the offending witness entry.

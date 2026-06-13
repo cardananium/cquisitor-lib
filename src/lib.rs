@@ -11,4 +11,5 @@ pub mod script_context;
 pub mod schema_generator;
 pub mod tx_utils;
 pub mod hash_extractor;
+pub mod witness_inserter;
 

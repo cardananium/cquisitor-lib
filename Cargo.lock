@@ -520,6 +520,7 @@ name = "cquisitor-lib"
 version = "0.1.0-beta.57"
 dependencies = [
  "anyhow",
+ "base64",
  "bech32 0.11.1",
  "blst",
  "bs58",

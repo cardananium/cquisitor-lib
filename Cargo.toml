@@ -1,6 +1,6 @@
 [package]
 name = "cquisitor-lib"
-version = "0.1.0-beta.59"
+version = "0.1.0-beta.60"
 authors = ["Evgenii Lisitskii <evgeniilisitskii@gmail.com>"]
 edition = "2018"
 description = "Cardano transaction validation library"
@@ -37,7 +37,7 @@ serde = "1.0.217"
 serde_json = { version = "1.0.136", features = [] }
 hex = "0.4.3"
 cryptoxide = "0.4.4"
-uplc = "1.1.22"
+uplc = { git = "https://github.com/aiken-lang/aiken", rev = "7a0a8e2b70f58354e157ca1cd9a53876421eeea1" }
 pallas-codec = "0.35.1"
 pallas-traverse = "0.35.1"
 pallas-primitives = "0.35.1"

@@ -61,6 +61,7 @@ pub fn eval_redeemer(
         datum: Option<PlutusData>,
         redeemer: &Redeemer,
         tx_info: TxInfo,
+        script_hex: String,
         program: Program<NamedDeBruijn>,
     ) -> (EvalRedeemerResult, Option<Phase2Error>) {
         let script_context = tx_info
@@ -70,6 +71,12 @@ pub fn eval_redeemer(
         let script_context_data = script_context.to_plutus_data();
         let script_context_bytes =
             Some(hex::encode(uplc::plutus_data_to_bytes(&script_context_data)));
+        // The exact PlutusData args applied to the program — handed to de-uplc verbatim.
+        let redeemer_bytes = Some(hex::encode(uplc::plutus_data_to_bytes(&redeemer.data)));
+        let datum_bytes = datum
+            .as_ref()
+            .map(|d| hex::encode(uplc::plutus_data_to_bytes(d)));
+        let plutus_version = Some(language_to_version_string(lang));
         let script_context_json = SerializableScriptContext::try_from(&script_context)
             .ok()
             .and_then(|ctx| serde_json::to_string(&ctx).ok());
@@ -118,6 +125,10 @@ pub fn eval_redeemer(
             logs: logs,
             script_context_bytes,
             script_context: script_context_json,
+            script_bytes: Some(script_hex),
+            plutus_version,
+            redeemer_bytes,
+            datum_bytes,
         };
 
         (new_redeemer, error)
@@ -153,6 +164,7 @@ pub fn eval_redeemer(
                 TxInfoV1::from_transaction(tx, utxos, slot_config).map_err(|err| {
                     parse_build_context_error(err, redeemer)
                 })?,
+                hex::encode(&*script.0),
                 program(script.0).map_err(|err| Phase2Error::ScriptDecodeError {
                     error: err.to_string(),
                 })?,
@@ -176,6 +188,7 @@ pub fn eval_redeemer(
                 TxInfoV2::from_transaction(tx, utxos, slot_config).map_err(|err| {
                     parse_build_context_error(err, redeemer)
                 })?,
+                hex::encode(&*script.0),
                 program(script.0).map_err(|err| Phase2Error::ScriptDecodeError {
                     error: err.to_string(),
                 })?,
@@ -199,6 +212,7 @@ pub fn eval_redeemer(
                 TxInfoV3::from_transaction(tx, utxos, slot_config).map_err(|err| {
                     parse_build_context_error(err, redeemer)
                 })?,
+                hex::encode(&*script.0),
                 program(script.0).map_err(|err| Phase2Error::ScriptDecodeError {
                     error: err.to_string(),
                 })?,
@@ -226,8 +240,21 @@ fn eval_redeemer_result(
         logs: vec![],
         script_context_bytes: None,
         script_context: None,
+        script_bytes: None,
+        plutus_version: None,
+        redeemer_bytes: None,
+        datum_bytes: None,
     };
     (new_redeemer, Some(error))
+}
+
+/// Plutus version tag matching the frontend's PlutusScriptInfo.version ("V1" | "V2" | "V3").
+fn language_to_version_string(language: &Language) -> String {
+    match language {
+        Language::PlutusV1 => "V1".to_string(),
+        Language::PlutusV2 => "V2".to_string(),
+        Language::PlutusV3 => "V3".to_string(),
+    }
 }
 
 fn language_to_string(language: &Language) -> String {

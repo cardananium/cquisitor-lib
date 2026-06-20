@@ -31,6 +31,14 @@ pub struct EvalRedeemerResult {
     pub script_context_bytes: Option<String>,
     /// The mapped script context, serialized as a JSON string.
     pub script_context: Option<String>,
+    /// Compiled script bytecode (CBOR hex) the redeemer resolves to — witness or reference script.
+    pub script_bytes: Option<String>,
+    /// Plutus language version of the resolved script: "V1" | "V2" | "V3".
+    pub plutus_version: Option<String>,
+    /// Redeemer datum as PlutusData CBOR hex (the exact bytes applied to the program).
+    pub redeemer_bytes: Option<String>,
+    /// Spending datum as PlutusData CBOR hex, when present (V1/V2 spend); None otherwise.
+    pub datum_bytes: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, JsonSchema, Clone, Debug)]

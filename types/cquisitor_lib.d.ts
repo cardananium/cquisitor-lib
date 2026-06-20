@@ -2530,10 +2530,26 @@ export interface ScriptDataHashDecomposition {
 
 export interface EvalRedeemerResult {
   calculated_ex_units: ExUnits;
+  /**
+   * Spending datum as PlutusData CBOR hex, when present (V1/V2 spend); None otherwise.
+   */
+  datum_bytes?: string | null;
   error?: string | null;
   index: bigint;
   logs: string[];
+  /**
+   * Plutus language version of the resolved script: "V1" | "V2" | "V3".
+   */
+  plutus_version?: string | null;
   provided_ex_units: ExUnits;
+  /**
+   * Redeemer datum as PlutusData CBOR hex (the exact bytes applied to the program).
+   */
+  redeemer_bytes?: string | null;
+  /**
+   * Compiled script bytecode (CBOR hex) the redeemer resolves to — witness or reference script.
+   */
+  script_bytes?: string | null;
   /**
    * The mapped script context, serialized as a JSON string.
    */

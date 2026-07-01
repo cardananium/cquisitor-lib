@@ -1749,6 +1749,29 @@ mod tests {
     }
 
     #[test]
+    fn indefinite_map_surfaces_break_as_trailing_node() {
+        // bf_00_01_02_03_ff — indefinite map {0: 1, 2: 3}. Like indefinite
+        // arrays/strings, the terminating break is surfaced as the last child
+        // (a bare Break node), so the raw wire structure is shown in full. The
+        // real {key, value} entries precede it.
+        let v = decode("bf0001 0203 ff".replace(' ', "").as_str());
+        assert_eq!(v["type"], Value::String("Map".into()));
+        assert_eq!(v["items"], Value::String("Indefinite".into()));
+        assert_eq!(oddity_kinds(&v), vec!["IndefiniteLength".to_string()]);
+        let entries = v["values"].as_array().unwrap();
+        assert_eq!(entries.len(), 3);
+        // First two are real key/value pairs.
+        assert_eq!(entries[0]["key"]["value"], json!(0));
+        assert_eq!(entries[0]["value"]["value"], json!(1));
+        assert_eq!(entries[1]["key"]["value"], json!(2));
+        assert_eq!(entries[1]["value"]["value"], json!(3));
+        // Last is the bare Break marker: a node with no `key`, mirroring arrays.
+        assert_eq!(entries[2]["type"], Value::String("Break".into()));
+        assert!(entries[2].get("key").is_none());
+        assert_eq!(entries[2]["value"], Value::Null);
+    }
+
+    #[test]
     fn tag_failure_returns_partial_tag_without_value_when_inner_lost() {
         // d8_66_1c — tag(102) wrapping a byte that's an invalid CBOR minor.
         let e = decode_err("d8661c");

@@ -1,6 +1,6 @@
 [package]
 name = "cquisitor-lib"
-version = "0.1.0-beta.61"
+version = "0.1.0-beta.62"
 authors = ["Evgenii Lisitskii <evgeniilisitskii@gmail.com>"]
 edition = "2018"
 description = "Cardano transaction validation library"
@@ -31,7 +31,7 @@ default = ["console_error_panic_hook"]
 # code size when deploying.
 console_error_panic_hook = { version = "0.1.6", optional = true }
 
-cardano-serialization-lib = { version = "15.0.3", features = [] }
+cardano-serialization-lib = { version = "16.0.0", features = [] }
 schemars = "0.9.0"
 serde = "1.0.217"
 serde_json = { version = "1.0.136", features = [] }
@@ -67,6 +67,7 @@ ciborium-ll = "0.2.2"
 
 [patch.crates-io]
 cddl = { git = "https://github.com/lisicky/cddl.git", branch = "fix/cbor-validator-suite" }
+cardano-serialization-lib = { git = "https://github.com/Emurgo/cardano-serialization-lib.git", branch = "release/16.0.0" }
 
 [target.'cfg(not(all(target_arch = "wasm32", not(target_os = "emscripten"))))'.dependencies]
 noop_proc_macro = "0.3.0"

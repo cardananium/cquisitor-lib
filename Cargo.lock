@@ -270,9 +270,8 @@ checksum = "5d20789868f4b01b2f2caec9f5c4e0213b41e3e5702a50157d699ae31ced2fcb"
 
 [[package]]
 name = "cardano-serialization-lib"
-version = "15.0.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5a04eff5f3b018916c552ddd08fdc7858a7d38b08fbd11ca42136da74f275b3a"
+version = "16.0.0"
+source = "git+https://github.com/Emurgo/cardano-serialization-lib.git?branch=release%2F16.0.0#f009f6c40c0eb657750e950f501bff87b8efbdee"
 dependencies = [
  "bech32 0.7.3",
  "cbor_event",
@@ -517,7 +516,7 @@ dependencies = [
 
 [[package]]
 name = "cquisitor-lib"
-version = "0.1.0-beta.61"
+version = "0.1.0-beta.62"
 dependencies = [
  "anyhow",
  "base64",

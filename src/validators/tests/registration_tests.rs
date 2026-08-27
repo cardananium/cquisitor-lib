@@ -217,6 +217,92 @@ fn stake_deregistration_with_nonzero_balance_errors() {
 }
 
 #[test]
+fn stake_deregistration_with_full_withdrawal_in_same_tx_passes() {
+    // Withdrawals are applied before certificates, so withdrawing the whole
+    // balance in the same tx empties the account and the deregistration is valid.
+    let cred = key_cred(0xEE);
+    let cert = csl::Certificate::new_stake_deregistration(
+        &csl::StakeDeregistration::new(&cred),
+    );
+    let mut certs = csl::Certificates::new();
+    certs.add(&cert);
+
+    let mut body = body_with_certs(certs);
+    let mut withdrawals = csl::Withdrawals::new();
+    withdrawals.insert(
+        &csl::RewardAddress::new(preview_network_id(), &cred),
+        &csl::BigNum::from(1_234u64),
+    );
+    body.set_withdrawals(&withdrawals);
+
+    let mut ctx = preview_simple_context();
+    ctx.utxo_set.clear();
+    ctx.account_contexts.push(AccountInputContext {
+        bech32_address: reward_bech32(&cred),
+        is_registered: true,
+        payed_deposit: Some(2_000_000),
+        delegated_to_drep: None,
+        delegated_to_pool: None,
+        balance: Some(1_234),
+    });
+
+    let validator = RegistrationValidator::new(&body, &ctx);
+    let result = validator.validate();
+
+    assert!(
+        !result.errors.iter().any(|e| matches!(
+            e.error,
+            Phase1Error::StakeNonZeroAccountBalance { .. }
+        )),
+        "expected no StakeNonZeroAccountBalance, got: {:?}",
+        result.errors
+    );
+}
+
+#[test]
+fn stake_deregistration_with_withdrawal_of_another_account_errors() {
+    // A withdrawal for a different reward account must not clear this one.
+    let cred = key_cred(0xEE);
+    let other_cred = key_cred(0xEF);
+    let cert = csl::Certificate::new_stake_deregistration(
+        &csl::StakeDeregistration::new(&cred),
+    );
+    let mut certs = csl::Certificates::new();
+    certs.add(&cert);
+
+    let mut body = body_with_certs(certs);
+    let mut withdrawals = csl::Withdrawals::new();
+    withdrawals.insert(
+        &csl::RewardAddress::new(preview_network_id(), &other_cred),
+        &csl::BigNum::from(1_234u64),
+    );
+    body.set_withdrawals(&withdrawals);
+
+    let mut ctx = preview_simple_context();
+    ctx.utxo_set.clear();
+    ctx.account_contexts.push(AccountInputContext {
+        bech32_address: reward_bech32(&cred),
+        is_registered: true,
+        payed_deposit: Some(2_000_000),
+        delegated_to_drep: None,
+        delegated_to_pool: None,
+        balance: Some(1_234),
+    });
+
+    let validator = RegistrationValidator::new(&body, &ctx);
+    let result = validator.validate();
+
+    assert!(
+        result.errors.iter().any(|e| matches!(
+            e.error,
+            Phase1Error::StakeNonZeroAccountBalance { .. }
+        )),
+        "expected StakeNonZeroAccountBalance, got: {:?}",
+        result.errors
+    );
+}
+
+#[test]
 fn pool_retirement_with_out_of_range_epoch_is_rejected() {
     let pool_hash = pool_key_hash(0x11);
     // current_epoch = slot / 432_000. The fixture uses slot = 1_000_000 → epoch 2.

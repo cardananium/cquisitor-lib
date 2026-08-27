@@ -127,6 +127,11 @@ struct RegistrationState {
 pub struct RegistrationValidator<'a> {
     certificates: Vec<CertificateInfo>,
     registration_state: RegistrationState,
+    /// Rewards withdrawn by this tx, keyed by bech32 reward address.
+    /// Withdrawals are applied by the ledger BEFORE certificates, so an account
+    /// withdrawn in the same tx is already emptied by the time a deregistration
+    /// certificate is processed.
+    withdrawals_in_tx: HashMap<String, u64>,
     validation_input_context: &'a ValidationInputContext,
 }
 
@@ -165,8 +170,29 @@ impl<'a> RegistrationValidator<'a> {
         Self {
             certificates,
             registration_state,
+            withdrawals_in_tx: Self::collect_withdrawals(tx_body),
             validation_input_context,
         }
+    }
+
+    /// Collects the withdrawals of the tx as `bech32 reward address -> amount`.
+    fn collect_withdrawals(tx_body: &csl::TransactionBody) -> HashMap<String, u64> {
+        let mut result = HashMap::new();
+        if let Some(withdrawals) = tx_body.withdrawals() {
+            let keys = withdrawals.keys();
+            for i in 0..keys.len() {
+                let key = keys.get(i);
+                if let Some(amount) = withdrawals.get(&key) {
+                    let reward_address = key
+                        .to_address()
+                        .to_bech32(None)
+                        .unwrap_or_else(|_| String::new());
+                    let amount = amount.to_str().parse::<u64>().unwrap_or(0);
+                    *result.entry(reward_address).or_insert(0u64) += amount;
+                }
+            }
+        }
+        result
     }
 
     fn load_initial_state(state: &mut RegistrationState, context: &ValidationInputContext) {
@@ -597,17 +623,25 @@ impl<'a> RegistrationValidator<'a> {
                         format!("transaction.body.certs.{}", cert_info.cert_index),
                     ));
                 } else {
-                    // Check balance
+                    // Check balance. Withdrawals are applied before certificates, so a
+                    // withdrawal of this account in the same tx empties it and the
+                    // deregistration is valid even if the on-chain balance is non-zero.
                     if let Some(account_context) = self
                         .validation_input_context
                         .find_account_context(reward_address)
                     {
                         if let Some(balance) = account_context.balance {
-                            if balance > 0 {
+                            let withdrawn = self
+                                .withdrawals_in_tx
+                                .get(reward_address)
+                                .copied()
+                                .unwrap_or(0);
+                            let remaining_balance = balance.saturating_sub(withdrawn);
+                            if remaining_balance > 0 {
                                 errors.push(ValidationPhase1Error::new(
                                     Phase1Error::StakeNonZeroAccountBalance {
                                         reward_address: reward_address.clone(),
-                                        remaining_balance: balance,
+                                        remaining_balance,
                                     },
                                     format!("transaction.body.certs.{}", cert_info.cert_index),
                                 ));

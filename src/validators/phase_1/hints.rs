@@ -109,7 +109,7 @@ pub fn get_error_hint(error: &Phase1Error) -> Option<String> {
             "Register the stake key before attempting to delegate or deregister it. Use a stake registration certificate first.".to_string()
         ),
         Phase1Error::StakeNonZeroAccountBalance { .. } => Some(
-            "Withdraw all rewards from the stake account before attempting to deregister the stake key.".to_string()
+            "Withdraw all rewards from the stake account before deregistering the stake key. A withdrawal in the same transaction also works: withdrawals are applied before certificates.".to_string()
         ),
         Phase1Error::RewardAccountNotExisting { .. } => Some(
             "Ensure the reward account exists and is properly registered (via stake registration certificate) before attempting to withdraw from it.".to_string()

@@ -4,11 +4,11 @@
 // decode_specific_type, and get_possible_types_for_input are all views over
 // the same registry, so the three stay in sync by construction.
 
-
 use std::collections::HashMap;
 use std::sync::OnceLock;
 
 use crate::bingen::wasm_bindgen;
+use crate::cbor::limits;
 use crate::csl_decoders::params::DecodingParams;
 use crate::csl_decoders::specific_decoders::{
     decode_address, decode_native_script, decode_plutus_data, decode_plutus_script,
@@ -33,10 +33,7 @@ fn is_valid_bech32(input: &str) -> bool {
 }
 
 /// Signature every decoder in the registry must satisfy.
-type DecoderFn =
-    fn(&str, bool, bool, bool, &DecodingParams) -> Result<JsValue, String>;
-
-
+type DecoderFn = fn(&str, bool, bool, bool, &DecodingParams) -> Result<JsValue, String>;
 
 fn decode_address_shim(
     input: &str,
@@ -75,7 +72,13 @@ fn decode_plutus_data_shim(
     is_base58: bool,
     params: &DecodingParams,
 ) -> Result<JsValue, String> {
-    decode_plutus_data(input, params.plutus_data_schema.clone(), is_hex, is_bech32, is_base58)
+    decode_plutus_data(
+        input,
+        params.plutus_data_schema.clone(),
+        is_hex,
+        is_bech32,
+        is_base58,
+    )
 }
 
 fn decode_plutus_script_shim(
@@ -85,7 +88,13 @@ fn decode_plutus_script_shim(
     is_base58: bool,
     params: &DecodingParams,
 ) -> Result<JsValue, String> {
-    decode_plutus_script(input, params.plutus_script_version, is_hex, is_bech32, is_base58)
+    decode_plutus_script(
+        input,
+        params.plutus_script_version,
+        is_hex,
+        is_bech32,
+        is_base58,
+    )
 }
 
 fn decode_anchor(
@@ -102,8 +111,7 @@ fn decode_anchor(
                 .to_json()
                 .map_err(|e| format!("Failed to convert to JSON: {:?}", e))
                 .and_then(|json| {
-                    serde_json::from_str(&json)
-                        .map_err(|e| format!("Failed to parse JSON: {}", e))
+                    crate::csl_decoders::parse_rendered_json(&json)
                 })?;
             return from_serde_json_value(&value)
                 .map_err(|e| format!("Failed to convert to JsValue: {}", e));
@@ -164,8 +172,7 @@ fn decode_asset_name(
                 .to_json()
                 .map_err(|e| format!("Failed to convert to JSON: {:?}", e))
                 .and_then(|json| {
-                    serde_json::from_str(&json)
-                        .map_err(|e| format!("Failed to parse JSON: {}", e))
+                    crate::csl_decoders::parse_rendered_json(&json)
                 })?;
             return from_serde_json_value(&value)
                 .map_err(|e| format!("Failed to convert to JsValue: {}", e));
@@ -189,8 +196,7 @@ fn decode_asset_names(
                 .to_json()
                 .map_err(|e| format!("Failed to convert to JSON: {:?}", e))
                 .and_then(|json| {
-                    serde_json::from_str(&json)
-                        .map_err(|e| format!("Failed to parse JSON: {}", e))
+                    crate::csl_decoders::parse_rendered_json(&json)
                 })?;
             return from_serde_json_value(&value)
                 .map_err(|e| format!("Failed to convert to JsValue: {}", e));
@@ -214,8 +220,7 @@ fn decode_assets(
                 .to_json()
                 .map_err(|e| format!("Failed to convert to JSON: {:?}", e))
                 .and_then(|json| {
-                    serde_json::from_str(&json)
-                        .map_err(|e| format!("Failed to parse JSON: {}", e))
+                    crate::csl_decoders::parse_rendered_json(&json)
                 })?;
             return from_serde_json_value(&value)
                 .map_err(|e| format!("Failed to convert to JsValue: {}", e));
@@ -239,8 +244,7 @@ fn decode_auxiliary_data(
                 .to_json()
                 .map_err(|e| format!("Failed to convert to JSON: {:?}", e))
                 .and_then(|json| {
-                    serde_json::from_str(&json)
-                        .map_err(|e| format!("Failed to parse JSON: {}", e))
+                    crate::csl_decoders::parse_rendered_json(&json)
                 })?;
             return from_serde_json_value(&value)
                 .map_err(|e| format!("Failed to convert to JsValue: {}", e));
@@ -301,8 +305,7 @@ fn decode_big_int(
                 .to_json()
                 .map_err(|e| format!("Failed to convert to JSON: {:?}", e))
                 .and_then(|json| {
-                    serde_json::from_str(&json)
-                        .map_err(|e| format!("Failed to parse JSON: {}", e))
+                    crate::csl_decoders::parse_rendered_json(&json)
                 })?;
             return from_serde_json_value(&value)
                 .map_err(|e| format!("Failed to convert to JsValue: {}", e));
@@ -326,8 +329,7 @@ fn decode_big_num(
                 .to_json()
                 .map_err(|e| format!("Failed to convert to JSON: {:?}", e))
                 .and_then(|json| {
-                    serde_json::from_str(&json)
-                        .map_err(|e| format!("Failed to parse JSON: {}", e))
+                    crate::csl_decoders::parse_rendered_json(&json)
                 })?;
             return from_serde_json_value(&value)
                 .map_err(|e| format!("Failed to convert to JsValue: {}", e));
@@ -417,8 +419,7 @@ fn decode_block(
                 .to_json()
                 .map_err(|e| format!("Failed to convert to JSON: {:?}", e))
                 .and_then(|json| {
-                    serde_json::from_str(&json)
-                        .map_err(|e| format!("Failed to parse JSON: {}", e))
+                    crate::csl_decoders::parse_rendered_json(&json)
                 })?;
             return from_serde_json_value(&value)
                 .map_err(|e| format!("Failed to convert to JsValue: {}", e));
@@ -479,8 +480,7 @@ fn decode_bootstrap_witness(
                 .to_json()
                 .map_err(|e| format!("Failed to convert to JSON: {:?}", e))
                 .and_then(|json| {
-                    serde_json::from_str(&json)
-                        .map_err(|e| format!("Failed to parse JSON: {}", e))
+                    crate::csl_decoders::parse_rendered_json(&json)
                 })?;
             return from_serde_json_value(&value)
                 .map_err(|e| format!("Failed to convert to JsValue: {}", e));
@@ -504,8 +504,7 @@ fn decode_bootstrap_witnesses(
                 .to_json()
                 .map_err(|e| format!("Failed to convert to JSON: {:?}", e))
                 .and_then(|json| {
-                    serde_json::from_str(&json)
-                        .map_err(|e| format!("Failed to parse JSON: {}", e))
+                    crate::csl_decoders::parse_rendered_json(&json)
                 })?;
             return from_serde_json_value(&value)
                 .map_err(|e| format!("Failed to convert to JsValue: {}", e));
@@ -529,8 +528,7 @@ fn decode_certificate(
                 .to_json()
                 .map_err(|e| format!("Failed to convert to JSON: {:?}", e))
                 .and_then(|json| {
-                    serde_json::from_str(&json)
-                        .map_err(|e| format!("Failed to parse JSON: {}", e))
+                    crate::csl_decoders::parse_rendered_json(&json)
                 })?;
             return from_serde_json_value(&value)
                 .map_err(|e| format!("Failed to convert to JsValue: {}", e));
@@ -554,8 +552,7 @@ fn decode_certificates(
                 .to_json()
                 .map_err(|e| format!("Failed to convert to JSON: {:?}", e))
                 .and_then(|json| {
-                    serde_json::from_str(&json)
-                        .map_err(|e| format!("Failed to parse JSON: {}", e))
+                    crate::csl_decoders::parse_rendered_json(&json)
                 })?;
             return from_serde_json_value(&value)
                 .map_err(|e| format!("Failed to convert to JsValue: {}", e));
@@ -579,8 +576,7 @@ fn decode_committee(
                 .to_json()
                 .map_err(|e| format!("Failed to convert to JSON: {:?}", e))
                 .and_then(|json| {
-                    serde_json::from_str(&json)
-                        .map_err(|e| format!("Failed to parse JSON: {}", e))
+                    crate::csl_decoders::parse_rendered_json(&json)
                 })?;
             return from_serde_json_value(&value)
                 .map_err(|e| format!("Failed to convert to JsValue: {}", e));
@@ -604,8 +600,7 @@ fn decode_committee_cold_resign(
                 .to_json()
                 .map_err(|e| format!("Failed to convert to JSON: {:?}", e))
                 .and_then(|json| {
-                    serde_json::from_str(&json)
-                        .map_err(|e| format!("Failed to parse JSON: {}", e))
+                    crate::csl_decoders::parse_rendered_json(&json)
                 })?;
             return from_serde_json_value(&value)
                 .map_err(|e| format!("Failed to convert to JsValue: {}", e));
@@ -629,8 +624,7 @@ fn decode_committee_hot_auth(
                 .to_json()
                 .map_err(|e| format!("Failed to convert to JSON: {:?}", e))
                 .and_then(|json| {
-                    serde_json::from_str(&json)
-                        .map_err(|e| format!("Failed to parse JSON: {}", e))
+                    crate::csl_decoders::parse_rendered_json(&json)
                 })?;
             return from_serde_json_value(&value)
                 .map_err(|e| format!("Failed to convert to JsValue: {}", e));
@@ -654,8 +648,7 @@ fn decode_constitution(
                 .to_json()
                 .map_err(|e| format!("Failed to convert to JSON: {:?}", e))
                 .and_then(|json| {
-                    serde_json::from_str(&json)
-                        .map_err(|e| format!("Failed to parse JSON: {}", e))
+                    crate::csl_decoders::parse_rendered_json(&json)
                 })?;
             return from_serde_json_value(&value)
                 .map_err(|e| format!("Failed to convert to JsValue: {}", e));
@@ -679,8 +672,7 @@ fn decode_costmdls(
                 .to_json()
                 .map_err(|e| format!("Failed to convert to JSON: {:?}", e))
                 .and_then(|json| {
-                    serde_json::from_str(&json)
-                        .map_err(|e| format!("Failed to parse JSON: {}", e))
+                    crate::csl_decoders::parse_rendered_json(&json)
                 })?;
             return from_serde_json_value(&value)
                 .map_err(|e| format!("Failed to convert to JsValue: {}", e));
@@ -704,8 +696,7 @@ fn decode_cost_model(
                 .to_json()
                 .map_err(|e| format!("Failed to convert to JSON: {:?}", e))
                 .and_then(|json| {
-                    serde_json::from_str(&json)
-                        .map_err(|e| format!("Failed to parse JSON: {}", e))
+                    crate::csl_decoders::parse_rendered_json(&json)
                 })?;
             return from_serde_json_value(&value)
                 .map_err(|e| format!("Failed to convert to JsValue: {}", e));
@@ -729,8 +720,7 @@ fn decode_credential(
                 .to_json()
                 .map_err(|e| format!("Failed to convert to JSON: {:?}", e))
                 .and_then(|json| {
-                    serde_json::from_str(&json)
-                        .map_err(|e| format!("Failed to parse JSON: {}", e))
+                    crate::csl_decoders::parse_rendered_json(&json)
                 })?;
             return from_serde_json_value(&value)
                 .map_err(|e| format!("Failed to convert to JsValue: {}", e));
@@ -754,8 +744,7 @@ fn decode_credentials(
                 .to_json()
                 .map_err(|e| format!("Failed to convert to JSON: {:?}", e))
                 .and_then(|json| {
-                    serde_json::from_str(&json)
-                        .map_err(|e| format!("Failed to parse JSON: {}", e))
+                    crate::csl_decoders::parse_rendered_json(&json)
                 })?;
             return from_serde_json_value(&value)
                 .map_err(|e| format!("Failed to convert to JsValue: {}", e));
@@ -816,8 +805,7 @@ fn decode_dns_record_aor_aaaa(
                 .to_json()
                 .map_err(|e| format!("Failed to convert to JSON: {:?}", e))
                 .and_then(|json| {
-                    serde_json::from_str(&json)
-                        .map_err(|e| format!("Failed to parse JSON: {}", e))
+                    crate::csl_decoders::parse_rendered_json(&json)
                 })?;
             return from_serde_json_value(&value)
                 .map_err(|e| format!("Failed to convert to JsValue: {}", e));
@@ -841,8 +829,7 @@ fn decode_dns_record_srv(
                 .to_json()
                 .map_err(|e| format!("Failed to convert to JSON: {:?}", e))
                 .and_then(|json| {
-                    serde_json::from_str(&json)
-                        .map_err(|e| format!("Failed to parse JSON: {}", e))
+                    crate::csl_decoders::parse_rendered_json(&json)
                 })?;
             return from_serde_json_value(&value)
                 .map_err(|e| format!("Failed to convert to JsValue: {}", e));
@@ -866,8 +853,7 @@ fn decode_d_rep(
                 .to_json()
                 .map_err(|e| format!("Failed to convert to JSON: {:?}", e))
                 .and_then(|json| {
-                    serde_json::from_str(&json)
-                        .map_err(|e| format!("Failed to parse JSON: {}", e))
+                    crate::csl_decoders::parse_rendered_json(&json)
                 })?;
             return from_serde_json_value(&value)
                 .map_err(|e| format!("Failed to convert to JsValue: {}", e));
@@ -880,8 +866,7 @@ fn decode_d_rep(
                 .to_json()
                 .map_err(|e| format!("Failed to convert to JSON: {:?}", e))
                 .and_then(|json| {
-                    serde_json::from_str(&json)
-                        .map_err(|e| format!("Failed to parse JSON: {}", e))
+                    crate::csl_decoders::parse_rendered_json(&json)
                 })?;
             return from_serde_json_value(&value)
                 .map_err(|e| format!("Failed to convert to JsValue: {}", e));
@@ -905,8 +890,7 @@ fn decode_d_rep_deregistration(
                 .to_json()
                 .map_err(|e| format!("Failed to convert to JSON: {:?}", e))
                 .and_then(|json| {
-                    serde_json::from_str(&json)
-                        .map_err(|e| format!("Failed to parse JSON: {}", e))
+                    crate::csl_decoders::parse_rendered_json(&json)
                 })?;
             return from_serde_json_value(&value)
                 .map_err(|e| format!("Failed to convert to JsValue: {}", e));
@@ -930,8 +914,7 @@ fn decode_d_rep_registration(
                 .to_json()
                 .map_err(|e| format!("Failed to convert to JSON: {:?}", e))
                 .and_then(|json| {
-                    serde_json::from_str(&json)
-                        .map_err(|e| format!("Failed to parse JSON: {}", e))
+                    crate::csl_decoders::parse_rendered_json(&json)
                 })?;
             return from_serde_json_value(&value)
                 .map_err(|e| format!("Failed to convert to JsValue: {}", e));
@@ -955,8 +938,7 @@ fn decode_d_rep_update(
                 .to_json()
                 .map_err(|e| format!("Failed to convert to JSON: {:?}", e))
                 .and_then(|json| {
-                    serde_json::from_str(&json)
-                        .map_err(|e| format!("Failed to parse JSON: {}", e))
+                    crate::csl_decoders::parse_rendered_json(&json)
                 })?;
             return from_serde_json_value(&value)
                 .map_err(|e| format!("Failed to convert to JsValue: {}", e));
@@ -980,8 +962,7 @@ fn decode_d_rep_voting_thresholds(
                 .to_json()
                 .map_err(|e| format!("Failed to convert to JSON: {:?}", e))
                 .and_then(|json| {
-                    serde_json::from_str(&json)
-                        .map_err(|e| format!("Failed to parse JSON: {}", e))
+                    crate::csl_decoders::parse_rendered_json(&json)
                 })?;
             return from_serde_json_value(&value)
                 .map_err(|e| format!("Failed to convert to JsValue: {}", e));
@@ -1042,8 +1023,7 @@ fn decode_ed25519_key_hashes(
                 .to_json()
                 .map_err(|e| format!("Failed to convert to JSON: {:?}", e))
                 .and_then(|json| {
-                    serde_json::from_str(&json)
-                        .map_err(|e| format!("Failed to parse JSON: {}", e))
+                    crate::csl_decoders::parse_rendered_json(&json)
                 })?;
             return from_serde_json_value(&value)
                 .map_err(|e| format!("Failed to convert to JsValue: {}", e));
@@ -1100,8 +1080,7 @@ fn decode_ex_unit_prices(
                 .to_json()
                 .map_err(|e| format!("Failed to convert to JSON: {:?}", e))
                 .and_then(|json| {
-                    serde_json::from_str(&json)
-                        .map_err(|e| format!("Failed to parse JSON: {}", e))
+                    crate::csl_decoders::parse_rendered_json(&json)
                 })?;
             return from_serde_json_value(&value)
                 .map_err(|e| format!("Failed to convert to JsValue: {}", e));
@@ -1125,8 +1104,7 @@ fn decode_ex_units(
                 .to_json()
                 .map_err(|e| format!("Failed to convert to JSON: {:?}", e))
                 .and_then(|json| {
-                    serde_json::from_str(&json)
-                        .map_err(|e| format!("Failed to parse JSON: {}", e))
+                    crate::csl_decoders::parse_rendered_json(&json)
                 })?;
             return from_serde_json_value(&value)
                 .map_err(|e| format!("Failed to convert to JsValue: {}", e));
@@ -1150,8 +1128,7 @@ fn decode_general_transaction_metadata(
                 .to_json()
                 .map_err(|e| format!("Failed to convert to JSON: {:?}", e))
                 .and_then(|json| {
-                    serde_json::from_str(&json)
-                        .map_err(|e| format!("Failed to parse JSON: {}", e))
+                    crate::csl_decoders::parse_rendered_json(&json)
                 })?;
             return from_serde_json_value(&value)
                 .map_err(|e| format!("Failed to convert to JsValue: {}", e));
@@ -1249,8 +1226,7 @@ fn decode_genesis_hashes(
                 .to_json()
                 .map_err(|e| format!("Failed to convert to JSON: {:?}", e))
                 .and_then(|json| {
-                    serde_json::from_str(&json)
-                        .map_err(|e| format!("Failed to parse JSON: {}", e))
+                    crate::csl_decoders::parse_rendered_json(&json)
                 })?;
             return from_serde_json_value(&value)
                 .map_err(|e| format!("Failed to convert to JsValue: {}", e));
@@ -1274,8 +1250,7 @@ fn decode_genesis_key_delegation(
                 .to_json()
                 .map_err(|e| format!("Failed to convert to JSON: {:?}", e))
                 .and_then(|json| {
-                    serde_json::from_str(&json)
-                        .map_err(|e| format!("Failed to parse JSON: {}", e))
+                    crate::csl_decoders::parse_rendered_json(&json)
                 })?;
             return from_serde_json_value(&value)
                 .map_err(|e| format!("Failed to convert to JsValue: {}", e));
@@ -1299,8 +1274,7 @@ fn decode_governance_action(
                 .to_json()
                 .map_err(|e| format!("Failed to convert to JSON: {:?}", e))
                 .and_then(|json| {
-                    serde_json::from_str(&json)
-                        .map_err(|e| format!("Failed to parse JSON: {}", e))
+                    crate::csl_decoders::parse_rendered_json(&json)
                 })?;
             return from_serde_json_value(&value)
                 .map_err(|e| format!("Failed to convert to JsValue: {}", e));
@@ -1324,8 +1298,7 @@ fn decode_governance_action_id(
                 .to_json()
                 .map_err(|e| format!("Failed to convert to JSON: {:?}", e))
                 .and_then(|json| {
-                    serde_json::from_str(&json)
-                        .map_err(|e| format!("Failed to parse JSON: {}", e))
+                    crate::csl_decoders::parse_rendered_json(&json)
                 })?;
             return from_serde_json_value(&value)
                 .map_err(|e| format!("Failed to convert to JsValue: {}", e));
@@ -1349,8 +1322,7 @@ fn decode_hard_fork_initiation_action(
                 .to_json()
                 .map_err(|e| format!("Failed to convert to JSON: {:?}", e))
                 .and_then(|json| {
-                    serde_json::from_str(&json)
-                        .map_err(|e| format!("Failed to parse JSON: {}", e))
+                    crate::csl_decoders::parse_rendered_json(&json)
                 })?;
             return from_serde_json_value(&value)
                 .map_err(|e| format!("Failed to convert to JsValue: {}", e));
@@ -1374,8 +1346,7 @@ fn decode_header(
                 .to_json()
                 .map_err(|e| format!("Failed to convert to JSON: {:?}", e))
                 .and_then(|json| {
-                    serde_json::from_str(&json)
-                        .map_err(|e| format!("Failed to parse JSON: {}", e))
+                    crate::csl_decoders::parse_rendered_json(&json)
                 })?;
             return from_serde_json_value(&value)
                 .map_err(|e| format!("Failed to convert to JsValue: {}", e));
@@ -1399,8 +1370,7 @@ fn decode_header_body(
                 .to_json()
                 .map_err(|e| format!("Failed to convert to JSON: {:?}", e))
                 .and_then(|json| {
-                    serde_json::from_str(&json)
-                        .map_err(|e| format!("Failed to parse JSON: {}", e))
+                    crate::csl_decoders::parse_rendered_json(&json)
                 })?;
             return from_serde_json_value(&value)
                 .map_err(|e| format!("Failed to convert to JsValue: {}", e));
@@ -1424,8 +1394,7 @@ fn decode_int(
                 .to_json()
                 .map_err(|e| format!("Failed to convert to JSON: {:?}", e))
                 .and_then(|json| {
-                    serde_json::from_str(&json)
-                        .map_err(|e| format!("Failed to parse JSON: {}", e))
+                    crate::csl_decoders::parse_rendered_json(&json)
                 })?;
             return from_serde_json_value(&value)
                 .map_err(|e| format!("Failed to convert to JsValue: {}", e));
@@ -1449,8 +1418,7 @@ fn decode_ipv4(
                 .to_json()
                 .map_err(|e| format!("Failed to convert to JSON: {:?}", e))
                 .and_then(|json| {
-                    serde_json::from_str(&json)
-                        .map_err(|e| format!("Failed to parse JSON: {}", e))
+                    crate::csl_decoders::parse_rendered_json(&json)
                 })?;
             return from_serde_json_value(&value)
                 .map_err(|e| format!("Failed to convert to JsValue: {}", e));
@@ -1474,8 +1442,7 @@ fn decode_ipv6(
                 .to_json()
                 .map_err(|e| format!("Failed to convert to JSON: {:?}", e))
                 .and_then(|json| {
-                    serde_json::from_str(&json)
-                        .map_err(|e| format!("Failed to parse JSON: {}", e))
+                    crate::csl_decoders::parse_rendered_json(&json)
                 })?;
             return from_serde_json_value(&value)
                 .map_err(|e| format!("Failed to convert to JsValue: {}", e));
@@ -1497,11 +1464,11 @@ fn decode_kes_signature(
         if let Ok(bytes) = hex::decode(input) {
             if let Ok(decoded) = csl::KESSignature::from_bytes(bytes) {
                 let value = {
-                let _ = &decoded;
-                Ok::<serde_json::Value, String>(serde_json::Value::String(
-                    "Decoded, but no additional representation".to_string(),
-                ))
-            }?;
+                    let _ = &decoded;
+                    Ok::<serde_json::Value, String>(serde_json::Value::String(
+                        "Decoded, but no additional representation".to_string(),
+                    ))
+                }?;
                 return from_serde_json_value(&value)
                     .map_err(|e| format!("Failed to convert to JsValue: {}", e));
             }
@@ -1562,8 +1529,7 @@ fn decode_language(
                 .to_json()
                 .map_err(|e| format!("Failed to convert to JSON: {:?}", e))
                 .and_then(|json| {
-                    serde_json::from_str(&json)
-                        .map_err(|e| format!("Failed to parse JSON: {}", e))
+                    crate::csl_decoders::parse_rendered_json(&json)
                 })?;
             return from_serde_json_value(&value)
                 .map_err(|e| format!("Failed to convert to JsValue: {}", e));
@@ -1585,11 +1551,11 @@ fn decode_legacy_daedalus_private_key(
         if let Ok(bytes) = hex::decode(input) {
             if let Ok(decoded) = csl::LegacyDaedalusPrivateKey::from_bytes(&bytes) {
                 let value = {
-                let _ = &decoded;
-                Ok::<serde_json::Value, String>(serde_json::Value::String(
-                    "Decoded, but no additional representation".to_string(),
-                ))
-            }?;
+                    let _ = &decoded;
+                    Ok::<serde_json::Value, String>(serde_json::Value::String(
+                        "Decoded, but no additional representation".to_string(),
+                    ))
+                }?;
                 return from_serde_json_value(&value)
                     .map_err(|e| format!("Failed to convert to JsValue: {}", e));
             }
@@ -1655,8 +1621,7 @@ fn decode_mint(
                 .to_json()
                 .map_err(|e| format!("Failed to convert to JSON: {:?}", e))
                 .and_then(|json| {
-                    serde_json::from_str(&json)
-                        .map_err(|e| format!("Failed to parse JSON: {}", e))
+                    crate::csl_decoders::parse_rendered_json(&json)
                 })?;
             return from_serde_json_value(&value)
                 .map_err(|e| format!("Failed to convert to JsValue: {}", e));
@@ -1680,8 +1645,7 @@ fn decode_mir_to_stake_credentials(
                 .to_json()
                 .map_err(|e| format!("Failed to convert to JSON: {:?}", e))
                 .and_then(|json| {
-                    serde_json::from_str(&json)
-                        .map_err(|e| format!("Failed to parse JSON: {}", e))
+                    crate::csl_decoders::parse_rendered_json(&json)
                 })?;
             return from_serde_json_value(&value)
                 .map_err(|e| format!("Failed to convert to JsValue: {}", e));
@@ -1705,8 +1669,7 @@ fn decode_move_instantaneous_reward(
                 .to_json()
                 .map_err(|e| format!("Failed to convert to JSON: {:?}", e))
                 .and_then(|json| {
-                    serde_json::from_str(&json)
-                        .map_err(|e| format!("Failed to parse JSON: {}", e))
+                    crate::csl_decoders::parse_rendered_json(&json)
                 })?;
             return from_serde_json_value(&value)
                 .map_err(|e| format!("Failed to convert to JsValue: {}", e));
@@ -1730,8 +1693,7 @@ fn decode_move_instantaneous_rewards_cert(
                 .to_json()
                 .map_err(|e| format!("Failed to convert to JSON: {:?}", e))
                 .and_then(|json| {
-                    serde_json::from_str(&json)
-                        .map_err(|e| format!("Failed to parse JSON: {}", e))
+                    crate::csl_decoders::parse_rendered_json(&json)
                 })?;
             return from_serde_json_value(&value)
                 .map_err(|e| format!("Failed to convert to JsValue: {}", e));
@@ -1755,8 +1717,7 @@ fn decode_multi_asset(
                 .to_json()
                 .map_err(|e| format!("Failed to convert to JSON: {:?}", e))
                 .and_then(|json| {
-                    serde_json::from_str(&json)
-                        .map_err(|e| format!("Failed to parse JSON: {}", e))
+                    crate::csl_decoders::parse_rendered_json(&json)
                 })?;
             return from_serde_json_value(&value)
                 .map_err(|e| format!("Failed to convert to JsValue: {}", e));
@@ -1780,8 +1741,7 @@ fn decode_multi_host_name(
                 .to_json()
                 .map_err(|e| format!("Failed to convert to JSON: {:?}", e))
                 .and_then(|json| {
-                    serde_json::from_str(&json)
-                        .map_err(|e| format!("Failed to parse JSON: {}", e))
+                    crate::csl_decoders::parse_rendered_json(&json)
                 })?;
             return from_serde_json_value(&value)
                 .map_err(|e| format!("Failed to convert to JsValue: {}", e));
@@ -1805,8 +1765,7 @@ fn decode_native_scripts(
                 .to_json()
                 .map_err(|e| format!("Failed to convert to JSON: {:?}", e))
                 .and_then(|json| {
-                    serde_json::from_str(&json)
-                        .map_err(|e| format!("Failed to parse JSON: {}", e))
+                    crate::csl_decoders::parse_rendered_json(&json)
                 })?;
             return from_serde_json_value(&value)
                 .map_err(|e| format!("Failed to convert to JsValue: {}", e));
@@ -1830,8 +1789,7 @@ fn decode_network_id(
                 .to_json()
                 .map_err(|e| format!("Failed to convert to JSON: {:?}", e))
                 .and_then(|json| {
-                    serde_json::from_str(&json)
-                        .map_err(|e| format!("Failed to parse JSON: {}", e))
+                    crate::csl_decoders::parse_rendered_json(&json)
                 })?;
             return from_serde_json_value(&value)
                 .map_err(|e| format!("Failed to convert to JsValue: {}", e));
@@ -1855,8 +1813,7 @@ fn decode_new_constitution_action(
                 .to_json()
                 .map_err(|e| format!("Failed to convert to JSON: {:?}", e))
                 .and_then(|json| {
-                    serde_json::from_str(&json)
-                        .map_err(|e| format!("Failed to parse JSON: {}", e))
+                    crate::csl_decoders::parse_rendered_json(&json)
                 })?;
             return from_serde_json_value(&value)
                 .map_err(|e| format!("Failed to convert to JsValue: {}", e));
@@ -1880,8 +1837,7 @@ fn decode_no_confidence_action(
                 .to_json()
                 .map_err(|e| format!("Failed to convert to JSON: {:?}", e))
                 .and_then(|json| {
-                    serde_json::from_str(&json)
-                        .map_err(|e| format!("Failed to parse JSON: {}", e))
+                    crate::csl_decoders::parse_rendered_json(&json)
                 })?;
             return from_serde_json_value(&value)
                 .map_err(|e| format!("Failed to convert to JsValue: {}", e));
@@ -1905,8 +1861,7 @@ fn decode_nonce(
                 .to_json()
                 .map_err(|e| format!("Failed to convert to JSON: {:?}", e))
                 .and_then(|json| {
-                    serde_json::from_str(&json)
-                        .map_err(|e| format!("Failed to parse JSON: {}", e))
+                    crate::csl_decoders::parse_rendered_json(&json)
                 })?;
             return from_serde_json_value(&value)
                 .map_err(|e| format!("Failed to convert to JsValue: {}", e));
@@ -1930,8 +1885,7 @@ fn decode_operational_cert(
                 .to_json()
                 .map_err(|e| format!("Failed to convert to JSON: {:?}", e))
                 .and_then(|json| {
-                    serde_json::from_str(&json)
-                        .map_err(|e| format!("Failed to parse JSON: {}", e))
+                    crate::csl_decoders::parse_rendered_json(&json)
                 })?;
             return from_serde_json_value(&value)
                 .map_err(|e| format!("Failed to convert to JsValue: {}", e));
@@ -1955,8 +1909,7 @@ fn decode_parameter_change_action(
                 .to_json()
                 .map_err(|e| format!("Failed to convert to JSON: {:?}", e))
                 .and_then(|json| {
-                    serde_json::from_str(&json)
-                        .map_err(|e| format!("Failed to parse JSON: {}", e))
+                    crate::csl_decoders::parse_rendered_json(&json)
                 })?;
             return from_serde_json_value(&value)
                 .map_err(|e| format!("Failed to convert to JsValue: {}", e));
@@ -1980,8 +1933,7 @@ fn decode_plutus_scripts(
                 .to_json()
                 .map_err(|e| format!("Failed to convert to JSON: {:?}", e))
                 .and_then(|json| {
-                    serde_json::from_str(&json)
-                        .map_err(|e| format!("Failed to parse JSON: {}", e))
+                    crate::csl_decoders::parse_rendered_json(&json)
                 })?;
             return from_serde_json_value(&value)
                 .map_err(|e| format!("Failed to convert to JsValue: {}", e));
@@ -2005,8 +1957,7 @@ fn decode_pool_metadata(
                 .to_json()
                 .map_err(|e| format!("Failed to convert to JSON: {:?}", e))
                 .and_then(|json| {
-                    serde_json::from_str(&json)
-                        .map_err(|e| format!("Failed to parse JSON: {}", e))
+                    crate::csl_decoders::parse_rendered_json(&json)
                 })?;
             return from_serde_json_value(&value)
                 .map_err(|e| format!("Failed to convert to JsValue: {}", e));
@@ -2067,8 +2018,7 @@ fn decode_pool_params(
                 .to_json()
                 .map_err(|e| format!("Failed to convert to JSON: {:?}", e))
                 .and_then(|json| {
-                    serde_json::from_str(&json)
-                        .map_err(|e| format!("Failed to parse JSON: {}", e))
+                    crate::csl_decoders::parse_rendered_json(&json)
                 })?;
             return from_serde_json_value(&value)
                 .map_err(|e| format!("Failed to convert to JsValue: {}", e));
@@ -2092,8 +2042,7 @@ fn decode_pool_registration(
                 .to_json()
                 .map_err(|e| format!("Failed to convert to JSON: {:?}", e))
                 .and_then(|json| {
-                    serde_json::from_str(&json)
-                        .map_err(|e| format!("Failed to parse JSON: {}", e))
+                    crate::csl_decoders::parse_rendered_json(&json)
                 })?;
             return from_serde_json_value(&value)
                 .map_err(|e| format!("Failed to convert to JsValue: {}", e));
@@ -2117,8 +2066,7 @@ fn decode_pool_retirement(
                 .to_json()
                 .map_err(|e| format!("Failed to convert to JSON: {:?}", e))
                 .and_then(|json| {
-                    serde_json::from_str(&json)
-                        .map_err(|e| format!("Failed to parse JSON: {}", e))
+                    crate::csl_decoders::parse_rendered_json(&json)
                 })?;
             return from_serde_json_value(&value)
                 .map_err(|e| format!("Failed to convert to JsValue: {}", e));
@@ -2142,8 +2090,7 @@ fn decode_pool_voting_thresholds(
                 .to_json()
                 .map_err(|e| format!("Failed to convert to JSON: {:?}", e))
                 .and_then(|json| {
-                    serde_json::from_str(&json)
-                        .map_err(|e| format!("Failed to parse JSON: {}", e))
+                    crate::csl_decoders::parse_rendered_json(&json)
                 })?;
             return from_serde_json_value(&value)
                 .map_err(|e| format!("Failed to convert to JsValue: {}", e));
@@ -2200,8 +2147,7 @@ fn decode_proposed_protocol_parameter_updates(
                 .to_json()
                 .map_err(|e| format!("Failed to convert to JSON: {:?}", e))
                 .and_then(|json| {
-                    serde_json::from_str(&json)
-                        .map_err(|e| format!("Failed to parse JSON: {}", e))
+                    crate::csl_decoders::parse_rendered_json(&json)
                 })?;
             return from_serde_json_value(&value)
                 .map_err(|e| format!("Failed to convert to JsValue: {}", e));
@@ -2225,8 +2171,7 @@ fn decode_protocol_param_update(
                 .to_json()
                 .map_err(|e| format!("Failed to convert to JSON: {:?}", e))
                 .and_then(|json| {
-                    serde_json::from_str(&json)
-                        .map_err(|e| format!("Failed to parse JSON: {}", e))
+                    crate::csl_decoders::parse_rendered_json(&json)
                 })?;
             return from_serde_json_value(&value)
                 .map_err(|e| format!("Failed to convert to JsValue: {}", e));
@@ -2250,8 +2195,7 @@ fn decode_protocol_version(
                 .to_json()
                 .map_err(|e| format!("Failed to convert to JSON: {:?}", e))
                 .and_then(|json| {
-                    serde_json::from_str(&json)
-                        .map_err(|e| format!("Failed to parse JSON: {}", e))
+                    crate::csl_decoders::parse_rendered_json(&json)
                 })?;
             return from_serde_json_value(&value)
                 .map_err(|e| format!("Failed to convert to JsValue: {}", e));
@@ -2308,8 +2252,7 @@ fn decode_redeemer(
                 .to_json()
                 .map_err(|e| format!("Failed to convert to JSON: {:?}", e))
                 .and_then(|json| {
-                    serde_json::from_str(&json)
-                        .map_err(|e| format!("Failed to parse JSON: {}", e))
+                    crate::csl_decoders::parse_rendered_json(&json)
                 })?;
             return from_serde_json_value(&value)
                 .map_err(|e| format!("Failed to convert to JsValue: {}", e));
@@ -2333,8 +2276,7 @@ fn decode_redeemers(
                 .to_json()
                 .map_err(|e| format!("Failed to convert to JSON: {:?}", e))
                 .and_then(|json| {
-                    serde_json::from_str(&json)
-                        .map_err(|e| format!("Failed to parse JSON: {}", e))
+                    crate::csl_decoders::parse_rendered_json(&json)
                 })?;
             return from_serde_json_value(&value)
                 .map_err(|e| format!("Failed to convert to JsValue: {}", e));
@@ -2358,8 +2300,7 @@ fn decode_redeemer_tag(
                 .to_json()
                 .map_err(|e| format!("Failed to convert to JSON: {:?}", e))
                 .and_then(|json| {
-                    serde_json::from_str(&json)
-                        .map_err(|e| format!("Failed to parse JSON: {}", e))
+                    crate::csl_decoders::parse_rendered_json(&json)
                 })?;
             return from_serde_json_value(&value)
                 .map_err(|e| format!("Failed to convert to JsValue: {}", e));
@@ -2383,8 +2324,7 @@ fn decode_relay(
                 .to_json()
                 .map_err(|e| format!("Failed to convert to JSON: {:?}", e))
                 .and_then(|json| {
-                    serde_json::from_str(&json)
-                        .map_err(|e| format!("Failed to parse JSON: {}", e))
+                    crate::csl_decoders::parse_rendered_json(&json)
                 })?;
             return from_serde_json_value(&value)
                 .map_err(|e| format!("Failed to convert to JsValue: {}", e));
@@ -2408,8 +2348,7 @@ fn decode_relays(
                 .to_json()
                 .map_err(|e| format!("Failed to convert to JSON: {:?}", e))
                 .and_then(|json| {
-                    serde_json::from_str(&json)
-                        .map_err(|e| format!("Failed to parse JSON: {}", e))
+                    crate::csl_decoders::parse_rendered_json(&json)
                 })?;
             return from_serde_json_value(&value)
                 .map_err(|e| format!("Failed to convert to JsValue: {}", e));
@@ -2433,8 +2372,7 @@ fn decode_reward_addresses(
                 .to_json()
                 .map_err(|e| format!("Failed to convert to JSON: {:?}", e))
                 .and_then(|json| {
-                    serde_json::from_str(&json)
-                        .map_err(|e| format!("Failed to parse JSON: {}", e))
+                    crate::csl_decoders::parse_rendered_json(&json)
                 })?;
             return from_serde_json_value(&value)
                 .map_err(|e| format!("Failed to convert to JsValue: {}", e));
@@ -2458,8 +2396,7 @@ fn decode_script_all(
                 .to_json()
                 .map_err(|e| format!("Failed to convert to JSON: {:?}", e))
                 .and_then(|json| {
-                    serde_json::from_str(&json)
-                        .map_err(|e| format!("Failed to parse JSON: {}", e))
+                    crate::csl_decoders::parse_rendered_json(&json)
                 })?;
             return from_serde_json_value(&value)
                 .map_err(|e| format!("Failed to convert to JsValue: {}", e));
@@ -2483,8 +2420,7 @@ fn decode_script_any(
                 .to_json()
                 .map_err(|e| format!("Failed to convert to JSON: {:?}", e))
                 .and_then(|json| {
-                    serde_json::from_str(&json)
-                        .map_err(|e| format!("Failed to parse JSON: {}", e))
+                    crate::csl_decoders::parse_rendered_json(&json)
                 })?;
             return from_serde_json_value(&value)
                 .map_err(|e| format!("Failed to convert to JsValue: {}", e));
@@ -2582,8 +2518,7 @@ fn decode_script_hashes(
                 .to_json()
                 .map_err(|e| format!("Failed to convert to JSON: {:?}", e))
                 .and_then(|json| {
-                    serde_json::from_str(&json)
-                        .map_err(|e| format!("Failed to parse JSON: {}", e))
+                    crate::csl_decoders::parse_rendered_json(&json)
                 })?;
             return from_serde_json_value(&value)
                 .map_err(|e| format!("Failed to convert to JsValue: {}", e));
@@ -2607,8 +2542,7 @@ fn decode_script_n_of_k(
                 .to_json()
                 .map_err(|e| format!("Failed to convert to JSON: {:?}", e))
                 .and_then(|json| {
-                    serde_json::from_str(&json)
-                        .map_err(|e| format!("Failed to parse JSON: {}", e))
+                    crate::csl_decoders::parse_rendered_json(&json)
                 })?;
             return from_serde_json_value(&value)
                 .map_err(|e| format!("Failed to convert to JsValue: {}", e));
@@ -2632,8 +2566,7 @@ fn decode_script_pubkey(
                 .to_json()
                 .map_err(|e| format!("Failed to convert to JSON: {:?}", e))
                 .and_then(|json| {
-                    serde_json::from_str(&json)
-                        .map_err(|e| format!("Failed to parse JSON: {}", e))
+                    crate::csl_decoders::parse_rendered_json(&json)
                 })?;
             return from_serde_json_value(&value)
                 .map_err(|e| format!("Failed to convert to JsValue: {}", e));
@@ -2657,8 +2590,7 @@ fn decode_script_ref(
                 .to_json()
                 .map_err(|e| format!("Failed to convert to JSON: {:?}", e))
                 .and_then(|json| {
-                    serde_json::from_str(&json)
-                        .map_err(|e| format!("Failed to parse JSON: {}", e))
+                    crate::csl_decoders::parse_rendered_json(&json)
                 })?;
             return from_serde_json_value(&value)
                 .map_err(|e| format!("Failed to convert to JsValue: {}", e));
@@ -2682,8 +2614,7 @@ fn decode_single_host_addr(
                 .to_json()
                 .map_err(|e| format!("Failed to convert to JSON: {:?}", e))
                 .and_then(|json| {
-                    serde_json::from_str(&json)
-                        .map_err(|e| format!("Failed to parse JSON: {}", e))
+                    crate::csl_decoders::parse_rendered_json(&json)
                 })?;
             return from_serde_json_value(&value)
                 .map_err(|e| format!("Failed to convert to JsValue: {}", e));
@@ -2707,8 +2638,7 @@ fn decode_single_host_name(
                 .to_json()
                 .map_err(|e| format!("Failed to convert to JSON: {:?}", e))
                 .and_then(|json| {
-                    serde_json::from_str(&json)
-                        .map_err(|e| format!("Failed to parse JSON: {}", e))
+                    crate::csl_decoders::parse_rendered_json(&json)
                 })?;
             return from_serde_json_value(&value)
                 .map_err(|e| format!("Failed to convert to JsValue: {}", e));
@@ -2732,8 +2662,7 @@ fn decode_stake_and_vote_delegation(
                 .to_json()
                 .map_err(|e| format!("Failed to convert to JSON: {:?}", e))
                 .and_then(|json| {
-                    serde_json::from_str(&json)
-                        .map_err(|e| format!("Failed to parse JSON: {}", e))
+                    crate::csl_decoders::parse_rendered_json(&json)
                 })?;
             return from_serde_json_value(&value)
                 .map_err(|e| format!("Failed to convert to JsValue: {}", e));
@@ -2757,8 +2686,7 @@ fn decode_stake_delegation(
                 .to_json()
                 .map_err(|e| format!("Failed to convert to JSON: {:?}", e))
                 .and_then(|json| {
-                    serde_json::from_str(&json)
-                        .map_err(|e| format!("Failed to parse JSON: {}", e))
+                    crate::csl_decoders::parse_rendered_json(&json)
                 })?;
             return from_serde_json_value(&value)
                 .map_err(|e| format!("Failed to convert to JsValue: {}", e));
@@ -2782,8 +2710,7 @@ fn decode_stake_deregistration(
                 .to_json()
                 .map_err(|e| format!("Failed to convert to JSON: {:?}", e))
                 .and_then(|json| {
-                    serde_json::from_str(&json)
-                        .map_err(|e| format!("Failed to parse JSON: {}", e))
+                    crate::csl_decoders::parse_rendered_json(&json)
                 })?;
             return from_serde_json_value(&value)
                 .map_err(|e| format!("Failed to convert to JsValue: {}", e));
@@ -2807,8 +2734,7 @@ fn decode_stake_registration(
                 .to_json()
                 .map_err(|e| format!("Failed to convert to JSON: {:?}", e))
                 .and_then(|json| {
-                    serde_json::from_str(&json)
-                        .map_err(|e| format!("Failed to parse JSON: {}", e))
+                    crate::csl_decoders::parse_rendered_json(&json)
                 })?;
             return from_serde_json_value(&value)
                 .map_err(|e| format!("Failed to convert to JsValue: {}", e));
@@ -2832,8 +2758,7 @@ fn decode_stake_registration_and_delegation(
                 .to_json()
                 .map_err(|e| format!("Failed to convert to JSON: {:?}", e))
                 .and_then(|json| {
-                    serde_json::from_str(&json)
-                        .map_err(|e| format!("Failed to parse JSON: {}", e))
+                    crate::csl_decoders::parse_rendered_json(&json)
                 })?;
             return from_serde_json_value(&value)
                 .map_err(|e| format!("Failed to convert to JsValue: {}", e));
@@ -2857,8 +2782,7 @@ fn decode_stake_vote_registration_and_delegation(
                 .to_json()
                 .map_err(|e| format!("Failed to convert to JSON: {:?}", e))
                 .and_then(|json| {
-                    serde_json::from_str(&json)
-                        .map_err(|e| format!("Failed to parse JSON: {}", e))
+                    crate::csl_decoders::parse_rendered_json(&json)
                 })?;
             return from_serde_json_value(&value)
                 .map_err(|e| format!("Failed to convert to JsValue: {}", e));
@@ -2882,8 +2806,7 @@ fn decode_timelock_expiry(
                 .to_json()
                 .map_err(|e| format!("Failed to convert to JSON: {:?}", e))
                 .and_then(|json| {
-                    serde_json::from_str(&json)
-                        .map_err(|e| format!("Failed to parse JSON: {}", e))
+                    crate::csl_decoders::parse_rendered_json(&json)
                 })?;
             return from_serde_json_value(&value)
                 .map_err(|e| format!("Failed to convert to JsValue: {}", e));
@@ -2907,8 +2830,7 @@ fn decode_timelock_start(
                 .to_json()
                 .map_err(|e| format!("Failed to convert to JSON: {:?}", e))
                 .and_then(|json| {
-                    serde_json::from_str(&json)
-                        .map_err(|e| format!("Failed to parse JSON: {}", e))
+                    crate::csl_decoders::parse_rendered_json(&json)
                 })?;
             return from_serde_json_value(&value)
                 .map_err(|e| format!("Failed to convert to JsValue: {}", e));
@@ -2932,8 +2854,7 @@ fn decode_transaction_bodies(
                 .to_json()
                 .map_err(|e| format!("Failed to convert to JSON: {:?}", e))
                 .and_then(|json| {
-                    serde_json::from_str(&json)
-                        .map_err(|e| format!("Failed to parse JSON: {}", e))
+                    crate::csl_decoders::parse_rendered_json(&json)
                 })?;
             return from_serde_json_value(&value)
                 .map_err(|e| format!("Failed to convert to JsValue: {}", e));
@@ -2957,8 +2878,7 @@ fn decode_transaction_body(
                 .to_json()
                 .map_err(|e| format!("Failed to convert to JSON: {:?}", e))
                 .and_then(|json| {
-                    serde_json::from_str(&json)
-                        .map_err(|e| format!("Failed to parse JSON: {}", e))
+                    crate::csl_decoders::parse_rendered_json(&json)
                 })?;
             return from_serde_json_value(&value)
                 .map_err(|e| format!("Failed to convert to JsValue: {}", e));
@@ -3019,8 +2939,7 @@ fn decode_transaction_input(
                 .to_json()
                 .map_err(|e| format!("Failed to convert to JSON: {:?}", e))
                 .and_then(|json| {
-                    serde_json::from_str(&json)
-                        .map_err(|e| format!("Failed to parse JSON: {}", e))
+                    crate::csl_decoders::parse_rendered_json(&json)
                 })?;
             return from_serde_json_value(&value)
                 .map_err(|e| format!("Failed to convert to JsValue: {}", e));
@@ -3044,8 +2963,7 @@ fn decode_transaction_inputs(
                 .to_json()
                 .map_err(|e| format!("Failed to convert to JSON: {:?}", e))
                 .and_then(|json| {
-                    serde_json::from_str(&json)
-                        .map_err(|e| format!("Failed to parse JSON: {}", e))
+                    crate::csl_decoders::parse_rendered_json(&json)
                 })?;
             return from_serde_json_value(&value)
                 .map_err(|e| format!("Failed to convert to JsValue: {}", e));
@@ -3111,8 +3029,7 @@ fn decode_transaction_output(
                 .to_json()
                 .map_err(|e| format!("Failed to convert to JSON: {:?}", e))
                 .and_then(|json| {
-                    serde_json::from_str(&json)
-                        .map_err(|e| format!("Failed to parse JSON: {}", e))
+                    crate::csl_decoders::parse_rendered_json(&json)
                 })?;
             return from_serde_json_value(&value)
                 .map_err(|e| format!("Failed to convert to JsValue: {}", e));
@@ -3136,8 +3053,7 @@ fn decode_transaction_outputs(
                 .to_json()
                 .map_err(|e| format!("Failed to convert to JSON: {:?}", e))
                 .and_then(|json| {
-                    serde_json::from_str(&json)
-                        .map_err(|e| format!("Failed to parse JSON: {}", e))
+                    crate::csl_decoders::parse_rendered_json(&json)
                 })?;
             return from_serde_json_value(&value)
                 .map_err(|e| format!("Failed to convert to JsValue: {}", e));
@@ -3161,8 +3077,7 @@ fn decode_transaction_unspent_output(
                 .to_json()
                 .map_err(|e| format!("Failed to convert to JSON: {:?}", e))
                 .and_then(|json| {
-                    serde_json::from_str(&json)
-                        .map_err(|e| format!("Failed to parse JSON: {}", e))
+                    crate::csl_decoders::parse_rendered_json(&json)
                 })?;
             return from_serde_json_value(&value)
                 .map_err(|e| format!("Failed to convert to JsValue: {}", e));
@@ -3186,8 +3101,7 @@ fn decode_transaction_witness_set(
                 .to_json()
                 .map_err(|e| format!("Failed to convert to JSON: {:?}", e))
                 .and_then(|json| {
-                    serde_json::from_str(&json)
-                        .map_err(|e| format!("Failed to parse JSON: {}", e))
+                    crate::csl_decoders::parse_rendered_json(&json)
                 })?;
             return from_serde_json_value(&value)
                 .map_err(|e| format!("Failed to convert to JsValue: {}", e));
@@ -3211,8 +3125,7 @@ fn decode_transaction_witness_sets(
                 .to_json()
                 .map_err(|e| format!("Failed to convert to JSON: {:?}", e))
                 .and_then(|json| {
-                    serde_json::from_str(&json)
-                        .map_err(|e| format!("Failed to parse JSON: {}", e))
+                    crate::csl_decoders::parse_rendered_json(&json)
                 })?;
             return from_serde_json_value(&value)
                 .map_err(|e| format!("Failed to convert to JsValue: {}", e));
@@ -3236,8 +3149,7 @@ fn decode_treasury_withdrawals_action(
                 .to_json()
                 .map_err(|e| format!("Failed to convert to JSON: {:?}", e))
                 .and_then(|json| {
-                    serde_json::from_str(&json)
-                        .map_err(|e| format!("Failed to parse JSON: {}", e))
+                    crate::csl_decoders::parse_rendered_json(&json)
                 })?;
             return from_serde_json_value(&value)
                 .map_err(|e| format!("Failed to convert to JsValue: {}", e));
@@ -3261,8 +3173,7 @@ fn decode_unit_interval(
                 .to_json()
                 .map_err(|e| format!("Failed to convert to JSON: {:?}", e))
                 .and_then(|json| {
-                    serde_json::from_str(&json)
-                        .map_err(|e| format!("Failed to parse JSON: {}", e))
+                    crate::csl_decoders::parse_rendered_json(&json)
                 })?;
             return from_serde_json_value(&value)
                 .map_err(|e| format!("Failed to convert to JsValue: {}", e));
@@ -3286,8 +3197,7 @@ fn decode_update(
                 .to_json()
                 .map_err(|e| format!("Failed to convert to JSON: {:?}", e))
                 .and_then(|json| {
-                    serde_json::from_str(&json)
-                        .map_err(|e| format!("Failed to parse JSON: {}", e))
+                    crate::csl_decoders::parse_rendered_json(&json)
                 })?;
             return from_serde_json_value(&value)
                 .map_err(|e| format!("Failed to convert to JsValue: {}", e));
@@ -3311,8 +3221,7 @@ fn decode_update_committee_action(
                 .to_json()
                 .map_err(|e| format!("Failed to convert to JSON: {:?}", e))
                 .and_then(|json| {
-                    serde_json::from_str(&json)
-                        .map_err(|e| format!("Failed to parse JSON: {}", e))
+                    crate::csl_decoders::parse_rendered_json(&json)
                 })?;
             return from_serde_json_value(&value)
                 .map_err(|e| format!("Failed to convert to JsValue: {}", e));
@@ -3336,8 +3245,7 @@ fn decode_url(
                 .to_json()
                 .map_err(|e| format!("Failed to convert to JSON: {:?}", e))
                 .and_then(|json| {
-                    serde_json::from_str(&json)
-                        .map_err(|e| format!("Failed to parse JSON: {}", e))
+                    crate::csl_decoders::parse_rendered_json(&json)
                 })?;
             return from_serde_json_value(&value)
                 .map_err(|e| format!("Failed to convert to JsValue: {}", e));
@@ -3361,8 +3269,7 @@ fn decode_value(
                 .to_json()
                 .map_err(|e| format!("Failed to convert to JSON: {:?}", e))
                 .and_then(|json| {
-                    serde_json::from_str(&json)
-                        .map_err(|e| format!("Failed to parse JSON: {}", e))
+                    crate::csl_decoders::parse_rendered_json(&json)
                 })?;
             return from_serde_json_value(&value)
                 .map_err(|e| format!("Failed to convert to JsValue: {}", e));
@@ -3386,8 +3293,7 @@ fn decode_versioned_block(
                 .to_json()
                 .map_err(|e| format!("Failed to convert to JSON: {:?}", e))
                 .and_then(|json| {
-                    serde_json::from_str(&json)
-                        .map_err(|e| format!("Failed to parse JSON: {}", e))
+                    crate::csl_decoders::parse_rendered_json(&json)
                 })?;
             return from_serde_json_value(&value)
                 .map_err(|e| format!("Failed to convert to JsValue: {}", e));
@@ -3411,8 +3317,7 @@ fn decode_vkey(
                 .to_json()
                 .map_err(|e| format!("Failed to convert to JSON: {:?}", e))
                 .and_then(|json| {
-                    serde_json::from_str(&json)
-                        .map_err(|e| format!("Failed to parse JSON: {}", e))
+                    crate::csl_decoders::parse_rendered_json(&json)
                 })?;
             return from_serde_json_value(&value)
                 .map_err(|e| format!("Failed to convert to JsValue: {}", e));
@@ -3436,8 +3341,7 @@ fn decode_vkeywitness(
                 .to_json()
                 .map_err(|e| format!("Failed to convert to JSON: {:?}", e))
                 .and_then(|json| {
-                    serde_json::from_str(&json)
-                        .map_err(|e| format!("Failed to parse JSON: {}", e))
+                    crate::csl_decoders::parse_rendered_json(&json)
                 })?;
             return from_serde_json_value(&value)
                 .map_err(|e| format!("Failed to convert to JsValue: {}", e));
@@ -3461,8 +3365,7 @@ fn decode_vkeywitnesses(
                 .to_json()
                 .map_err(|e| format!("Failed to convert to JSON: {:?}", e))
                 .and_then(|json| {
-                    serde_json::from_str(&json)
-                        .map_err(|e| format!("Failed to parse JSON: {}", e))
+                    crate::csl_decoders::parse_rendered_json(&json)
                 })?;
             return from_serde_json_value(&value)
                 .map_err(|e| format!("Failed to convert to JsValue: {}", e));
@@ -3486,8 +3389,7 @@ fn decode_vote_delegation(
                 .to_json()
                 .map_err(|e| format!("Failed to convert to JSON: {:?}", e))
                 .and_then(|json| {
-                    serde_json::from_str(&json)
-                        .map_err(|e| format!("Failed to parse JSON: {}", e))
+                    crate::csl_decoders::parse_rendered_json(&json)
                 })?;
             return from_serde_json_value(&value)
                 .map_err(|e| format!("Failed to convert to JsValue: {}", e));
@@ -3511,8 +3413,7 @@ fn decode_voter(
                 .to_json()
                 .map_err(|e| format!("Failed to convert to JSON: {:?}", e))
                 .and_then(|json| {
-                    serde_json::from_str(&json)
-                        .map_err(|e| format!("Failed to parse JSON: {}", e))
+                    crate::csl_decoders::parse_rendered_json(&json)
                 })?;
             return from_serde_json_value(&value)
                 .map_err(|e| format!("Failed to convert to JsValue: {}", e));
@@ -3536,8 +3437,7 @@ fn decode_vote_registration_and_delegation(
                 .to_json()
                 .map_err(|e| format!("Failed to convert to JSON: {:?}", e))
                 .and_then(|json| {
-                    serde_json::from_str(&json)
-                        .map_err(|e| format!("Failed to parse JSON: {}", e))
+                    crate::csl_decoders::parse_rendered_json(&json)
                 })?;
             return from_serde_json_value(&value)
                 .map_err(|e| format!("Failed to convert to JsValue: {}", e));
@@ -3561,8 +3461,7 @@ fn decode_voting_procedure(
                 .to_json()
                 .map_err(|e| format!("Failed to convert to JSON: {:?}", e))
                 .and_then(|json| {
-                    serde_json::from_str(&json)
-                        .map_err(|e| format!("Failed to parse JSON: {}", e))
+                    crate::csl_decoders::parse_rendered_json(&json)
                 })?;
             return from_serde_json_value(&value)
                 .map_err(|e| format!("Failed to convert to JsValue: {}", e));
@@ -3586,8 +3485,7 @@ fn decode_voting_procedures(
                 .to_json()
                 .map_err(|e| format!("Failed to convert to JSON: {:?}", e))
                 .and_then(|json| {
-                    serde_json::from_str(&json)
-                        .map_err(|e| format!("Failed to parse JSON: {}", e))
+                    crate::csl_decoders::parse_rendered_json(&json)
                 })?;
             return from_serde_json_value(&value)
                 .map_err(|e| format!("Failed to convert to JsValue: {}", e));
@@ -3611,8 +3509,7 @@ fn decode_voting_proposal(
                 .to_json()
                 .map_err(|e| format!("Failed to convert to JSON: {:?}", e))
                 .and_then(|json| {
-                    serde_json::from_str(&json)
-                        .map_err(|e| format!("Failed to parse JSON: {}", e))
+                    crate::csl_decoders::parse_rendered_json(&json)
                 })?;
             return from_serde_json_value(&value)
                 .map_err(|e| format!("Failed to convert to JsValue: {}", e));
@@ -3636,8 +3533,7 @@ fn decode_voting_proposals(
                 .to_json()
                 .map_err(|e| format!("Failed to convert to JSON: {:?}", e))
                 .and_then(|json| {
-                    serde_json::from_str(&json)
-                        .map_err(|e| format!("Failed to parse JSON: {}", e))
+                    crate::csl_decoders::parse_rendered_json(&json)
                 })?;
             return from_serde_json_value(&value)
                 .map_err(|e| format!("Failed to convert to JsValue: {}", e));
@@ -3661,8 +3557,7 @@ fn decode_vrf_cert(
                 .to_json()
                 .map_err(|e| format!("Failed to convert to JSON: {:?}", e))
                 .and_then(|json| {
-                    serde_json::from_str(&json)
-                        .map_err(|e| format!("Failed to parse JSON: {}", e))
+                    crate::csl_decoders::parse_rendered_json(&json)
                 })?;
             return from_serde_json_value(&value)
                 .map_err(|e| format!("Failed to convert to JsValue: {}", e));
@@ -3760,8 +3655,7 @@ fn decode_withdrawals(
                 .to_json()
                 .map_err(|e| format!("Failed to convert to JSON: {:?}", e))
                 .and_then(|json| {
-                    serde_json::from_str(&json)
-                        .map_err(|e| format!("Failed to parse JSON: {}", e))
+                    crate::csl_decoders::parse_rendered_json(&json)
                 })?;
             return from_serde_json_value(&value)
                 .map_err(|e| format!("Failed to convert to JsValue: {}", e));
@@ -3794,12 +3688,18 @@ fn decoders() -> &'static HashMap<&'static str, DecoderFn> {
         m.insert("Block", decode_block as DecoderFn);
         m.insert("BlockHash", decode_block_hash as DecoderFn);
         m.insert("BootstrapWitness", decode_bootstrap_witness as DecoderFn);
-        m.insert("BootstrapWitnesses", decode_bootstrap_witnesses as DecoderFn);
+        m.insert(
+            "BootstrapWitnesses",
+            decode_bootstrap_witnesses as DecoderFn,
+        );
         m.insert("ByronAddress", decode_address_shim as DecoderFn);
         m.insert("Certificate", decode_certificate as DecoderFn);
         m.insert("Certificates", decode_certificates as DecoderFn);
         m.insert("Committee", decode_committee as DecoderFn);
-        m.insert("CommitteeColdResign", decode_committee_cold_resign as DecoderFn);
+        m.insert(
+            "CommitteeColdResign",
+            decode_committee_cold_resign as DecoderFn,
+        );
         m.insert("CommitteeHotAuth", decode_committee_hot_auth as DecoderFn);
         m.insert("Constitution", decode_constitution as DecoderFn);
         m.insert("Costmdls", decode_costmdls as DecoderFn);
@@ -3810,24 +3710,45 @@ fn decoders() -> &'static HashMap<&'static str, DecoderFn> {
         m.insert("DNSRecordAorAAAA", decode_dns_record_aor_aaaa as DecoderFn);
         m.insert("DNSRecordSRV", decode_dns_record_srv as DecoderFn);
         m.insert("DRep", decode_d_rep as DecoderFn);
-        m.insert("DRepDeregistration", decode_d_rep_deregistration as DecoderFn);
+        m.insert(
+            "DRepDeregistration",
+            decode_d_rep_deregistration as DecoderFn,
+        );
         m.insert("DRepRegistration", decode_d_rep_registration as DecoderFn);
         m.insert("DRepUpdate", decode_d_rep_update as DecoderFn);
-        m.insert("DRepVotingThresholds", decode_d_rep_voting_thresholds as DecoderFn);
+        m.insert(
+            "DRepVotingThresholds",
+            decode_d_rep_voting_thresholds as DecoderFn,
+        );
         m.insert("Ed25519KeyHash", decode_ed25519_key_hash as DecoderFn);
         m.insert("Ed25519KeyHashes", decode_ed25519_key_hashes as DecoderFn);
         m.insert("Ed25519Signature", decode_ed25519_signature as DecoderFn);
         m.insert("EnterpriseAddress", decode_address_shim as DecoderFn);
         m.insert("ExUnitPrices", decode_ex_unit_prices as DecoderFn);
         m.insert("ExUnits", decode_ex_units as DecoderFn);
-        m.insert("GeneralTransactionMetadata", decode_general_transaction_metadata as DecoderFn);
-        m.insert("GenesisDelegateHash", decode_genesis_delegate_hash as DecoderFn);
+        m.insert(
+            "GeneralTransactionMetadata",
+            decode_general_transaction_metadata as DecoderFn,
+        );
+        m.insert(
+            "GenesisDelegateHash",
+            decode_genesis_delegate_hash as DecoderFn,
+        );
         m.insert("GenesisHash", decode_genesis_hash as DecoderFn);
         m.insert("GenesisHashes", decode_genesis_hashes as DecoderFn);
-        m.insert("GenesisKeyDelegation", decode_genesis_key_delegation as DecoderFn);
+        m.insert(
+            "GenesisKeyDelegation",
+            decode_genesis_key_delegation as DecoderFn,
+        );
         m.insert("GovernanceAction", decode_governance_action as DecoderFn);
-        m.insert("GovernanceActionId", decode_governance_action_id as DecoderFn);
-        m.insert("HardForkInitiationAction", decode_hard_fork_initiation_action as DecoderFn);
+        m.insert(
+            "GovernanceActionId",
+            decode_governance_action_id as DecoderFn,
+        );
+        m.insert(
+            "HardForkInitiationAction",
+            decode_hard_fork_initiation_action as DecoderFn,
+        );
         m.insert("Header", decode_header as DecoderFn);
         m.insert("HeaderBody", decode_header_body as DecoderFn);
         m.insert("Int", decode_int as DecoderFn);
@@ -3836,23 +3757,44 @@ fn decoders() -> &'static HashMap<&'static str, DecoderFn> {
         m.insert("KESSignature", decode_kes_signature as DecoderFn);
         m.insert("KESVKey", decode_kesv_key as DecoderFn);
         m.insert("Language", decode_language as DecoderFn);
-        m.insert("LegacyDaedalusPrivateKey", decode_legacy_daedalus_private_key as DecoderFn);
+        m.insert(
+            "LegacyDaedalusPrivateKey",
+            decode_legacy_daedalus_private_key as DecoderFn,
+        );
         m.insert("MetadataList", decode_metadata_list as DecoderFn);
         m.insert("MetadataMap", decode_metadata_map as DecoderFn);
         m.insert("Mint", decode_mint as DecoderFn);
-        m.insert("MIRToStakeCredentials", decode_mir_to_stake_credentials as DecoderFn);
-        m.insert("MoveInstantaneousReward", decode_move_instantaneous_reward as DecoderFn);
-        m.insert("MoveInstantaneousRewardsCert", decode_move_instantaneous_rewards_cert as DecoderFn);
+        m.insert(
+            "MIRToStakeCredentials",
+            decode_mir_to_stake_credentials as DecoderFn,
+        );
+        m.insert(
+            "MoveInstantaneousReward",
+            decode_move_instantaneous_reward as DecoderFn,
+        );
+        m.insert(
+            "MoveInstantaneousRewardsCert",
+            decode_move_instantaneous_rewards_cert as DecoderFn,
+        );
         m.insert("MultiAsset", decode_multi_asset as DecoderFn);
         m.insert("MultiHostName", decode_multi_host_name as DecoderFn);
         m.insert("NativeScript", decode_native_script_shim as DecoderFn);
         m.insert("NativeScripts", decode_native_scripts as DecoderFn);
         m.insert("NetworkId", decode_network_id as DecoderFn);
-        m.insert("NewConstitutionAction", decode_new_constitution_action as DecoderFn);
-        m.insert("NoConfidenceAction", decode_no_confidence_action as DecoderFn);
+        m.insert(
+            "NewConstitutionAction",
+            decode_new_constitution_action as DecoderFn,
+        );
+        m.insert(
+            "NoConfidenceAction",
+            decode_no_confidence_action as DecoderFn,
+        );
         m.insert("Nonce", decode_nonce as DecoderFn);
         m.insert("OperationalCert", decode_operational_cert as DecoderFn);
-        m.insert("ParameterChangeAction", decode_parameter_change_action as DecoderFn);
+        m.insert(
+            "ParameterChangeAction",
+            decode_parameter_change_action as DecoderFn,
+        );
         m.insert("PlutusData", decode_plutus_data_shim as DecoderFn);
         m.insert("PlutusScript", decode_plutus_script_shim as DecoderFn);
         m.insert("PlutusScripts", decode_plutus_scripts as DecoderFn);
@@ -3862,10 +3804,19 @@ fn decoders() -> &'static HashMap<&'static str, DecoderFn> {
         m.insert("PoolParams", decode_pool_params as DecoderFn);
         m.insert("PoolRegistration", decode_pool_registration as DecoderFn);
         m.insert("PoolRetirement", decode_pool_retirement as DecoderFn);
-        m.insert("PoolVotingThresholds", decode_pool_voting_thresholds as DecoderFn);
+        m.insert(
+            "PoolVotingThresholds",
+            decode_pool_voting_thresholds as DecoderFn,
+        );
         m.insert("PrivateKey", decode_private_key as DecoderFn);
-        m.insert("ProposedProtocolParameterUpdates", decode_proposed_protocol_parameter_updates as DecoderFn);
-        m.insert("ProtocolParamUpdate", decode_protocol_param_update as DecoderFn);
+        m.insert(
+            "ProposedProtocolParameterUpdates",
+            decode_proposed_protocol_parameter_updates as DecoderFn,
+        );
+        m.insert(
+            "ProtocolParamUpdate",
+            decode_protocol_param_update as DecoderFn,
+        );
         m.insert("ProtocolVersion", decode_protocol_version as DecoderFn);
         m.insert("PublicKey", decode_public_key as DecoderFn);
         m.insert("Redeemer", decode_redeemer as DecoderFn);
@@ -3885,12 +3836,24 @@ fn decoders() -> &'static HashMap<&'static str, DecoderFn> {
         m.insert("ScriptRef", decode_script_ref as DecoderFn);
         m.insert("SingleHostAddr", decode_single_host_addr as DecoderFn);
         m.insert("SingleHostName", decode_single_host_name as DecoderFn);
-        m.insert("StakeAndVoteDelegation", decode_stake_and_vote_delegation as DecoderFn);
+        m.insert(
+            "StakeAndVoteDelegation",
+            decode_stake_and_vote_delegation as DecoderFn,
+        );
         m.insert("StakeDelegation", decode_stake_delegation as DecoderFn);
-        m.insert("StakeDeregistration", decode_stake_deregistration as DecoderFn);
+        m.insert(
+            "StakeDeregistration",
+            decode_stake_deregistration as DecoderFn,
+        );
         m.insert("StakeRegistration", decode_stake_registration as DecoderFn);
-        m.insert("StakeRegistrationAndDelegation", decode_stake_registration_and_delegation as DecoderFn);
-        m.insert("StakeVoteRegistrationAndDelegation", decode_stake_vote_registration_and_delegation as DecoderFn);
+        m.insert(
+            "StakeRegistrationAndDelegation",
+            decode_stake_registration_and_delegation as DecoderFn,
+        );
+        m.insert(
+            "StakeVoteRegistrationAndDelegation",
+            decode_stake_vote_registration_and_delegation as DecoderFn,
+        );
         m.insert("TimelockExpiry", decode_timelock_expiry as DecoderFn);
         m.insert("TimelockStart", decode_timelock_start as DecoderFn);
         m.insert("Transaction", decode_transaction_shim as DecoderFn);
@@ -3899,17 +3862,41 @@ fn decoders() -> &'static HashMap<&'static str, DecoderFn> {
         m.insert("TransactionHash", decode_transaction_hash as DecoderFn);
         m.insert("TransactionInput", decode_transaction_input as DecoderFn);
         m.insert("TransactionInputs", decode_transaction_inputs as DecoderFn);
-        m.insert("TransactionMetadatum", decode_transaction_metadatum as DecoderFn);
-        m.insert("TransactionMetadatumLabels", decode_transaction_metadatum_labels as DecoderFn);
+        m.insert(
+            "TransactionMetadatum",
+            decode_transaction_metadatum as DecoderFn,
+        );
+        m.insert(
+            "TransactionMetadatumLabels",
+            decode_transaction_metadatum_labels as DecoderFn,
+        );
         m.insert("TransactionOutput", decode_transaction_output as DecoderFn);
-        m.insert("TransactionOutputs", decode_transaction_outputs as DecoderFn);
-        m.insert("TransactionUnspentOutput", decode_transaction_unspent_output as DecoderFn);
-        m.insert("TransactionWitnessSet", decode_transaction_witness_set as DecoderFn);
-        m.insert("TransactionWitnessSets", decode_transaction_witness_sets as DecoderFn);
-        m.insert("TreasuryWithdrawalsAction", decode_treasury_withdrawals_action as DecoderFn);
+        m.insert(
+            "TransactionOutputs",
+            decode_transaction_outputs as DecoderFn,
+        );
+        m.insert(
+            "TransactionUnspentOutput",
+            decode_transaction_unspent_output as DecoderFn,
+        );
+        m.insert(
+            "TransactionWitnessSet",
+            decode_transaction_witness_set as DecoderFn,
+        );
+        m.insert(
+            "TransactionWitnessSets",
+            decode_transaction_witness_sets as DecoderFn,
+        );
+        m.insert(
+            "TreasuryWithdrawalsAction",
+            decode_treasury_withdrawals_action as DecoderFn,
+        );
         m.insert("UnitInterval", decode_unit_interval as DecoderFn);
         m.insert("Update", decode_update as DecoderFn);
-        m.insert("UpdateCommitteeAction", decode_update_committee_action as DecoderFn);
+        m.insert(
+            "UpdateCommitteeAction",
+            decode_update_committee_action as DecoderFn,
+        );
         m.insert("URL", decode_url as DecoderFn);
         m.insert("Value", decode_value as DecoderFn);
         m.insert("VersionedBlock", decode_versioned_block as DecoderFn);
@@ -3918,7 +3905,10 @@ fn decoders() -> &'static HashMap<&'static str, DecoderFn> {
         m.insert("Vkeywitnesses", decode_vkeywitnesses as DecoderFn);
         m.insert("VoteDelegation", decode_vote_delegation as DecoderFn);
         m.insert("Voter", decode_voter as DecoderFn);
-        m.insert("VoteRegistrationAndDelegation", decode_vote_registration_and_delegation as DecoderFn);
+        m.insert(
+            "VoteRegistrationAndDelegation",
+            decode_vote_registration_and_delegation as DecoderFn,
+        );
         m.insert("VotingProcedure", decode_voting_procedure as DecoderFn);
         m.insert("VotingProcedures", decode_voting_procedures as DecoderFn);
         m.insert("VotingProposal", decode_voting_proposal as DecoderFn);
@@ -3938,6 +3928,24 @@ pub fn get_decodable_types() -> Vec<String> {
     names
 }
 
+/// Whether hex input nests past what the typed decoders follow.
+///
+/// The decoders recurse over the document on the host's stack, so the
+/// document is scanned for its depth first, iteratively, and one nested
+/// past [`limits::MAX_TYPED_DECODER_NESTING_DEPTH`] is never handed to
+/// them. Input that is not hex carries no CBOR to nest.
+fn nests_past_typed_decoding(input: &str, is_hex: bool) -> bool {
+    if !is_hex {
+        return false;
+    }
+    let bytes = match hex::decode(input) {
+        Ok(bytes) => bytes,
+        Err(_) => return false,
+    };
+    limits::cbor_nesting_depth_capped(&bytes, limits::MAX_TYPED_DECODER_NESTING_DEPTH)
+        > limits::MAX_TYPED_DECODER_NESTING_DEPTH
+}
+
 #[wasm_bindgen]
 pub fn decode_specific_type(
     input: &str,
@@ -3949,12 +3957,21 @@ pub fn decode_specific_type(
     let is_base58 = is_valid_base58(input);
     let is_bech32 = is_valid_bech32(input);
 
+    if nests_past_typed_decoding(input, is_hex) {
+        return Err(limits::typed_decoder_nesting_message(
+            limits::MAX_TYPED_DECODER_NESTING_DEPTH,
+        ));
+    }
+
     match decoders().get(type_name) {
         Some(decoder) => decoder(input, is_hex, is_bech32, is_base58, &params),
         None => Err(format!("Unsupported type: {}", type_name)),
     }
 }
 
+/// The names of the types `input` decodes as. A document nested past
+/// what the typed decoders follow decodes as none of them: it is refused
+/// before any decoder sees it, rather than tried.
 #[wasm_bindgen]
 pub fn get_possible_types_for_input(input: &str) -> Vec<String> {
     let params = DecodingParams::default();
@@ -3962,14 +3979,15 @@ pub fn get_possible_types_for_input(input: &str) -> Vec<String> {
     let is_base58 = is_valid_base58(input);
     let is_bech32 = is_valid_bech32(input);
 
+    if nests_past_typed_decoding(input, is_hex) {
+        return Vec::new();
+    }
+
     let mut matches: Vec<String> = decoders()
         .iter()
-        .filter(|(_, decoder)| {
-            decoder(input, is_hex, is_bech32, is_base58, &params).is_ok()
-        })
+        .filter(|(_, decoder)| decoder(input, is_hex, is_bech32, is_base58, &params).is_ok())
         .map(|(name, _)| (*name).to_string())
         .collect();
     matches.sort();
     matches
 }
-

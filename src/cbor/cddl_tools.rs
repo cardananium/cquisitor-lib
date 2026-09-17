@@ -2,12 +2,15 @@
 //! and format. Built on top of the same `anweiss/cddl` AST the validator
 //! and decoder use, so byte spans line up with everything else.
 
+use std::collections::HashSet;
+
 use cddl::ast::{
-    GenericArgs, GenericParams, Group, GroupChoice, GroupEntry, MemberKey, Operator, Rule, Type,
-    Type1, Type2, CDDL,
+    GenericArgs, GenericParams, Group, GroupChoice, GroupEntry, Identifier, MemberKey,
+    NonMemberKey, Rule, Type, Type1, Type2, CDDL,
 };
 use serde_json::{json, Value};
 
+use crate::cbor::document_cache;
 use crate::cbor::source_index::{span_json, Utf16Index};
 use crate::js_error::JsError;
 
@@ -15,32 +18,33 @@ use crate::js_error::JsError;
 // Outline — list of top-level rules with their source spans.
 // ============================================================
 
-/// Returns `[{name, kind, span: {offset, length, line}}]` for every
-/// top-level rule. Used by editor outline / breadcrumbs / Cmd+P.
+/// `[{name, kind, is_alternate, span, name_span}]` for top-level rules.
+///
+/// `/=` / `//=` alternates share a name; `is_alternate` marks extensions.
 pub fn outline(cddl: &str) -> Result<Value, JsError> {
-    let ast = parse(cddl)?;
+    with_parsed(cddl, |ast| Ok(outline_ast(ast, cddl)))
+}
+
+fn outline_ast(ast: &CDDL<'_>, cddl: &str) -> Value {
     let idx = Utf16Index::new(cddl);
     let rules = ast
         .rules
         .iter()
         .map(|r| {
-            let (kind, name, name_span) = match r {
-                Rule::Type { rule, .. } => {
-                    ("type", rule.name.ident.to_string(), rule.name.span)
-                }
-                Rule::Group { rule, .. } => {
-                    ("group", rule.name.ident.to_string(), rule.name.span)
-                }
+            let (kind, is_alternate) = match r {
+                Rule::Type { rule, .. } => ("type", rule.is_type_choice_alternate),
+                Rule::Group { rule, .. } => ("group", rule.is_group_choice_alternate),
             };
             json!({
-                "name": name,
+                "name": rule_name(r),
                 "kind": kind,
+                "is_alternate": is_alternate,
                 "span": span_to_json(&idx, rule_span(r)),
-                "name_span": span_to_json(&idx, name_span),
+                "name_span": span_to_json(&idx, rule_name_span(r)),
             })
         })
         .collect();
-    Ok(Value::Array(rules))
+    Value::Array(rules)
 }
 
 fn rule_span(r: &Rule<'_>) -> cddl::ast::Span {
@@ -50,140 +54,248 @@ fn rule_span(r: &Rule<'_>) -> cddl::ast::Span {
     }
 }
 
+/// Rule name including `$`/`&` sigil (matches `name_span` text).
+fn rule_name(r: &Rule<'_>) -> String {
+    match r {
+        Rule::Type { rule, .. } => rule.name.to_string(),
+        Rule::Group { rule, .. } => rule.name.to_string(),
+    }
+}
+
+fn rule_name_span(r: &Rule<'_>) -> cddl::ast::Span {
+    match r {
+        Rule::Type { rule, .. } => rule.name.span,
+        Rule::Group { rule, .. } => rule.name.span,
+    }
+}
+
 // ============================================================
 // References — definition span + every use of a rule name.
 // ============================================================
 
 /// Returns `{definition: span | null, uses: span[]}` for `name`. Walks
 /// every Typename / Unwrap / ChoiceFromGroup / TypeGroupname and
-/// matches by ident.
+/// matches by the identifier's full text, sigil included.
 pub fn references(cddl: &str, name: &str) -> Result<Value, JsError> {
-    let ast = parse(cddl)?;
+    with_parsed(cddl, |ast| Ok(references_ast(ast, cddl, name)))
+}
 
-    let definition = ast.rules.iter().find_map(|r| match r {
-        Rule::Type { rule, .. } if rule.name.ident == name => Some(rule.name.span),
-        Rule::Group { rule, .. } if rule.name.ident == name => Some(rule.name.span),
-        _ => None,
-    });
+fn references_ast(ast: &CDDL<'_>, cddl: &str, name: &str) -> Value {
+    let definition = ast
+        .rules
+        .iter()
+        .find(|r| rule_name(r) == name)
+        .map(rule_name_span);
 
     let mut uses: Vec<cddl::ast::Span> = Vec::new();
     for rule in &ast.rules {
-        match rule {
-            Rule::Type { rule, .. } => {
-                walk_generic_params(&rule.generic_params, name, &mut uses);
-                walk_type(&rule.value, name, &mut uses);
+        walk_rule(rule, &mut |ident: &Identifier<'_>, _role| {
+            if ident.to_string() == name {
+                uses.push(ident.span);
             }
-            Rule::Group { rule, .. } => {
-                walk_generic_params(&rule.generic_params, name, &mut uses);
-                walk_group_entry(&rule.entry, name, &mut uses);
-            }
-        }
+        });
     }
 
     let idx = Utf16Index::new(cddl);
-    Ok(json!({
+    json!({
         "definition": definition.map(|s| span_to_json(&idx, s)).unwrap_or(Value::Null),
         "uses": uses.into_iter().map(|s| span_to_json(&idx, s)).collect::<Vec<_>>(),
-    }))
+    })
 }
 
 // ============================================================
 // Symbol at offset — what's under the cursor?
 // ============================================================
 
-/// Returns a description of the identifier at `offset`, or `null`. For
-/// uses, includes a pointer back to the rule's definition span (the
-/// "go to definition" target). For definitions, the same span is both
-/// `span` and `definition_span`.
+/// Identifier at `offset`, or `null` (with `definition_span` for uses).
 pub fn symbol_at(cddl: &str, offset: usize) -> Result<Value, JsError> {
-    let ast = parse(cddl)?;
+    with_parsed(cddl, |ast| Ok(symbol_at_ast(ast, cddl, offset)))
+}
+
+fn symbol_at_ast(ast: &CDDL<'_>, cddl: &str, offset: usize) -> Value {
     let idx = Utf16Index::new(cddl);
 
     // First, see if offset lands on a rule name (definition).
     for rule in &ast.rules {
-        let name_span = match rule {
-            Rule::Type { rule, .. } => rule.name.span,
-            Rule::Group { rule, .. } => rule.name.span,
-        };
+        let name_span = rule_name_span(rule);
         if span_contains(name_span, offset) {
-            let (name, kind) = match rule {
-                Rule::Type { rule, .. } => (rule.name.ident.to_string(), "type"),
-                Rule::Group { rule, .. } => (rule.name.ident.to_string(), "group"),
+            let kind = match rule {
+                Rule::Type { .. } => "type",
+                Rule::Group { .. } => "group",
             };
-            return Ok(json!({
-                "name": name,
+            return json!({
+                "name": rule_name(rule),
                 "kind": kind,
                 "role": "definition",
                 "span": span_to_json(&idx, name_span),
                 "definition_span": span_to_json(&idx, name_span),
                 "rule_span": span_to_json(&idx, rule_span(rule)),
-            }));
+            });
         }
     }
 
     // Otherwise look for a use whose ident span contains the offset.
-    let mut found: Option<cddl::ast::Identifier<'_>> = None;
+    let mut found: Option<Identifier<'_>> = None;
     for rule in &ast.rules {
-        match rule {
-            Rule::Type { rule, .. } => {
-                find_use_at_in_generic_params(&rule.generic_params, offset, &mut found);
-                find_use_at_in_type(&rule.value, offset, &mut found);
+        walk_rule(rule, &mut |ident: &Identifier<'_>, _role| {
+            if found.is_none() && span_contains(ident.span, offset) {
+                found = Some(ident.clone());
             }
-            Rule::Group { rule, .. } => {
-                find_use_at_in_generic_params(&rule.generic_params, offset, &mut found);
-                find_use_at_in_group_entry(&rule.entry, offset, &mut found);
-            }
-        }
+        });
         if found.is_some() {
             break;
         }
     }
 
-    let Some(ident) = found else { return Ok(Value::Null) };
+    let Some(ident) = found else {
+        return Value::Null;
+    };
+    let name = ident.to_string();
 
-    let definition = ast.rules.iter().find_map(|r| match r {
-        Rule::Type { rule, .. } if rule.name.ident == ident.ident => {
-            Some((rule.name.span, rule_span(r)))
-        }
-        Rule::Group { rule, .. } if rule.name.ident == ident.ident => {
-            Some((rule.name.span, rule_span(r)))
-        }
-        _ => None,
-    });
+    let definition = ast
+        .rules
+        .iter()
+        .find(|r| rule_name(r) == name)
+        .map(|r| (rule_name_span(r), rule_span(r)));
 
     let (definition_span, rule_span_value) = match definition {
         Some((d, r)) => (Some(d), Some(r)),
         None => (None, None),
     };
 
-    Ok(json!({
-        "name": ident.ident.to_string(),
+    json!({
+        "name": name,
         "kind": if rule_span_value.is_some() { "rule_reference" } else { "prelude_or_unknown" },
         "role": "use",
         "span": span_to_json(&idx, ident.span),
         "definition_span": definition_span.map(|s| span_to_json(&idx, s)).unwrap_or(Value::Null),
         "rule_span": rule_span_value.map(|s| span_to_json(&idx, s)).unwrap_or(Value::Null),
-    }))
+    })
 }
 
 // ============================================================
 // Format — pretty-print via the AST's Display impl.
 // ============================================================
 
-/// Reformat the input by parsing it and serialising via `Display`.
-/// Round-trips canonically — useful for `format on save`.
+/// Reformat via parse + `Display` (format-on-save).
+///
+/// Preserves comments (text and order) and literal denotation — float
+/// fractions stay, since floats and ints match different CBOR. Same
+/// nesting bound as the other IDE primitives.
 pub fn format(cddl: &str) -> Result<String, JsError> {
-    let ast = parse(cddl)?;
-    Ok(format!("{}", ast))
+    with_parsed(cddl, |ast| Ok(format!("{}", ast)))
+}
+
+// ============================================================
+// Unresolved references
+// ============================================================
+
+/// The RFC 8610 Appendix D prelude. A name in this list resolves without a rule
+/// defining it. Kept in step with the parser's own list — a name missing
+/// here is reported as unresolved even though the schema is valid.
+const STANDARD_PRELUDE: &[&str] = &[
+    "any",
+    "uint",
+    "nint",
+    "int",
+    "bstr",
+    "bytes",
+    "tstr",
+    "text",
+    "tdate",
+    "time",
+    "number",
+    "biguint",
+    "bignint",
+    "bigint",
+    "integer",
+    "unsigned",
+    "decfrac",
+    "bigfloat",
+    "eb64url",
+    "eb64legacy",
+    "eb16",
+    "encoded-cbor",
+    "uri",
+    "b64url",
+    "b64legacy",
+    "regexp",
+    "mime-message",
+    "cbor-any",
+    "float16",
+    "float32",
+    "float64",
+    "float16-32",
+    "float32-64",
+    "float",
+    "false",
+    "true",
+    "bool",
+    "nil",
+    "null",
+    "undefined",
+];
+
+/// Unresolved references in source order (all occurrences).
+///
+/// Enrichment only — the AST can miss some refs (e.g. `#6.<name>`); the
+/// parser remains authoritative for resolve/fail.
+pub(crate) fn unresolved_references(ast: &CDDL<'_>) -> Vec<(String, cddl::ast::Span)> {
+    let defined: HashSet<&str> = ast
+        .rules
+        .iter()
+        .map(|r| match r {
+            Rule::Type { rule, .. } => rule.name.ident,
+            Rule::Group { rule, .. } => rule.name.ident,
+        })
+        .collect();
+
+    let mut unresolved = Vec::new();
+    for rule in &ast.rules {
+        let generic_params = match rule {
+            Rule::Type { rule, .. } => &rule.generic_params,
+            Rule::Group { rule, .. } => &rule.generic_params,
+        };
+        // Generic parameters are scoped to the rule that binds them.
+        let in_scope: HashSet<&str> = generic_params
+            .iter()
+            .flat_map(|gp| gp.params.iter().map(|p| p.param.ident))
+            .collect();
+
+        walk_rule(rule, &mut |ident: &Identifier<'_>, role| {
+            if role != IdentRole::Reference {
+                return;
+            }
+            // Socket/plug names are resolved by whatever plugs into them,
+            // which may live in another document.
+            if ident.socket.is_some() || ident.ident.starts_with('$') {
+                return;
+            }
+            if defined.contains(ident.ident)
+                || in_scope.contains(ident.ident)
+                || STANDARD_PRELUDE.contains(&ident.ident)
+            {
+                return;
+            }
+            unresolved.push((ident.to_string(), ident.span));
+        });
+    }
+    unresolved
 }
 
 // ============================================================
 // Helpers
 // ============================================================
 
-fn parse<'a>(cddl: &'a str) -> Result<CDDL<'a>, JsError> {
-    cddl::pest_bridge::cddl_from_pest_str_checked(cddl)
-        .map_err(|e| JsError::new(&format!("CDDL parse error: {}", e)))
+/// Parse without resolving refs (IDE mid-edit). Parse / nesting → throw.
+fn with_parsed<R>(
+    cddl: &str,
+    f: impl FnOnce(&CDDL<'_>) -> Result<R, JsError>,
+) -> Result<R, JsError> {
+    document_cache::with_ast_unchecked(cddl, |parsed| match parsed {
+        Ok(ast) => f(ast),
+        Err(e) => Err(e.to_js_error()),
+    })
 }
 
 fn span_to_json(idx: &Utf16Index, s: cddl::ast::Span) -> Value {
@@ -196,247 +308,135 @@ fn span_contains(s: cddl::ast::Span, offset: usize) -> bool {
     offset >= start && offset < end
 }
 
-// ----- Reference walker (collect spans where ident == name) -----
+// ----- Identifier walker -----
 
-fn walk_generic_params(
-    gp: &Option<GenericParams<'_>>,
-    name: &str,
-    uses: &mut Vec<cddl::ast::Span>,
-) {
+/// What an identifier is doing where the walker found it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum IdentRole {
+    /// A name used in type or group position. Resolves to a rule, a
+    /// generic parameter in scope, or a prelude type.
+    Reference,
+    /// A generic parameter binder in a rule head. Introduces a name for
+    /// the rule body rather than referring to one.
+    GenericParamBinder,
+}
+
+/// Callback invoked once per identifier, in source order.
+type IdentVisitor<'a, 'v> = &'v mut dyn FnMut(&Identifier<'a>, IdentRole);
+
+fn walk_rule<'a>(rule: &Rule<'a>, visit: IdentVisitor<'a, '_>) {
+    match rule {
+        Rule::Type { rule, .. } => {
+            walk_generic_params(&rule.generic_params, visit);
+            walk_type(&rule.value, visit);
+        }
+        Rule::Group { rule, .. } => {
+            walk_generic_params(&rule.generic_params, visit);
+            walk_group_entry(&rule.entry, visit);
+        }
+    }
+}
+
+fn walk_generic_params<'a>(gp: &Option<GenericParams<'a>>, visit: IdentVisitor<'a, '_>) {
     if let Some(gp) = gp {
         for p in &gp.params {
-            if p.param.ident == name {
-                uses.push(p.param.span);
-            }
+            visit(&p.param, IdentRole::GenericParamBinder);
         }
     }
 }
 
-fn walk_generic_args(args: &Option<GenericArgs<'_>>, name: &str, uses: &mut Vec<cddl::ast::Span>) {
+fn walk_generic_args<'a>(args: &Option<GenericArgs<'a>>, visit: IdentVisitor<'a, '_>) {
     if let Some(args) = args {
         for a in &args.args {
-            walk_type1(&a.arg, name, uses);
+            walk_type1(&a.arg, visit);
         }
     }
 }
 
-fn walk_type(ty: &Type<'_>, name: &str, uses: &mut Vec<cddl::ast::Span>) {
+fn walk_type<'a>(ty: &Type<'a>, visit: IdentVisitor<'a, '_>) {
     for choice in &ty.type_choices {
-        walk_type1(&choice.type1, name, uses);
+        walk_type1(&choice.type1, visit);
     }
 }
 
-fn walk_type1(t1: &Type1<'_>, name: &str, uses: &mut Vec<cddl::ast::Span>) {
-    walk_type2(&t1.type2, name, uses);
+fn walk_type1<'a>(t1: &Type1<'a>, visit: IdentVisitor<'a, '_>) {
+    walk_type2(&t1.type2, visit);
+    // Control operator targets and range bounds are types in their own
+    // right: `bstr .size limit` and `0..maxv` both reference a rule.
     if let Some(operator) = &t1.operator {
-        walk_operator(operator, name, uses);
+        walk_type2(&operator.type2, visit);
     }
 }
 
-fn walk_operator(op: &Operator<'_>, name: &str, uses: &mut Vec<cddl::ast::Span>) {
-    walk_type2(&op.type2, name, uses);
-}
-
-fn walk_type2(t2: &Type2<'_>, name: &str, uses: &mut Vec<cddl::ast::Span>) {
+fn walk_type2<'a>(t2: &Type2<'a>, visit: IdentVisitor<'a, '_>) {
     match t2 {
-        Type2::Typename { ident, generic_args, .. } => {
-            if ident.ident == name {
-                uses.push(ident.span);
-            }
-            walk_generic_args(generic_args, name, uses);
+        Type2::Typename {
+            ident,
+            generic_args,
+            ..
         }
-        Type2::Unwrap { ident, generic_args, .. } => {
-            if ident.ident == name {
-                uses.push(ident.span);
-            }
-            walk_generic_args(generic_args, name, uses);
+        | Type2::Unwrap {
+            ident,
+            generic_args,
+            ..
         }
-        Type2::ChoiceFromGroup { ident, generic_args, .. } => {
-            if ident.ident == name {
-                uses.push(ident.span);
-            }
-            walk_generic_args(generic_args, name, uses);
+        | Type2::ChoiceFromGroup {
+            ident,
+            generic_args,
+            ..
+        } => {
+            visit(ident, IdentRole::Reference);
+            walk_generic_args(generic_args, visit);
         }
-        Type2::ParenthesizedType { pt, .. } => walk_type(pt, name, uses),
-        Type2::TaggedData { t, .. } => walk_type(t, name, uses),
-        Type2::Map { group, .. } => walk_group(group, name, uses),
-        Type2::Array { group, .. } => walk_group(group, name, uses),
-        Type2::ChoiceFromInlineGroup { group, .. } => walk_group(group, name, uses),
+        Type2::ParenthesizedType { pt, .. } => walk_type(pt, visit),
+        Type2::TaggedData { t, .. } => walk_type(t, visit),
+        Type2::Map { group, .. }
+        | Type2::Array { group, .. }
+        | Type2::ChoiceFromInlineGroup { group, .. } => walk_group(group, visit),
         _ => {}
     }
 }
 
-fn walk_group(g: &Group<'_>, name: &str, uses: &mut Vec<cddl::ast::Span>) {
+fn walk_group<'a>(g: &Group<'a>, visit: IdentVisitor<'a, '_>) {
     for choice in &g.group_choices {
-        walk_group_choice(choice, name, uses);
+        walk_group_choice(choice, visit);
     }
 }
 
-fn walk_group_choice(gc: &GroupChoice<'_>, name: &str, uses: &mut Vec<cddl::ast::Span>) {
+fn walk_group_choice<'a>(gc: &GroupChoice<'a>, visit: IdentVisitor<'a, '_>) {
     for (entry, _) in &gc.group_entries {
-        walk_group_entry(entry, name, uses);
+        walk_group_entry(entry, visit);
     }
 }
 
-fn walk_group_entry(ge: &GroupEntry<'_>, name: &str, uses: &mut Vec<cddl::ast::Span>) {
+fn walk_group_entry<'a>(ge: &GroupEntry<'a>, visit: IdentVisitor<'a, '_>) {
     match ge {
         GroupEntry::ValueMemberKey { ge, .. } => {
             if let Some(mk) = &ge.member_key {
-                walk_member_key(mk, name, uses);
+                walk_member_key(mk, visit);
             }
-            walk_type(&ge.entry_type, name, uses);
+            walk_type(&ge.entry_type, visit);
         }
         GroupEntry::TypeGroupname { ge, .. } => {
-            if ge.name.ident == name {
-                uses.push(ge.name.span);
-            }
-            walk_generic_args(&ge.generic_args, name, uses);
+            visit(&ge.name, IdentRole::Reference);
+            walk_generic_args(&ge.generic_args, visit);
         }
-        GroupEntry::InlineGroup { group, .. } => walk_group(group, name, uses),
+        GroupEntry::InlineGroup { group, .. } => walk_group(group, visit),
     }
 }
 
-fn walk_member_key(mk: &MemberKey<'_>, name: &str, uses: &mut Vec<cddl::ast::Span>) {
-    if let MemberKey::Type1 { t1, .. } = mk {
-        walk_type1(t1, name, uses);
-    }
-}
-
-// ----- Symbol-at-offset walker (find first ident whose span covers offset) -----
-
-fn find_use_at_in_generic_params<'a>(
-    gp: &'a Option<GenericParams<'a>>,
-    offset: usize,
-    found: &mut Option<cddl::ast::Identifier<'a>>,
-) {
-    if found.is_some() {
-        return;
-    }
-    if let Some(gp) = gp {
-        for p in &gp.params {
-            if span_contains(p.param.span, offset) {
-                *found = Some(p.param.clone());
-                return;
-            }
-        }
-    }
-}
-
-fn find_use_at_in_generic_args<'a>(
-    args: &'a Option<GenericArgs<'a>>,
-    offset: usize,
-    found: &mut Option<cddl::ast::Identifier<'a>>,
-) {
-    if found.is_some() {
-        return;
-    }
-    if let Some(args) = args {
-        for a in &args.args {
-            find_use_at_in_type1(&a.arg, offset, found);
-        }
-    }
-}
-
-fn find_use_at_in_type<'a>(
-    ty: &'a Type<'a>,
-    offset: usize,
-    found: &mut Option<cddl::ast::Identifier<'a>>,
-) {
-    for choice in &ty.type_choices {
-        find_use_at_in_type1(&choice.type1, offset, found);
-        if found.is_some() {
-            return;
-        }
-    }
-}
-
-fn find_use_at_in_type1<'a>(
-    t1: &'a Type1<'a>,
-    offset: usize,
-    found: &mut Option<cddl::ast::Identifier<'a>>,
-) {
-    find_use_at_in_type2(&t1.type2, offset, found);
-    if found.is_some() {
-        return;
-    }
-    if let Some(operator) = &t1.operator {
-        find_use_at_in_type2(&operator.type2, offset, found);
-    }
-}
-
-fn find_use_at_in_type2<'a>(
-    t2: &'a Type2<'a>,
-    offset: usize,
-    found: &mut Option<cddl::ast::Identifier<'a>>,
-) {
-    if found.is_some() {
-        return;
-    }
-    match t2 {
-        Type2::Typename { ident, generic_args, .. }
-        | Type2::Unwrap { ident, generic_args, .. }
-        | Type2::ChoiceFromGroup { ident, generic_args, .. } => {
-            if span_contains(ident.span, offset) {
-                *found = Some(ident.clone());
-                return;
-            }
-            find_use_at_in_generic_args(generic_args, offset, found);
-        }
-        Type2::ParenthesizedType { pt, .. } => find_use_at_in_type(pt, offset, found),
-        Type2::TaggedData { t, .. } => find_use_at_in_type(t, offset, found),
-        Type2::Map { group, .. } | Type2::Array { group, .. } => {
-            find_use_at_in_group(group, offset, found)
-        }
-        Type2::ChoiceFromInlineGroup { group, .. } => {
-            find_use_at_in_group(group, offset, found)
-        }
-        _ => {}
-    }
-}
-
-fn find_use_at_in_group<'a>(
-    g: &'a Group<'a>,
-    offset: usize,
-    found: &mut Option<cddl::ast::Identifier<'a>>,
-) {
-    for choice in &g.group_choices {
-        for (entry, _) in &choice.group_entries {
-            find_use_at_in_group_entry(entry, offset, found);
-            if found.is_some() {
-                return;
-            }
-        }
-    }
-}
-
-fn find_use_at_in_group_entry<'a>(
-    ge: &'a GroupEntry<'a>,
-    offset: usize,
-    found: &mut Option<cddl::ast::Identifier<'a>>,
-) {
-    if found.is_some() {
-        return;
-    }
-    match ge {
-        GroupEntry::ValueMemberKey { ge, .. } => {
-            if let Some(mk) = &ge.member_key {
-                if let MemberKey::Type1 { t1, .. } = mk {
-                    find_use_at_in_type1(t1, offset, found);
-                    if found.is_some() {
-                        return;
-                    }
-                }
-            }
-            find_use_at_in_type(&ge.entry_type, offset, found);
-        }
-        GroupEntry::TypeGroupname { ge, .. } => {
-            if span_contains(ge.name.span, offset) {
-                *found = Some(ge.name.clone());
-                return;
-            }
-            find_use_at_in_generic_args(&ge.generic_args, offset, found);
-        }
-        GroupEntry::InlineGroup { group, .. } => find_use_at_in_group(group, offset, found),
+fn walk_member_key<'a>(mk: &MemberKey<'a>, visit: IdentVisitor<'a, '_>) {
+    match mk {
+        MemberKey::Type1 { t1, .. } => walk_type1(t1, visit),
+        // A non-member key wraps a whole group or type in key position;
+        // whatever it holds is an ordinary reference.
+        MemberKey::NonMemberKey { non_member_key, .. } => match non_member_key {
+            NonMemberKey::Group(group) => walk_group(group, visit),
+            NonMemberKey::Type(ty) => walk_type(ty, visit),
+        },
+        // A bareword key is a literal text key, not a reference, and a
+        // value key is a literal.
+        MemberKey::Bareword { .. } | MemberKey::Value { .. } => {}
     }
 }
 
@@ -448,57 +448,175 @@ fn find_use_at_in_group_entry<'a>(
 mod tests {
     use super::*;
 
-    /// Documents an upstream `Display` bug: when a `bareword : type`
-    /// member key has a Map type as its value (e.g. Conway's
-    /// `auxiliary_data_set : {* transaction_index => auxiliary_data}`),
-    /// the formatter outputs `bareword => {...}` instead — converting
-    /// the bareword into a type1 expression, which then dangles as a
-    /// reference to a rule that doesn't exist.
-    ///
-    /// Minimal repro and full Conway-CDDL round-trip both fail. When
-    /// upstream fixes the Display impl, both halves should flip back
-    /// to `valid: true`.
+    /// Keep `bareword : type` — rewriting to `=>` breaks the bareword.
     #[test]
-    fn format_breaks_bareword_key_when_value_is_map() {
+    fn format_keeps_bareword_key_form_when_value_is_map() {
         let src = "block = [aux: {* int => uint}]";
         let formatted = format(src).expect("input parses");
-        // Pinning the bug: the bareword `aux:` becomes `aux =>`.
         assert!(
-            formatted.contains("aux =>") && !formatted.contains("aux:"),
-            "if this trips, the upstream `:` -> `=>` Display bug is fixed; \
-             flip this test to assert {:?}.contains('aux:')",
+            formatted.contains("aux:") && !formatted.contains("aux =>"),
+            "bareword member key must stay in `:` form, got {:?}",
             formatted
         );
-        // Direct consequence: re-parsing the formatted output now
-        // treats `aux` as a reference to a non-existent rule.
+        // The formatted text must still resolve every reference.
         let reparse = validate_cddl_text_via_super(&formatted);
         assert_eq!(
-            reparse["error"]["kind"], json!("unresolved_references"),
-            "formatted output should fail with unresolved_references for `aux`",
+            reparse,
+            json!({ "valid": true }),
+            "formatted output should re-validate cleanly, got {}",
+            reparse
         );
     }
 
-    /// Wider check: the entire Conway CDDL becomes unparseable after
-    /// `format()`. Skipped when the cached fixture isn't present.
+    /// `format()` must be an identity on validity for a schema the size
+    /// of a real protocol's: whatever goes in valid comes out valid.
     #[test]
-    fn conway_cddl_round_trip_through_format_documents_break() {
-        let Ok(src) = std::fs::read_to_string("/tmp/conway.cddl") else {
-            eprintln!("skipping — /tmp/conway.cddl not present");
-            return;
-        };
-        let formatted =
-            format(&src).expect("Conway CDDL itself parses and formats");
-        // The formatter mangles bareword-keyed map values — re-parsing
-        // produces unresolved-reference errors. When upstream fixes
-        // this, flip to `valid: true` and re-enable the full
-        // round-trip checks.
+    fn ledger_cddl_round_trips_through_format() {
+        let src = crate::cbor::test_fixtures::ledger_cddl();
+        let formatted = format(src).expect("the ledger schema itself parses and formats");
         let reparse = validate_cddl_text_via_super(&formatted);
-        assert_eq!(reparse["valid"], json!(false));
         assert_eq!(
-            reparse["error"]["kind"], json!("unresolved_references"),
-            "Conway round-trip currently breaks via unresolved_references; got {}",
             reparse,
+            json!({ "valid": true }),
+            "formatted ledger schema should re-validate cleanly, got {}",
+            reparse
         );
+    }
+
+    /// Formatting must not discard comments: a schema's documentation is
+    /// part of its content, and `format` is offered as a non-destructive
+    /// rewrite.
+    #[test]
+    fn format_preserves_every_comment_in_a_large_schema() {
+        let src = crate::cbor::test_fixtures::ledger_cddl();
+        let formatted = format(src).expect("input parses");
+        let before = src.matches(';').count();
+        assert!(
+            before > 0,
+            "the fixture schema carries no comments to preserve"
+        );
+        let after = formatted.matches(';').count();
+        assert_eq!(
+            after,
+            before,
+            "format dropped {} of {} comment markers",
+            before.saturating_sub(after),
+            before
+        );
+    }
+
+    /// Every schema version: comments survive format (and a second pass)
+    /// in order.
+    #[test]
+    fn format_preserves_comment_text_and_order_in_every_schema_version() {
+        for (version, src) in crate::cbor::test_fixtures::schema_suite() {
+            let formatted =
+                format(src).unwrap_or_else(|e| panic!("{} should format: {:?}", version, e));
+            assert_eq!(
+                comment_payloads(&formatted),
+                comment_payloads(src),
+                "{} schema lost or altered a comment",
+                version
+            );
+
+            let again = format(&formatted)
+                .unwrap_or_else(|e| panic!("{} should re-format: {:?}", version, e));
+            assert_eq!(
+                comment_payloads(&again),
+                comment_payloads(src),
+                "{} schema lost a comment on the second pass",
+                version
+            );
+            assert_eq!(again, formatted, "{} schema formats unstably", version);
+        }
+    }
+
+    /// The comment payloads of a CDDL document, in source order. A semicolon
+    /// inside a text or byte-string literal does not start a comment.
+    fn comment_payloads(cddl: &str) -> Vec<String> {
+        let bytes = cddl.as_bytes();
+        let mut payloads = Vec::new();
+        let mut i = 0;
+        while i < bytes.len() {
+            match bytes[i] {
+                b';' => {
+                    let start = i;
+                    i += 1;
+                    while i < bytes.len() && bytes[i] != b'\n' {
+                        i += 1;
+                    }
+                    payloads.push(cddl[start + 1..i].trim_end().to_string());
+                }
+                quote @ (b'"' | b'\'') => {
+                    i += 1;
+                    while i < bytes.len() && bytes[i] != quote {
+                        if bytes[i] == b'\\' {
+                            i += 1;
+                        }
+                        i += 1;
+                    }
+                    i += 1;
+                }
+                _ => i += 1,
+            }
+        }
+
+        payloads
+    }
+
+    /// Every version of the ledger schema survives a format round-trip.
+    #[test]
+    fn every_schema_version_round_trips_through_format() {
+        for (version, src) in crate::cbor::test_fixtures::schema_suite() {
+            let formatted =
+                format(src).unwrap_or_else(|e| panic!("{} schema should format: {:?}", version, e));
+            let reparse = validate_cddl_text_via_super(&formatted);
+            assert_eq!(
+                reparse,
+                json!({ "valid": true }),
+                "formatted {} schema should re-validate cleanly, got {}",
+                version,
+                reparse
+            );
+        }
+    }
+
+    /// Format must keep float fractions so validation verdicts stay put.
+    #[test]
+    fn format_preserves_the_verdicts_of_a_schema_with_float_literals() {
+        // f93c00 = 1.0, f93e00 = 1.5, f94000 = 2.0, f94200 = 3.0.
+        for (schema, cbor_hex, expected) in [
+            ("start = 2.0", "f94000", true),
+            ("start = 2.0", "02", false),
+            ("start = 1.0..2.0", "f93e00", true),
+            ("start = 1.0..2.0", "01", false),
+            ("start = float .eq 3.0", "f94200", true),
+            ("start = { 1.0 => int }", "a1f93c0001", true),
+            ("start = { 1.0 => int }", "a10101", false),
+        ] {
+            let bytes = hex::decode(cbor_hex).expect("test vector is hex");
+            let before =
+                crate::cbor::validation::validate_cbor_bytes_against_cddl(&bytes, schema, "start");
+            assert_eq!(
+                before["valid"],
+                json!(expected),
+                "{} against {} answered unexpectedly: {}",
+                schema,
+                cbor_hex,
+                before
+            );
+
+            let formatted =
+                format(schema).unwrap_or_else(|e| panic!("{} should format: {:?}", schema, e));
+            let after = crate::cbor::validation::validate_cbor_bytes_against_cddl(
+                &bytes, &formatted, "start",
+            );
+            assert_eq!(
+                after["valid"], before["valid"],
+                "{} answers differently once formatted to {}",
+                schema, formatted
+            );
+        }
     }
 
     fn validate_cddl_text_via_super(cddl: &str) -> Value {
@@ -677,7 +795,11 @@ mod tests {
             .err()
             .expect("expected parse error");
         let msg = err.as_string().unwrap_or_default();
-        assert!(msg.to_lowercase().contains("cddl parse error"), "got: {}", msg);
+        assert!(
+            msg.to_lowercase().contains("cddl parse error"),
+            "got: {}",
+            msg
+        );
     }
 
     #[test]
@@ -694,7 +816,10 @@ mod tests {
         let err = outline("not a cddl @@@")
             .err()
             .expect("expected parse error");
-        assert!(err.as_string().unwrap_or_default().contains("CDDL parse error"));
+        assert!(err
+            .as_string()
+            .unwrap_or_default()
+            .contains("CDDL parse error"));
     }
 
     // ============================================================
@@ -763,7 +888,11 @@ mod tests {
         let span = &arr[0]["span"];
         let substr = span_substr(src, span);
         // Must include the angle brackets and the parameter binder.
-        assert!(substr.starts_with("set<a>"), "span substr was: {:?}", substr);
+        assert!(
+            substr.starts_with("set<a>"),
+            "span substr was: {:?}",
+            substr
+        );
         assert!(substr.contains("[* a]"), "span substr was: {:?}", substr);
         // name_span is just `set`, *not* `set<a>`.
         let name_span = &arr[0]["name_span"];
@@ -826,7 +955,7 @@ mod tests {
 
     #[test]
     fn outline_name_spans_match_source_substrings_for_every_rule() {
-        // Cardano-flavoured fragment.
+        // Ledger-flavoured fragment.
         let src = "transaction_body = { 0: inputs, 1: outputs }\n\
                    inputs = [* transaction_input]\n\
                    outputs = [* transaction_output]\n\
@@ -1212,7 +1341,7 @@ mod tests {
     }
 
     #[test]
-    fn format_reproduces_rule_names_for_cardano_fragment() {
+    fn format_reproduces_rule_names_for_a_ledger_fragment() {
         let src = "transaction = [body, witnesses]\n\
                    body = { 0: inputs, 1: outputs }\n\
                    inputs = [* input]\n\
@@ -1284,7 +1413,11 @@ mod tests {
         while let Some(pos) = src[i..].find(target) {
             let abs = i + pos;
             let after = src.as_bytes().get(abs + target.len()).copied();
-            let prev = if abs > 0 { src.as_bytes().get(abs - 1).copied() } else { None };
+            let prev = if abs > 0 {
+                src.as_bytes().get(abs - 1).copied()
+            } else {
+                None
+            };
             let starts_word = match prev {
                 None => true,
                 Some(b) => !is_ident_byte(b),
@@ -1341,7 +1474,8 @@ mod tests {
             let refs = references(src, name).unwrap();
             assert_eq!(
                 refs["definition"], rule["name_span"],
-                "definition span mismatch for {}", name,
+                "definition span mismatch for {}",
+                name,
             );
         }
     }
@@ -1364,6 +1498,528 @@ mod tests {
                 assert_eq!(v["role"], "definition");
                 assert_eq!(v["span"], *span);
                 assert_eq!(v["definition_span"], *span);
+            }
+        }
+    }
+
+    // ============================================================
+    // Mid-edit documents — a dangling reference must not silence the
+    // IDE primitives.
+    // ============================================================
+
+    /// A schema typed top-down has dangling references most of the time
+    /// it is being edited. Every primitive still has to answer.
+    const MID_EDIT: &str = "transaction = [body, witnesses]\n\
+                            body = { 0: inputs }\n\
+                            witnesses = { ? 0: [* bstr] }\n";
+
+    #[test]
+    fn outline_lists_rules_while_a_reference_is_still_dangling() {
+        let arr = outline(MID_EDIT).expect("dangling reference must not fail the outline");
+        let names: Vec<_> = arr
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r["name"].as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(names, vec!["transaction", "body", "witnesses"]);
+    }
+
+    #[test]
+    fn symbol_at_reports_unknown_kind_for_a_dangling_reference() {
+        let off = MID_EDIT.find("inputs").unwrap();
+        let v = symbol_at(MID_EDIT, off).expect("dangling reference must not fail symbol_at");
+        assert_eq!(v["name"], "inputs");
+        assert_eq!(v["role"], "use");
+        assert_eq!(v["kind"], "prelude_or_unknown");
+        assert_eq!(v["definition_span"], Value::Null);
+        assert_eq!(v["rule_span"], Value::Null);
+        assert_eq!(span_substr(MID_EDIT, &v["span"]), "inputs");
+    }
+
+    #[test]
+    fn references_returns_uses_with_null_definition_for_a_dangling_name() {
+        let v =
+            references(MID_EDIT, "inputs").expect("dangling reference must not fail references");
+        assert_eq!(v["definition"], Value::Null);
+        let uses = v["uses"].as_array().unwrap();
+        assert_eq!(uses.len(), 1, "got: {}", v);
+        assert_eq!(span_substr(MID_EDIT, &uses[0]), "inputs");
+    }
+
+    #[test]
+    fn format_round_trips_a_document_with_a_dangling_reference() {
+        let formatted = format(MID_EDIT).expect("dangling reference must not fail format");
+        assert!(formatted.contains("inputs"), "got: {:?}", formatted);
+        let arr = outline(&formatted).unwrap();
+        let names: Vec<_> = arr
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r["name"].as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(names, vec!["transaction", "body", "witnesses"]);
+    }
+
+    /// Acceptance widened for dangling references only. Text that does
+    /// not parse still fails, on every entry point.
+    #[test]
+    fn ide_primitives_still_reject_a_syntax_error() {
+        for src in [
+            "Person = {\n  name: tstr,\n  age: ",
+            "A = uint\nB = {\n  x: ",
+            "A = [",
+            "not a cddl @@@",
+        ] {
+            let errors = [
+                outline(src)
+                    .err()
+                    .map(|e| e.as_string().unwrap_or_default()),
+                references(src, "A")
+                    .err()
+                    .map(|e| e.as_string().unwrap_or_default()),
+                symbol_at(src, 0)
+                    .err()
+                    .map(|e| e.as_string().unwrap_or_default()),
+                format(src).err().map(|e| e.as_string().unwrap_or_default()),
+            ];
+            for (i, err) in errors.iter().enumerate() {
+                let msg = err
+                    .as_ref()
+                    .unwrap_or_else(|| panic!("entry point {} accepted {:?}", i, src));
+                assert!(
+                    msg.contains("CDDL parse error"),
+                    "entry point {} on {:?} gave {:?}",
+                    i,
+                    src,
+                    msg
+                );
+            }
+        }
+    }
+
+    /// Rules the largest ledger schema declares. Pinned so a rename or a
+    /// dropped rule in the fixture is noticed here, not in a downstream
+    /// count.
+    const LEDGER_RULE_COUNT: usize = 212;
+
+    /// Whole-word occurrences of `name` in `src`, definition included.
+    fn word_occurrences(src: &str, name: &str) -> usize {
+        let bytes = src.as_bytes();
+        let is_word = |b: u8| b.is_ascii_alphanumeric() || b == b'_';
+        src.match_indices(name)
+            .filter(|(at, _)| {
+                let before = at.checked_sub(1).map(|i| bytes[i]);
+                let after = bytes.get(at + name.len()).copied();
+                !before.is_some_and(is_word) && !after.is_some_and(is_word)
+            })
+            .count()
+    }
+
+    #[test]
+    fn outline_of_the_ledger_schema_lists_every_rule_in_source_order() {
+        let src = crate::cbor::test_fixtures::ledger_cddl();
+        let arr = outline(src).unwrap();
+        let names: Vec<&str> = arr
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(names.len(), LEDGER_RULE_COUNT);
+        // The roots come first, in the order the schema declares them.
+        assert_eq!(&names[..2], ["record", "record_body"]);
+        for root in [
+            "record_witness",
+            "datum",
+            "payload",
+            "amount",
+            "stock",
+            "widgets",
+        ] {
+            assert!(names.contains(&root), "{} missing from {:?}", root, names);
+        }
+        // A name repeats only for a `/=` alternate; a socket may open with
+        // one, so an alternate need not follow a plain definition.
+        let mut seen = std::collections::HashSet::new();
+        for rule in arr.as_array().unwrap() {
+            let name = rule["name"].as_str().unwrap();
+            let is_alternate = rule["is_alternate"].as_bool().unwrap();
+            let is_new = seen.insert(name);
+            assert!(is_new || is_alternate, "{} outlined twice", name);
+            // Each entry's name slices out of its own name span.
+            assert_eq!(span_substr(src, &rule["name_span"]), name);
+        }
+        assert!(seen.contains("$extension_kind"), "{:?}", names);
+    }
+
+    #[test]
+    fn every_schema_version_outlines_the_same_roots() {
+        let mut previous = 0;
+        for (version, src) in crate::cbor::test_fixtures::schema_suite() {
+            let arr = outline(src).unwrap_or_else(|e| panic!("{} outlines: {:?}", version, e));
+            let names: Vec<&str> = arr
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|r| r["name"].as_str().unwrap())
+                .collect();
+            for root in [
+                "record",
+                "record_body",
+                "record_witness",
+                "datum",
+                "payload",
+            ] {
+                assert!(names.contains(&root), "{}: {} missing", version, root);
+            }
+            // Versions only add rules.
+            assert!(
+                names.len() > previous,
+                "{} shrank to {} rules",
+                version,
+                names.len()
+            );
+            previous = names.len();
+        }
+        assert_eq!(previous, LEDGER_RULE_COUNT);
+    }
+
+    #[test]
+    fn references_in_the_ledger_schema_find_the_definition_and_every_use() {
+        let src = crate::cbor::test_fixtures::ledger_cddl();
+        let v = references(src, "amount").unwrap();
+        assert_eq!(span_substr(src, &v["definition"]), "amount");
+        let def_offset = span_offset(&v["definition"]);
+        assert_eq!(
+            &src[def_offset..src[def_offset..].find('\n').unwrap() + def_offset],
+            "amount = uint"
+        );
+
+        let uses = v["uses"].as_array().unwrap();
+        // `amount` is read in the body, in `value` and in a certificate;
+        // every whole-word occurrence but the definition is a use.
+        assert_eq!(uses.len(), word_occurrences(src, "amount") - 1);
+        assert!(uses.len() >= 5, "only {} uses: {}", uses.len(), v);
+        let mut offsets: Vec<usize> = uses.iter().map(span_offset).collect();
+        for (u, off) in uses.iter().zip(&offsets) {
+            assert_eq!(span_substr(src, u), "amount");
+            assert_ne!(*off, def_offset, "the definition is listed as a use");
+        }
+        offsets.sort_unstable();
+        offsets.dedup();
+        assert_eq!(offsets.len(), uses.len(), "a use is listed twice");
+    }
+
+    #[test]
+    fn ledger_schema_with_a_renamed_rule_still_outlines_every_rule() {
+        let src = crate::cbor::test_fixtures::ledger_cddl();
+        let renamed = src.replacen("\namount = ", "\namount_renamed = ", 1);
+        assert_ne!(renamed, src, "fixture no longer defines `amount`");
+
+        let arr = outline(&renamed).expect("renaming a rule must not fail the outline");
+        assert_eq!(arr.as_array().unwrap().len(), LEDGER_RULE_COUNT);
+
+        // Every `amount` use is now dangling; the cursor on one of them
+        // still reports the name, just with no definition to jump to.
+        let ast = cddl::pest_bridge::cddl_from_pest_str(&renamed).unwrap();
+        let dangling = unresolved_references(&ast);
+        assert!(!dangling.is_empty(), "expected dangling `amount` uses");
+        assert_eq!(dangling[0].0, "amount");
+        let v = symbol_at(&renamed, dangling[0].1 .0).unwrap();
+        assert_eq!(v["name"], "amount");
+        assert_eq!(v["kind"], "prelude_or_unknown");
+        assert_eq!(v["definition_span"], Value::Null);
+    }
+
+    // ============================================================
+    // Socket / plug names
+    // ============================================================
+
+    /// `Identifier::ident` drops the `$` sigil while the span keeps it,
+    /// so the emitted name has to be the identifier's full text or it no
+    /// longer slices out of the source range it is paired with.
+    #[test]
+    fn outline_name_for_a_socket_rule_slices_out_of_its_own_name_span() {
+        let src = "$sock /= uint\nthing = $sock\n";
+        let arr = outline(src).unwrap();
+        let entry = &arr.as_array().unwrap()[0];
+        assert_eq!(entry["name"], "$sock");
+        assert_eq!(span_substr(src, &entry["name_span"]), "$sock");
+    }
+
+    #[test]
+    fn references_finds_a_socket_rule_under_its_full_name() {
+        let src = "$sock /= uint\nthing = $sock\n";
+        let v = references(src, "$sock").unwrap();
+        assert_eq!(span_substr(src, &v["definition"]), "$sock");
+        let uses = v["uses"].as_array().unwrap();
+        assert_eq!(uses.len(), 1, "got: {}", v);
+        assert_eq!(span_substr(src, &uses[0]), "$sock");
+        // And the sigil-less spelling is a different name.
+        let bare = references(src, "sock").unwrap();
+        assert_eq!(bare["definition"], Value::Null);
+        assert_eq!(bare["uses"], json!([]));
+    }
+
+    #[test]
+    fn symbol_at_on_a_socket_use_resolves_to_the_socket_rule() {
+        let src = "$sock /= uint\nthing = $sock\n";
+        let off = src.rfind("$sock").unwrap() + 1;
+        let v = symbol_at(src, off).unwrap();
+        assert_eq!(v["name"], "$sock");
+        assert_eq!(v["kind"], "rule_reference");
+        assert_eq!(span_substr(src, &v["definition_span"]), "$sock");
+    }
+
+    // ============================================================
+    // Choice alternates
+    // ============================================================
+
+    #[test]
+    fn outline_marks_a_type_choice_alternate() {
+        let src = "a = uint\na /= tstr\n";
+        let arr = outline(src).unwrap();
+        let arr = arr.as_array().unwrap();
+        assert_eq!(arr.len(), 2);
+        assert_eq!(arr[0]["name"], "a");
+        assert_eq!(arr[0]["is_alternate"], json!(false));
+        assert_eq!(arr[1]["name"], "a");
+        assert_eq!(arr[1]["is_alternate"], json!(true));
+        // The two entries are distinguishable by span, not just by flag.
+        assert_ne!(arr[0]["span"], arr[1]["span"]);
+    }
+
+    #[test]
+    fn outline_marks_a_group_choice_alternate() {
+        let src = "g = (a: uint)\ng //= (b: tstr)\n";
+        let arr = outline(src).unwrap();
+        let arr = arr.as_array().unwrap();
+        assert_eq!(arr.len(), 2);
+        assert_eq!(arr[0]["kind"], "group");
+        assert_eq!(arr[0]["is_alternate"], json!(false));
+        assert_eq!(arr[1]["is_alternate"], json!(true));
+    }
+
+    #[test]
+    fn outline_flags_no_alternates_in_a_plain_schema() {
+        let src = "alpha = uint\nbeta = (a: int)\n";
+        let arr = outline(src).unwrap();
+        for entry in arr.as_array().unwrap() {
+            assert_eq!(entry["is_alternate"], json!(false), "got {}", entry);
+        }
+    }
+
+    // ============================================================
+    // Unresolved-reference collector
+    // ============================================================
+
+    fn collect_unresolved(src: &str) -> Vec<(String, usize)> {
+        let ast = cddl::pest_bridge::cddl_from_pest_str(src)
+            .unwrap_or_else(|e| panic!("{:?} should parse: {}", src, e));
+        unresolved_references(&ast)
+            .into_iter()
+            .map(|(name, span)| (name, span.0))
+            .collect()
+    }
+
+    /// What the reference-checking parser makes of a document.
+    #[derive(Debug, PartialEq)]
+    enum Checked {
+        Resolved,
+        Unresolved(String, usize),
+        SyntaxError,
+    }
+
+    fn checked_outcome(src: &str) -> Checked {
+        match cddl::pest_bridge::cddl_from_pest_str_checked(src) {
+            Ok(_) => Checked::Resolved,
+            Err(cddl::parser::Error::PARSER { position, msg }) => {
+                match msg.short.strip_prefix("missing definition for rule ") {
+                    Some(name) => Checked::Unresolved(name.to_string(), position.range.0),
+                    None => Checked::SyntaxError,
+                }
+            }
+            Err(_) => Checked::SyntaxError,
+        }
+    }
+
+    #[test]
+    fn unresolved_references_finds_every_occurrence_in_source_order() {
+        let src = "a = [alpha, beta]\nb = { k: gamma }\n";
+        assert_eq!(
+            collect_unresolved(src),
+            vec![
+                ("alpha".to_string(), 5),
+                ("beta".to_string(), 12),
+                ("gamma".to_string(), 27),
+            ]
+        );
+    }
+
+    #[test]
+    fn unresolved_references_covers_control_range_generic_unwrap_and_group_positions() {
+        let cases: &[(&str, &[(&str, usize)])] = &[
+            (
+                "a = bstr .size limit\nb = 0..maxv\n",
+                &[("limit", 15), ("maxv", 28)],
+            ),
+            ("set<a> = [* a]\nuse = set<nope>\n", &[("nope", 25)]),
+            (
+                "a = ~missing3\nb = &missing4\n",
+                &[("missing3", 5), ("missing4", 19)],
+            ),
+            (
+                "g = (x: missing1)\nh = [g, missing2]\n",
+                &[("missing1", 8), ("missing2", 26)],
+            ),
+            ("a = #6.24(missing5)\n", &[("missing5", 10)]),
+            ("a = [* missing6]\n", &[("missing6", 7)]),
+            (
+                "a = { k => { j => missing7 } }\nk = uint\nj = uint\n",
+                &[("missing7", 18)],
+            ),
+        ];
+        for (src, expected) in cases {
+            let expected: Vec<(String, usize)> =
+                expected.iter().map(|(n, o)| (n.to_string(), *o)).collect();
+            assert_eq!(collect_unresolved(src), expected, "for {:?}", src);
+        }
+    }
+
+    #[test]
+    fn unresolved_references_ignores_prelude_generics_sockets_and_barewords() {
+        // A generic argument that resolves, a generic parameter used in
+        // the body it is bound in, a socket/plug name, and a bareword
+        // member key — which is a literal text key, not a reference.
+        let mut prelude_doc = String::new();
+        for (i, name) in STANDARD_PRELUDE.iter().enumerate() {
+            prelude_doc.push_str(&format!("r{} = {}\n", i, name));
+        }
+        for src in [
+            "set<a> = [* a]\nuse = set<uint>\n",
+            "$sock /= uint\nthing = $sock\n",
+            "m = { nope: uint }\n",
+            &prelude_doc,
+        ] {
+            assert_eq!(
+                collect_unresolved(src),
+                Vec::<(String, usize)>::new(),
+                "for {:?}",
+                src
+            );
+            assert_eq!(checked_outcome(src), Checked::Resolved, "for {:?}", src);
+        }
+    }
+
+    /// The negative half of the prelude case: a name that merely looks
+    /// prelude-ish is still unresolved.
+    #[test]
+    fn unresolved_references_does_not_treat_a_near_prelude_name_as_known() {
+        assert_eq!(
+            collect_unresolved("a = uintish\n"),
+            vec![("uintish".to_string(), 4)]
+        );
+    }
+
+    /// A generic parameter is bound only in the rule that declares it.
+    #[test]
+    fn unresolved_references_scopes_generic_parameters_to_their_own_rule() {
+        let src = "gen<x> = [x]\nq = gen<uint>\nr = x\n";
+        assert_eq!(collect_unresolved(src), vec![("x".to_string(), 31)]);
+    }
+
+    #[test]
+    fn unresolved_reference_spans_carry_the_right_line_and_slice_cleanly() {
+        let src =
+            "a = uint\nb = tstr\nc = [missingX, uint]\nd = { k: missingY }\ne = uint\nk = uint\n";
+        let ast = cddl::pest_bridge::cddl_from_pest_str(src).unwrap();
+        let found = unresolved_references(&ast);
+        assert_eq!(found.len(), 2, "got {:?}", found);
+        assert_eq!(found[0], ("missingX".to_string(), (23, 31, 3)));
+        assert_eq!(found[1], ("missingY".to_string(), (48, 56, 4)));
+        for (name, span) in &found {
+            assert_eq!(&src[span.0..span.1], name);
+        }
+
+        // Byte offsets stay byte offsets when the source is not ASCII.
+        let src = "; кириллица\nx = [missingZ]\n";
+        let ast = cddl::pest_bridge::cddl_from_pest_str(src).unwrap();
+        let found = unresolved_references(&ast);
+        assert_eq!(found, vec![("missingZ".to_string(), (26, 34, 2))]);
+        assert_eq!(&src[26..34], "missingZ");
+    }
+
+    /// A tag constraint keeps only its source text in the AST — no
+    /// identifier, no span — so a reference written there is invisible
+    /// to this walker. That is why the reference-checking parser, not
+    /// this walker, decides whether a schema resolves.
+    #[test]
+    fn unresolved_references_cannot_see_inside_a_tag_constraint() {
+        let src = "a = #6.<missing>(uint)\n";
+        assert_eq!(collect_unresolved(src), Vec::<(String, usize)>::new());
+        assert_eq!(
+            checked_outcome(src),
+            Checked::Unresolved("missing".to_string(), 8)
+        );
+    }
+
+    /// The collector must never report resolved where the parser reports
+    /// unresolved, and must agree with it on the first offender.
+    #[test]
+    fn unresolved_reference_collector_agrees_with_the_checked_parser() {
+        let mut documents: Vec<String> = Vec::new();
+        for (version, src) in crate::cbor::test_fixtures::schema_suite() {
+            documents.push(src.to_string());
+            let renamed = src.replacen("\namount = ", "\namount_renamed = ", 1);
+            assert_ne!(renamed, src, "{} no longer defines `amount`", version);
+            documents.push(renamed);
+        }
+        for src in [
+            MID_EDIT,
+            "a = [alpha, beta]\nb = { k: gamma }\n",
+            "a = bstr .size limit\nb = 0..maxv\n",
+            "set<a> = [* a]\nuse = set<nope>\n",
+            "set<a> = [* a]\nuse = set<uint>\n",
+            "a = ~missing3\nb = &missing4\n",
+            "g = (x: missing1)\nh = [g, missing2]\n",
+            "a = #6.24(missing5)\n",
+            "a = [* missing6]\n",
+            "a = { k => { j => missing7 } }\nk = uint\nj = uint\n",
+            "m = { nope: uint }\n",
+            "$sock /= uint\nthing = $sock\n",
+            "gen<x> = [x]\nq = gen<uint>\nr = x\n",
+            "a = uint\na /= tstr\n",
+            "; кириллица\nx = [missingZ]\n",
+            "a = uint\nb = tstr\nc = [missingX, uint]\nd = { k: missingY }\ne = uint\nk = uint\n",
+            "a = missing .size 4\n",
+            "m = { * missingK => uint }\n",
+            "a = &(x: missingG)\n",
+            "tree = [tree] / int\n",
+        ] {
+            documents.push(src.to_string());
+        }
+
+        for src in &documents {
+            let head = collect_unresolved(src).into_iter().next();
+            let excerpt: String = src.chars().take(60).collect();
+            match checked_outcome(src) {
+                Checked::Resolved => assert_eq!(
+                    head, None,
+                    "walker reported {:?} where the parser resolved everything, in {:?}",
+                    head, excerpt
+                ),
+                Checked::Unresolved(name, offset) => assert_eq!(
+                    head,
+                    Some((name.clone(), offset)),
+                    "walker disagreed with the parser (expected {:?} at {}) in {:?}",
+                    name,
+                    offset,
+                    excerpt
+                ),
+                Checked::SyntaxError => {
+                    panic!("parity document {:?} does not parse", excerpt)
+                }
             }
         }
     }

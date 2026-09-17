@@ -504,11 +504,15 @@ function deduplicateTypes(content) {
     // Replace references to duplicate types with canonical types
     canonicalMapping.forEach((canonicalName, duplicateName) => {
         // Replace type references in field types, union types, etc.
+        // Every pattern must capture the text on each side of the name in
+        // exactly two groups, because the single replacement below places the
+        // canonical name between `$1` and `$2`. A pattern with one group emits
+        // a literal `$2` and moves the surrounding text to the front.
         const patterns = [
             // Field type references: field: DuplicateType;
             new RegExp(`(:\\s*)${duplicateName}(\\s*[;|}])`, 'g'),
             // Array type references: DuplicateType[]
-            new RegExp(`\\b${duplicateName}(\\[\\])`, 'g'),
+            new RegExp(`\\b()${duplicateName}(\\[\\])`, 'g'),
             // Union type references: | DuplicateType |
             new RegExp(`(\\|\\s*)${duplicateName}(\\s*[|}])`, 'g'),
             // Generic type references: SomeType<DuplicateType>

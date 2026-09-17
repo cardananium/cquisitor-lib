@@ -288,6 +288,8 @@ const types = get_decodable_types();
 
 Decodes specific Cardano type from hex/bech32/base58.
 
+Hex input nested more than 256 levels below its root is refused with a thrown message naming the limit rather than decoded: the typed decoders recurse on the host's stack, so the document is scanned for its depth first. An implementation limit, never a verdict on the bytes, and far above any ledger document.
+
 ```typescript
 const address = decode_specific_type(
     "addr1...", 
@@ -304,7 +306,7 @@ const tx = decode_specific_type(
 
 #### `get_possible_types_for_input(input: string): string[]`
 
-Suggests which types can decode the given input.
+Suggests which types can decode the given input. Hex input nested more than 256 levels below its root is refused before any decoder sees it, and suggests no type at all.
 
 ```typescript
 const possibleTypes = get_possible_types_for_input("e1a...");
@@ -313,14 +315,16 @@ const possibleTypes = get_possible_types_for_input("e1a...");
 
 ### CBOR Decoder
 
-#### `cbor_to_json(cbor_hex: string): CborDecodeResult`
+The four exports that walk a CBOR document — `cbor_to_json`, `validate_cbor_against_cddl`, `decode_cbor_against_cddl` and `map_cbor_to_cddl` — answer with the **JSON text** of their result rather than the object: `JSON.parse` the string to get the shape documented below. A decoded tree nests as deep as the document does, and text is the one form of it that crosses every boundary on its way to a caller — the wasm boundary, a `postMessage` to another thread, a `structuredClone` — at a cost of bytes and never of depth, where the object form fails a structured clone at a few hundred levels. An integer a JavaScript number does not hold exactly is written as `{"$serde_json::private::Number": "<digits>"}`; convert the boxes after parsing, with an explicit stack if the document may be deep. Every other export returns the object it documents.
+
+#### `cbor_to_json(cbor_hex: string): JsonText<CborDecodeResult>`
 
 Converts CBOR to JSON with positional metadata. Each node has `position_info` (byte span of its header) and, for containers/tags, `struct_position_info` (span of the whole subtree). Non-canonical encoding deviations (per RFC 8949 §4.1/§4.2) are flagged locally on the offending node via an optional `oddities: CborOddity[]` field — canonical inputs omit the field entirely.
 
 The function **never throws** on malformed input. On success it returns `{ ok: true, value }`; on failure `{ ok: false, error, partial? }` where `error` is a structured `CborDecodeError` and `partial` is the sub-tree decoded up to the failure point:
 
 ```typescript
-const r = cbor_to_json("a26461646472...");
+const r: CborDecodeResult = JSON.parse(cbor_to_json("a26461646472..."));
 if (r.ok) {
     // r.value — the full positional tree; each node may carry oddities like:
     //   { kind: "IntNotShortest",    detail: "value 15 uses 2-byte header, shortest is 1" }
@@ -363,12 +367,12 @@ Parser errors include a `byte_span: {offset, length, line}` so editors can squig
 
 `error.kind` values: `"parse_error"`, `"unresolved_references"`, `"no_rules"`.
 
-#### `validate_cbor_against_cddl(cbor_hex: string, cddl: string, rule_name: string): { valid: boolean, error?: object }`
+#### `validate_cbor_against_cddl(cbor_hex: string, cddl: string, rule_name: string): JsonText<CborValidationResult>`
 
 Validates a CBOR payload against a specific rule in a CDDL schema. The rule does not have to be the first rule in the document — when it isn't, the validator wraps it in a synthetic root internally.
 
 ```typescript
-validate_cbor_against_cddl("01", "thing = tstr", "thing");
+JSON.parse(validate_cbor_against_cddl("01", "thing = tstr", "thing"));
 // {
 //   valid: false,
 //   error: {
@@ -388,12 +392,12 @@ validate_cbor_against_cddl("01", "thing = tstr", "thing");
 
 `anchor_spans` is always populated — for container values (Map / Array / Tag / indefinite strings) it covers the whole structure; for scalars it falls back to `position_info` so a UI's halo highlight always has something to draw.
 
-#### `decode_cbor_against_cddl(cbor_hex: string, cddl: string, rule_name: string): unknown`
+#### `decode_cbor_against_cddl(cbor_hex: string, cddl: string, rule_name: string): JsonText<CborDecodeAgainstCddlResult>`
 
 Walks the CDDL alongside the decoded CBOR and produces a JSON tree where positional/numeric-keyed structures are replaced with the names the schema declares. Useful for turning a Cardano transaction CBOR into something inspectable without hand-mapping every field.
 
 ```typescript
-decode_cbor_against_cddl(txHex, conwayCddl, "transaction");
+JSON.parse(decode_cbor_against_cddl(txHex, conwayCddl, "transaction")).value;
 // {
 //   transaction_body: {
 //     0: { "@tag": 258, "@value": [{ transaction_id: "16b6...", index: 0 }] },

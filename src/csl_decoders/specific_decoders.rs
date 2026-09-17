@@ -22,7 +22,7 @@ pub fn decode_transaction(input: &str, is_hex: bool, _is_bech32: bool, _is_base5
     let parsed_tx: Value = csl::Transaction::from_hex(input)
         .map_err(|e| format!("Failed to decode Transaction: {:?}", e))
         .and_then(|tx| tx.to_json().map_err(|e| format!("Failed to convert to JSON: {:?}", e)))
-        .and_then(|json| serde_json::from_str(&json).map_err(|e| format!("Failed to convert to JSON: {:?}", e)))?;
+        .and_then(|json| crate::csl_decoders::parse_rendered_json(&json))?;
     let value = Ok::<Value, String>(serde_json::json!({
         "transaction_hash": fixed_tx.transaction_hash().to_hex(),
         "transaction": parsed_tx,
@@ -290,7 +290,7 @@ pub fn decode_plutus_data(
             .to_json(map_schema(schema))
             .map_err(|e| format!("Failed to convert to JSON: {:?}", e))
             .and_then(|json| {
-                serde_json::from_str(&json).map_err(|e| format!("Failed to parse JSON: {}", e))
+                crate::csl_decoders::parse_rendered_json(&json)
             })?;
         let value = Ok::<Value, String>(serde_json::json!({
             "data_hash": data_hash.to_hex(),

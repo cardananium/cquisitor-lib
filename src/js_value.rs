@@ -7,6 +7,8 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::Value as JsonValue;
 
+use crate::deep_json::DeepJson;
+
 #[cfg(all(target_arch = "wasm32", not(target_os = "emscripten")))]
 pub use wasm_bindgen::prelude::JsValue;
 
@@ -32,14 +34,27 @@ pub fn from_serde_json_value(value: &JsonValue) -> Result<JsValue, String> {
     {
         let mut serializer = serde_wasm_bindgen::Serializer::json_compatible();
         serializer = serializer.serialize_large_number_types_as_bigints(true);
-        value.serialize(&serializer)
+        value
+            .serialize(&serializer)
             .map_err(|err| format!("Failed to convert JSON to JsValue: {:?}", err))
     }
 
     #[cfg(not(all(target_arch = "wasm32", not(target_os = "emscripten"))))]
     {
-        Ok(JsValue::new(&value.to_string()))
+        Ok(JsValue::new(&crate::deep_json::write_json(value)))
     }
+}
+
+/// Render a [`DeepJson`] as JSON text for the wasm / postMessage boundary.
+///
+/// Prefer this over [`from_serde_json_value`]: the iterative writer avoids
+/// host-stack recursion, and dropping `tree` before return peaks at the
+/// tree or its text — not both. Numbers that fit in a JS number are plain
+/// digits; the rest use the `$serde_json::private::Number` box.
+pub fn json_text(tree: DeepJson) -> String {
+    let text = crate::deep_json::write_json(&tree);
+    drop(tree);
+    text
 }
 
 /// Serialize a value directly to a `JsValue`. Prefer this over
@@ -66,9 +81,8 @@ pub fn from_js_value<T>(js_value: &JsValue) -> Result<T, String>
 where
     T: DeserializeOwned,
 {
-    serde_wasm_bindgen::from_value(js_value.clone()).map_err(|err| {
-        format!("Failed to deserialize JsValue to type: {:?}", err).to_string()
-    })
+    serde_wasm_bindgen::from_value(js_value.clone())
+        .map_err(|err| format!("Failed to deserialize JsValue to type: {:?}", err).to_string())
 }
 
 #[cfg(not(all(target_arch = "wasm32", not(target_os = "emscripten"))))]
@@ -77,9 +91,8 @@ where
     T: DeserializeOwned,
 {
     let json_str = js_value.as_string().unwrap_or_default();
-    serde_json::from_str(&json_str).map_err(|err| {
-        format!("Failed to deserialize JsValue to type: {:?}", err).to_string()
-    })
+    serde_json::from_str(&json_str)
+        .map_err(|err| format!("Failed to deserialize JsValue to type: {:?}", err).to_string())
 }
 
 #[allow(unused)]

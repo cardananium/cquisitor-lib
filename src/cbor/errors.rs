@@ -1,16 +1,14 @@
 //! Structured decode errors for the CBOR decoder.
 //!
-//! Every error produced by [`super::decoder`] carries a machine-readable
-//! `kind`, a byte offset (where available), an optional `byte_span`, a
-//! structural `path` (JSON-pointer-ish), and a human message.
-//!
-//! The decoder threads a mutable path stack through recursive calls and
-//! each error site builds a `CborDecodeError` from whatever segments are on
-//! that stack — so the returned `path` points at the *deepest* location
-//! where the decode failed, e.g. `$.entries[2].value[0].chunks[1]`.
+//! Every error from [`super::decoder`] carries `kind`, optional `offset` /
+//! `byte_span`, a structural `path`, and a human `message`. The path is
+//! built from the open-container stack at the failure site (deepest
+//! location), e.g. `$.entries[2].value[0].chunks[1]`.
 
 use serde_json::{Map, Value};
 use std::fmt::{self, Write as _};
+
+use crate::deep_json::DeepJson;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ErrorKind {
@@ -35,6 +33,8 @@ pub enum ErrorKind {
     IntNotRepresentable,
     /// A non-finite float (NaN / ±Inf) — serde_json can't encode these.
     NonFiniteFloat,
+    /// Nesting deeper than the decoder follows (implementation limit).
+    NestingTooDeep,
     /// Other underlying IO error from the CBOR parser.
     Io,
 }
@@ -51,6 +51,7 @@ impl ErrorKind {
             ErrorKind::InvalidChunk => "invalid_chunk",
             ErrorKind::IntNotRepresentable => "int_not_representable",
             ErrorKind::NonFiniteFloat => "non_finite_float",
+            ErrorKind::NestingTooDeep => "nesting_too_deep",
             ErrorKind::Io => "io_error",
         }
     }
@@ -92,7 +93,7 @@ pub fn render_path(segs: &[PathSeg]) -> String {
     s
 }
 
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct CborDecodeError {
     pub kind: ErrorKind,
     pub offset: Option<usize>,
@@ -101,10 +102,10 @@ pub struct CborDecodeError {
     pub byte_span: Option<(usize, usize)>,
     pub path: String,
     pub message: String,
-    /// Partial tree decoded up to the failure point, if any. Carried
-    /// separately from the serialised error object so the top-level caller
-    /// can expose it alongside (not inside) the `error` field.
-    pub partial: Option<Value>,
+    /// Partial tree at the failure point, if any — alongside (not inside)
+    /// the serialised `error` field. Held as [`DeepJson`] so deep prefixes
+    /// do not cost stack frames when dropped unread.
+    pub partial: Option<DeepJson>,
 }
 
 impl CborDecodeError {
@@ -128,7 +129,7 @@ impl CborDecodeError {
     }
 
     pub fn with_partial(mut self, partial: Value) -> Self {
-        self.partial = Some(partial);
+        self.partial = Some(DeepJson::new(partial));
         self
     }
 
@@ -152,7 +153,13 @@ impl CborDecodeError {
 
 impl fmt::Display for CborDecodeError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{} ({}): {}", self.kind.as_str(), self.path, self.message)
+        write!(
+            f,
+            "{} ({}): {}",
+            self.kind.as_str(),
+            self.path,
+            self.message
+        )
     }
 }
 
@@ -219,11 +226,7 @@ pub fn invalid_utf8(path: &[PathSeg], offset: usize, length: usize) -> CborDecod
     )
 }
 
-pub fn invalid_chunk(
-    path: &[PathSeg],
-    offset: usize,
-    container: &'static str,
-) -> CborDecodeError {
+pub fn invalid_chunk(path: &[PathSeg], offset: usize, container: &'static str) -> CborDecodeError {
     CborDecodeError::new(
         ErrorKind::InvalidChunk,
         path,
@@ -243,6 +246,16 @@ pub fn int_not_representable(path: &[PathSeg], offset: usize, value: i128) -> Cb
             "cannot represent CBOR negative integer {} as JSON number",
             value
         ),
+    )
+}
+
+pub fn nesting_too_deep(path: &[PathSeg], offset: usize, limit: usize) -> CborDecodeError {
+    CborDecodeError::new(
+        ErrorKind::NestingTooDeep,
+        path,
+        Some(offset),
+        Some((offset, 1)),
+        crate::cbor::limits::nesting_depth_message(limit),
     )
 }
 

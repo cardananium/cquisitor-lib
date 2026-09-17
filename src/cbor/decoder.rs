@@ -1,12 +1,15 @@
 use std::convert::TryFrom;
 use std::io::Cursor;
+use std::mem;
 
 use ciborium_io::Read as _;
 use ciborium_ll::{simple, Decoder, Error as CborError, Header};
 use serde_json::{Map, Number, Value};
 
 use crate::cbor::errors::{self as err, CborDecodeError, PathSeg, Side};
+use crate::cbor::limits::MAX_CBOR_DECODE_NESTING_DEPTH;
 use crate::cbor::tags::tag_name;
+use crate::deep_json::DeepJson;
 
 type CborDecoder<'a> = Decoder<Cursor<&'a [u8]>>;
 type DecodeResult<T> = Result<T, CborDecodeError>;
@@ -212,20 +215,20 @@ fn float_not_shortest(v: f64, header_len: usize) -> Option<Oddity> {
     ))
 }
 
-/// Decode a CBOR byte slice into the positional JSON tree that
-/// `cbor_to_json` exposes to JS consumers.
-pub fn decode_cbor_to_value(bytes: &[u8]) -> DecodeResult<Value> {
+/// Decode CBOR bytes into the positional JSON tree for `cbor_to_json`.
+///
+/// Success and error `partial` trees are [`DeepJson`] (up to
+/// [`MAX_CBOR_DECODE_NESTING_DEPTH`]) so drop costs no stack per level.
+pub fn decode_cbor_to_value(bytes: &[u8]) -> DecodeResult<DeepJson> {
     let mut decoder = Decoder::from(Cursor::new(bytes));
     let mut path: Path = Vec::new();
     let value = decode_item(&mut decoder, bytes, &mut path)?;
     let trailing = decoder.offset();
     if trailing != bytes.len() {
-        // The root decoded cleanly — expose it as `partial` so the caller
-        // sees the valid prefix even though trailing bytes invalidated the
-        // overall input.
+        // Valid root becomes `partial` when trailing bytes remain.
         return Err(err::trailing_data(trailing, bytes.len() - trailing).with_partial(value));
     }
-    Ok(value)
+    Ok(DeepJson::new(value))
 }
 
 /// Mark a container value as only partially decoded. Consumers (JS side)
@@ -236,19 +239,25 @@ fn mark_incomplete(mut obj: Map<String, Value>) -> Value {
     Value::Object(obj)
 }
 
-fn partial_array(
+/// The positional object of an array or map: the span of its header,
+/// the span of the whole item, its declared count and its items.
+fn container_object(
+    type_name: &str,
     start: usize,
     header_end: usize,
-    values_end: usize,
-    values: Vec<Value>,
+    end: usize,
     len: Option<usize>,
-) -> Value {
+    values: Vec<Value>,
+) -> Map<String, Value> {
     let mut obj = Map::new();
-    obj.insert("type".into(), Value::String("Array".into()));
-    obj.insert("position_info".into(), Pos::new(start, header_end).to_value());
+    obj.insert("type".into(), Value::String(type_name.into()));
+    obj.insert(
+        "position_info".into(),
+        Pos::new(start, header_end).to_value(),
+    );
     obj.insert(
         "struct_position_info".into(),
-        Pos::new(start, values_end).to_value(),
+        Pos::new(start, end).to_value(),
     );
     obj.insert(
         "items".into(),
@@ -258,7 +267,19 @@ fn partial_array(
         },
     );
     obj.insert("values".into(), Value::Array(values));
-    mark_incomplete(obj)
+    obj
+}
+
+fn partial_array(
+    start: usize,
+    header_end: usize,
+    values_end: usize,
+    values: Vec<Value>,
+    len: Option<usize>,
+) -> Value {
+    mark_incomplete(container_object(
+        "Array", start, header_end, values_end, len, values,
+    ))
 }
 
 fn partial_map(
@@ -268,22 +289,9 @@ fn partial_map(
     entries: Vec<Value>,
     len: Option<usize>,
 ) -> Value {
-    let mut obj = Map::new();
-    obj.insert("type".into(), Value::String("Map".into()));
-    obj.insert("position_info".into(), Pos::new(start, header_end).to_value());
-    obj.insert(
-        "struct_position_info".into(),
-        Pos::new(start, values_end).to_value(),
-    );
-    obj.insert(
-        "items".into(),
-        match len {
-            Some(n) => Value::Number(n.into()),
-            None => Value::String("Indefinite".into()),
-        },
-    );
-    obj.insert("values".into(), Value::Array(entries));
-    mark_incomplete(obj)
+    mark_incomplete(container_object(
+        "Map", start, header_end, values_end, len, entries,
+    ))
 }
 
 fn partial_chunks(
@@ -295,13 +303,32 @@ fn partial_chunks(
 ) -> Value {
     let mut obj = Map::new();
     obj.insert("type".into(), Value::String(kind.type_name().into()));
-    obj.insert("position_info".into(), Pos::new(start, header_end).to_value());
+    obj.insert(
+        "position_info".into(),
+        Pos::new(start, header_end).to_value(),
+    );
     obj.insert(
         "struct_position_info".into(),
         Pos::new(start, chunks_end).to_value(),
     );
     obj.insert("chunks".into(), Value::Array(chunks));
     mark_incomplete(obj)
+}
+
+/// The positional object of a tag, without the item it wraps.
+fn tag_object(start: usize, header_end: usize, end: usize, tag: u64) -> Map<String, Value> {
+    let mut obj = Map::new();
+    obj.insert("type".into(), Value::String("Tag".into()));
+    obj.insert(
+        "position_info".into(),
+        Pos::new(start, header_end).to_value(),
+    );
+    obj.insert(
+        "struct_position_info".into(),
+        Pos::new(start, end).to_value(),
+    );
+    obj.insert("tag".into(), Value::String(tag_name(tag)));
+    obj
 }
 
 fn partial_tag(
@@ -311,25 +338,14 @@ fn partial_tag(
     tag: u64,
     inner: Option<Value>,
 ) -> Value {
-    let mut obj = Map::new();
-    obj.insert("type".into(), Value::String("Tag".into()));
-    obj.insert("position_info".into(), Pos::new(start, header_end).to_value());
-    obj.insert(
-        "struct_position_info".into(),
-        Pos::new(start, inner_end).to_value(),
-    );
-    obj.insert("tag".into(), Value::String(tag_name(tag)));
+    let mut obj = tag_object(start, header_end, inner_end, tag);
     if let Some(inner) = inner {
         obj.insert("value".into(), inner);
     }
     mark_incomplete(obj)
 }
 
-fn partial_map_entry(
-    key: Option<Value>,
-    value: Option<Value>,
-    failing_side: Side,
-) -> Value {
+fn partial_map_entry(key: Option<Value>, value: Option<Value>, failing_side: Side) -> Value {
     let mut entry = Map::new();
     if let Some(k) = key {
         entry.insert("key".into(), k);
@@ -348,16 +364,134 @@ fn partial_map_entry(
     Value::Object(entry)
 }
 
+fn map_entry(key: Value, value: Value) -> Value {
+    let mut entry = Map::new();
+    entry.insert("key".into(), key);
+    entry.insert("value".into(), value);
+    Value::Object(entry)
+}
+
+/// Open container while its items are decoded (heap stack frame).
+///
+/// Depth is bounded by [`MAX_CBOR_DECODE_NESTING_DEPTH`]. `path` length
+/// matches open-container count (one segment per level).
+enum Open {
+    Array {
+        start: usize,
+        header_end: usize,
+        len: Option<usize>,
+        values: Vec<Value>,
+    },
+    Map {
+        start: usize,
+        header_end: usize,
+        len: Option<usize>,
+        entries: Vec<Value>,
+        /// `(start, end)` of every key decoded so far, for the ordering
+        /// and duplicate checks run when the map closes.
+        key_spans: Vec<(usize, usize)>,
+        /// Where the key of the entry being decoded starts.
+        key_start: usize,
+        /// The key of the entry being decoded and the offset it ends
+        /// at, from when it completes until its value does.
+        key: Option<(Value, usize)>,
+    },
+    Tag {
+        start: usize,
+        header_end: usize,
+        tag: u64,
+    },
+}
+
+/// What one header decoded to.
+enum Decoded {
+    /// A complete item.
+    Item(Value),
+    /// A container whose items follow. Its frame is on the stack and
+    /// `path` names its first item.
+    Opened,
+}
+
 fn decode_item(
     decoder: &mut CborDecoder<'_>,
     bytes: &[u8],
     path: &mut Path,
 ) -> DecodeResult<Value> {
-    let start = decoder.offset();
-    let header = pull_header(decoder, path)?;
-    let header_end = decoder.offset();
+    let mut open: Vec<Open> = Vec::new();
+    loop {
+        // The item at the level `path` names.
+        let start = decoder.offset();
+        // Policy depth limit; unwind keeps the partial tree.
+        if path.len() > MAX_CBOR_DECODE_NESTING_DEPTH {
+            let error = err::nesting_too_deep(path, start, MAX_CBOR_DECODE_NESTING_DEPTH);
+            return Err(unwind(error, open, path, decoder.offset()));
+        }
+        let decoded = pull_header(decoder, path)
+            .and_then(|header| decode_header(header, decoder, bytes, start, path, &mut open));
+        let mut done = match decoded {
+            Ok(Decoded::Item(value)) => value,
+            Ok(Decoded::Opened) => continue,
+            Err(error) => return Err(unwind(error, open, path, decoder.offset())),
+        };
 
-    match header {
+        // Attach to parent; close completed containers outward.
+        loop {
+            let Some(top) = open.last_mut() else {
+                return Ok(done);
+            };
+            path.pop();
+            match top {
+                Open::Array { values, .. } => values.push(done),
+                Open::Map {
+                    entries,
+                    key_spans,
+                    key_start,
+                    key,
+                    ..
+                } => match key.take() {
+                    None => {
+                        *key = Some((done, decoder.offset()));
+                        path.push(PathSeg::MapEntry(entries.len(), Side::Value));
+                        break;
+                    }
+                    Some((key, key_end)) => {
+                        entries.push(map_entry(key, done));
+                        key_spans.push((*key_start, key_end));
+                    }
+                },
+                Open::Tag {
+                    start,
+                    header_end,
+                    tag,
+                } => {
+                    let (start, header_end, tag) = (*start, *header_end, *tag);
+                    open.pop();
+                    done = tag_value(start, header_end, decoder.offset(), tag, done);
+                    continue;
+                }
+            }
+            match advance(top, decoder, bytes, path) {
+                Ok(None) => break,
+                Ok(Some(value)) => {
+                    open.pop();
+                    done = value;
+                }
+                Err(error) => return Err(unwind(error, open, path, decoder.offset())),
+            }
+        }
+    }
+}
+
+fn decode_header(
+    header: Header,
+    decoder: &mut CborDecoder<'_>,
+    bytes: &[u8],
+    start: usize,
+    path: &mut Path,
+    open: &mut Vec<Open>,
+) -> DecodeResult<Decoded> {
+    let header_end = decoder.offset();
+    let item = match header {
         Header::Positive(v) => {
             let pos = Pos::new(start, header_end);
             let token = simple_token(
@@ -365,13 +499,17 @@ fn decode_item(
                 Value::Number(v.into()),
                 pos,
             );
-            let odd = int_not_shortest(v, header_end - start, false).into_iter().collect();
-            Ok(attach_oddities(token, odd))
+            let odd = int_not_shortest(v, header_end - start, false)
+                .into_iter()
+                .collect();
+            attach_oddities(token, odd)
         }
         Header::Negative(v) => {
             let token = negative_value(v, start, header_end, path)?;
-            let odd = int_not_shortest(v, header_end - start, true).into_iter().collect();
-            Ok(attach_oddities(token, odd))
+            let odd = int_not_shortest(v, header_end - start, true)
+                .into_iter()
+                .collect();
+            attach_oddities(token, odd)
         }
         Header::Float(f) => {
             let pos = Pos::new(start, header_end);
@@ -380,216 +518,274 @@ fn decode_item(
                 number_from_f64(f, start, path)?,
                 pos,
             );
-            let odd = float_not_shortest(f, header_end - start).into_iter().collect();
-            Ok(attach_oddities(token, odd))
+            let odd = float_not_shortest(f, header_end - start)
+                .into_iter()
+                .collect();
+            attach_oddities(token, odd)
         }
-        Header::Simple(simple::FALSE) => Ok(simple_token(
-            "Bool",
-            Value::Bool(false),
-            Pos::new(start, header_end),
-        )),
-        Header::Simple(simple::TRUE) => Ok(simple_token(
-            "Bool",
-            Value::Bool(true),
-            Pos::new(start, header_end),
-        )),
-        Header::Simple(simple::NULL) => Ok(simple_token(
-            "Null",
-            Value::Null,
-            Pos::new(start, header_end),
-        )),
-        Header::Simple(simple::UNDEFINED) => Ok(simple_token(
-            "Undefined",
-            Value::Null,
-            Pos::new(start, header_end),
-        )),
-        Header::Simple(v) => Ok(simple_token(
+        Header::Simple(simple::FALSE) => {
+            simple_token("Bool", Value::Bool(false), Pos::new(start, header_end))
+        }
+        Header::Simple(simple::TRUE) => {
+            simple_token("Bool", Value::Bool(true), Pos::new(start, header_end))
+        }
+        Header::Simple(simple::NULL) => {
+            simple_token("Null", Value::Null, Pos::new(start, header_end))
+        }
+        Header::Simple(simple::UNDEFINED) => {
+            simple_token("Undefined", Value::Null, Pos::new(start, header_end))
+        }
+        Header::Simple(v) => simple_token(
             "Simple",
             Value::Number(v.into()),
             Pos::new(start, header_end),
-        )),
-        Header::Break => Err(err::unexpected_break(path, start)),
+        ),
+        Header::Break => return Err(err::unexpected_break(path, start)),
         Header::Bytes(Some(len)) => {
             let body = read_exact(decoder, len, path)?;
             let end = decoder.offset();
-            Ok(simple_token(
+            simple_token(
                 "Bytes",
                 Value::String(hex::encode(&body)),
                 Pos::new(start, end),
-            ))
+            )
         }
-        Header::Bytes(None) => decode_indefinite_chunks(decoder, start, ChunkKind::Bytes, path),
+        Header::Bytes(None) => decode_indefinite_chunks(decoder, start, ChunkKind::Bytes, path)?,
         Header::Text(Some(len)) => {
             let body = read_exact(decoder, len, path)?;
             let end = decoder.offset();
-            let text = String::from_utf8(body)
-                .map_err(|_| err::invalid_utf8(path, start, end - start))?;
-            Ok(simple_token("String", Value::String(text), Pos::new(start, end)))
+            let text =
+                String::from_utf8(body).map_err(|_| err::invalid_utf8(path, start, end - start))?;
+            simple_token("String", Value::String(text), Pos::new(start, end))
         }
-        Header::Text(None) => decode_indefinite_chunks(decoder, start, ChunkKind::Text, path),
-        Header::Array(Some(len)) => decode_array(decoder, bytes, start, Some(len), path),
-        Header::Array(None) => decode_array(decoder, bytes, start, None, path),
-        Header::Map(Some(len)) => decode_map(decoder, bytes, start, Some(len), path),
-        Header::Map(None) => decode_map(decoder, bytes, start, None, path),
-        Header::Tag(tag) => decode_tag(decoder, bytes, start, tag, path),
+        Header::Text(None) => decode_indefinite_chunks(decoder, start, ChunkKind::Text, path)?,
+        Header::Array(len) => {
+            let frame = Open::Array {
+                start,
+                header_end,
+                len,
+                values: Vec::new(),
+            };
+            return open_frame(frame, open, decoder, bytes, path);
+        }
+        Header::Map(len) => {
+            let frame = Open::Map {
+                start,
+                header_end,
+                len,
+                entries: Vec::new(),
+                key_spans: Vec::new(),
+                key_start: header_end,
+                key: None,
+            };
+            return open_frame(frame, open, decoder, bytes, path);
+        }
+        Header::Tag(tag) => {
+            let frame = Open::Tag {
+                start,
+                header_end,
+                tag,
+            };
+            return open_frame(frame, open, decoder, bytes, path);
+        }
+    };
+    Ok(Decoded::Item(item))
+}
+
+/// Put `frame` on the stack and step it to its first item, or close it
+/// at once when it has none.
+fn open_frame(
+    mut frame: Open,
+    open: &mut Vec<Open>,
+    decoder: &mut CborDecoder<'_>,
+    bytes: &[u8],
+    path: &mut Path,
+) -> DecodeResult<Decoded> {
+    match advance(&mut frame, decoder, bytes, path) {
+        Ok(None) => {
+            open.push(frame);
+            Ok(Decoded::Opened)
+        }
+        Ok(Some(value)) => Ok(Decoded::Item(value)),
+        // Keep the frame so unwind can report a partial container.
+        Err(error) => {
+            open.push(frame);
+            Err(error)
+        }
     }
 }
 
-fn decode_array(
+/// Step an open container on. Pushes the path segment of the next item
+/// it takes and returns `None`, or returns its value once it has taken
+/// them all, leaving the frame emptied for the caller to pop.
+fn advance(
+    frame: &mut Open,
     decoder: &mut CborDecoder<'_>,
     bytes: &[u8],
-    start: usize,
-    len: Option<usize>,
     path: &mut Path,
-) -> DecodeResult<Value> {
-    let header_end = decoder.offset();
-    let mut values = Vec::new();
-    match len {
-        Some(n) => {
-            for i in 0..n {
+) -> DecodeResult<Option<Value>> {
+    match frame {
+        Open::Array {
+            start,
+            header_end,
+            len,
+            values,
+        } => match next_index(*len, values, decoder, bytes, path)? {
+            Some(i) => {
                 path.push(PathSeg::ArrayIdx(i));
-                match decode_item(decoder, bytes, path) {
-                    Ok(item) => {
-                        path.pop();
-                        values.push(item);
-                    }
-                    Err(mut e) => {
-                        if let Some(inner) = e.partial.take() {
-                            values.push(inner);
-                        }
-                        let partial =
-                            partial_array(start, header_end, decoder.offset(), values, Some(n));
-                        return Err(e.with_partial(partial));
-                    }
-                }
+                Ok(None)
             }
-        }
-        None => {
-            let mut i = 0usize;
-            loop {
-                match consume_break(decoder, path) {
-                    Ok(Some(pos)) => {
-                        values.push(simple_token("Break", Value::Null, pos));
-                        break;
-                    }
-                    Ok(None) => {}
-                    Err(e) => {
-                        let partial =
-                            partial_array(start, header_end, decoder.offset(), values, None);
-                        return Err(e.with_partial(partial));
-                    }
-                }
-                path.push(PathSeg::ArrayIdx(i));
-                match decode_item(decoder, bytes, path) {
-                    Ok(item) => {
-                        path.pop();
-                        values.push(item);
-                    }
-                    Err(mut e) => {
-                        if let Some(inner) = e.partial.take() {
-                            values.push(inner);
-                        }
-                        let partial =
-                            partial_array(start, header_end, decoder.offset(), values, None);
-                        return Err(e.with_partial(partial));
-                    }
-                }
-                i += 1;
+            None => {
+                let values = mem::take(values);
+                Ok(Some(array_value(
+                    *start,
+                    *header_end,
+                    decoder.offset(),
+                    values,
+                    *len,
+                )))
             }
+        },
+        Open::Map {
+            start,
+            header_end,
+            len,
+            entries,
+            key_spans,
+            key_start,
+            ..
+        } => match next_index(*len, entries, decoder, bytes, path)? {
+            Some(i) => {
+                *key_start = decoder.offset();
+                path.push(PathSeg::MapEntry(i, Side::Key));
+                Ok(None)
+            }
+            None => {
+                let entries = mem::take(entries);
+                let key_spans = mem::take(key_spans);
+                Ok(Some(map_value(
+                    bytes,
+                    *start,
+                    *header_end,
+                    decoder.offset(),
+                    entries,
+                    key_spans,
+                    *len,
+                )))
+            }
+        },
+        Open::Tag { .. } => {
+            path.push(PathSeg::TagInner);
+            Ok(None)
         }
     }
-    let end = decoder.offset();
-    let mut obj = Map::new();
-    obj.insert("type".into(), Value::String("Array".into()));
-    obj.insert("position_info".into(), Pos::new(start, header_end).to_value());
-    obj.insert(
-        "struct_position_info".into(),
-        Pos::new(start, end).to_value(),
-    );
-    obj.insert(
-        "items".into(),
-        match len {
-            Some(n) => Value::Number(n.into()),
-            None => Value::String("Indefinite".into()),
-        },
-    );
-    obj.insert("values".into(), Value::Array(values));
+}
 
+/// The index of the next item a container takes, or `None` once it has
+/// taken them all: its declared count of them, or the break that ends
+/// an indefinite one, which is kept as its last item.
+fn next_index(
+    len: Option<usize>,
+    items: &mut Vec<Value>,
+    decoder: &mut CborDecoder<'_>,
+    bytes: &[u8],
+    path: &mut Path,
+) -> DecodeResult<Option<usize>> {
+    let next = items.len();
+    match len {
+        Some(n) => Ok((next < n).then_some(next)),
+        None => match consume_break(decoder, bytes, path)? {
+            Some(pos) => {
+                items.push(simple_token("Break", Value::Null, pos));
+                Ok(None)
+            }
+            None => Ok(Some(next)),
+        },
+    }
+}
+
+/// Fold open containers into the error's partial tree (innermost first).
+fn unwind(
+    mut error: CborDecodeError,
+    open: Vec<Open>,
+    path: &[PathSeg],
+    end: usize,
+) -> CborDecodeError {
+    let mut partial = error.partial.take().map(DeepJson::into_inner);
+    for (level, frame) in open.into_iter().enumerate().rev() {
+        partial = Some(match frame {
+            Open::Array {
+                start,
+                header_end,
+                len,
+                mut values,
+            } => {
+                if let Some(inner) = partial {
+                    values.push(inner);
+                }
+                partial_array(start, header_end, end, values, len)
+            }
+            Open::Map {
+                start,
+                header_end,
+                len,
+                mut entries,
+                key,
+                ..
+            } => {
+                // Partial map entry: value if key held, else key if on path.
+                if let Some((key, _)) = key {
+                    entries.push(partial_map_entry(Some(key), partial, Side::Value));
+                } else if path.len() > level {
+                    entries.push(partial_map_entry(partial, None, Side::Key));
+                }
+                partial_map(start, header_end, end, entries, len)
+            }
+            Open::Tag {
+                start,
+                header_end,
+                tag,
+            } => partial_tag(start, header_end, end, tag, partial),
+        });
+    }
+    error.partial = partial.map(DeepJson::new);
+    error
+}
+
+fn array_value(
+    start: usize,
+    header_end: usize,
+    end: usize,
+    values: Vec<Value>,
+    len: Option<usize>,
+) -> Value {
     let oddities = if len.is_none() {
-        vec![oddity(OddityKind::IndefiniteLength, "indefinite-length array")]
+        vec![oddity(
+            OddityKind::IndefiniteLength,
+            "indefinite-length array",
+        )]
     } else {
         Vec::new()
     };
-    Ok(attach_oddities(Value::Object(obj), oddities))
+    let obj = container_object("Array", start, header_end, end, len, values);
+    attach_oddities(Value::Object(obj), oddities)
 }
 
-fn decode_map(
-    decoder: &mut CborDecoder<'_>,
+fn map_value(
     bytes: &[u8],
     start: usize,
+    header_end: usize,
+    end: usize,
+    entries: Vec<Value>,
+    key_spans: Vec<(usize, usize)>,
     len: Option<usize>,
-    path: &mut Path,
-) -> DecodeResult<Value> {
-    let header_end = decoder.offset();
-    let mut entries = Vec::new();
-    let mut key_spans: Vec<(usize, usize)> = Vec::new();
-    match len {
-        Some(n) => {
-            for i in 0..n {
-                match decode_map_entry(decoder, bytes, i, path) {
-                    Ok((entry, span)) => {
-                        entries.push(entry);
-                        key_spans.push(span);
-                    }
-                    Err(mut e) => {
-                        if let Some(partial_entry) = e.partial.take() {
-                            entries.push(partial_entry);
-                        }
-                        let partial =
-                            partial_map(start, header_end, decoder.offset(), entries, Some(n));
-                        return Err(e.with_partial(partial));
-                    }
-                }
-            }
-        }
-        None => {
-            let mut i = 0usize;
-            loop {
-                match consume_break(decoder, path) {
-                    Ok(Some(pos)) => {
-                        entries.push(simple_token("Break", Value::Null, pos));
-                        break;
-                    }
-                    Ok(None) => {}
-                    Err(e) => {
-                        let partial =
-                            partial_map(start, header_end, decoder.offset(), entries, None);
-                        return Err(e.with_partial(partial));
-                    }
-                }
-                match decode_map_entry(decoder, bytes, i, path) {
-                    Ok((entry, span)) => {
-                        entries.push(entry);
-                        key_spans.push(span);
-                    }
-                    Err(mut e) => {
-                        if let Some(partial_entry) = e.partial.take() {
-                            entries.push(partial_entry);
-                        }
-                        let partial =
-                            partial_map(start, header_end, decoder.offset(), entries, None);
-                        return Err(e.with_partial(partial));
-                    }
-                }
-                i += 1;
-            }
-        }
-    }
-    let end = decoder.offset();
-
+) -> Value {
     let mut oddities: Vec<Oddity> = Vec::new();
     if len.is_none() {
-        oddities.push(oddity(OddityKind::IndefiniteLength, "indefinite-length map"));
+        oddities.push(oddity(
+            OddityKind::IndefiniteLength,
+            "indefinite-length map",
+        ));
     }
     if let Some(detail) = map_keys_not_sorted_detail(bytes, &key_spans) {
         oddities.push(oddity(OddityKind::MapKeysNotSorted, detail));
@@ -597,59 +793,8 @@ fn decode_map(
     if let Some(detail) = duplicate_map_keys_detail(bytes, &key_spans) {
         oddities.push(oddity(OddityKind::DuplicateMapKeys, detail));
     }
-
-    let mut obj = Map::new();
-    obj.insert("type".into(), Value::String("Map".into()));
-    obj.insert("position_info".into(), Pos::new(start, header_end).to_value());
-    obj.insert(
-        "struct_position_info".into(),
-        Pos::new(start, end).to_value(),
-    );
-    obj.insert(
-        "items".into(),
-        match len {
-            Some(n) => Value::Number(n.into()),
-            None => Value::String("Indefinite".into()),
-        },
-    );
-    obj.insert("values".into(), Value::Array(entries));
-    Ok(attach_oddities(Value::Object(obj), oddities))
-}
-
-fn decode_map_entry(
-    decoder: &mut CborDecoder<'_>,
-    bytes: &[u8],
-    entry_idx: usize,
-    path: &mut Path,
-) -> DecodeResult<(Value, (usize, usize))> {
-    let key_start = decoder.offset();
-    path.push(PathSeg::MapEntry(entry_idx, Side::Key));
-    let key = match decode_item(decoder, bytes, path) {
-        Ok(k) => {
-            path.pop();
-            k
-        }
-        Err(mut e) => {
-            let inner = e.partial.take();
-            return Err(e.with_partial(partial_map_entry(inner, None, Side::Key)));
-        }
-    };
-    let key_end = decoder.offset();
-    path.push(PathSeg::MapEntry(entry_idx, Side::Value));
-    let value = match decode_item(decoder, bytes, path) {
-        Ok(v) => {
-            path.pop();
-            v
-        }
-        Err(mut e) => {
-            let inner = e.partial.take();
-            return Err(e.with_partial(partial_map_entry(Some(key), inner, Side::Value)));
-        }
-    };
-    let mut entry = Map::new();
-    entry.insert("key".into(), key);
-    entry.insert("value".into(), value);
-    Ok((Value::Object(entry), (key_start, key_end)))
+    let obj = container_object("Map", start, header_end, end, len, entries);
+    attach_oddities(Value::Object(obj), oddities)
 }
 
 fn map_keys_not_sorted_detail(bytes: &[u8], spans: &[(usize, usize)]) -> Option<String> {
@@ -670,50 +815,18 @@ fn duplicate_map_keys_detail(bytes: &[u8], spans: &[(usize, usize)]) -> Option<S
     for (i, (ai, aj)) in spans.iter().enumerate() {
         for (bi, bj) in spans.iter().skip(i + 1) {
             if &bytes[*ai..*aj] == &bytes[*bi..*bj] {
-                return Some(format!(
-                    "duplicate key at offsets {} and {}",
-                    ai, bi
-                ));
+                return Some(format!("duplicate key at offsets {} and {}", ai, bi));
             }
         }
     }
     None
 }
 
-fn decode_tag(
-    decoder: &mut CborDecoder<'_>,
-    bytes: &[u8],
-    start: usize,
-    tag: u64,
-    path: &mut Path,
-) -> DecodeResult<Value> {
-    let header_end = decoder.offset();
-    path.push(PathSeg::TagInner);
-    let inner = match decode_item(decoder, bytes, path) {
-        Ok(v) => {
-            path.pop();
-            v
-        }
-        Err(mut e) => {
-            let inner_partial = e.partial.take();
-            let partial = partial_tag(start, header_end, decoder.offset(), tag, inner_partial);
-            return Err(e.with_partial(partial));
-        }
-    };
-    let end = decoder.offset();
-
+fn tag_value(start: usize, header_end: usize, end: usize, tag: u64, inner: Value) -> Value {
     let oddities = bignum_oddities(tag, &inner);
-
-    let mut obj = Map::new();
-    obj.insert("type".into(), Value::String("Tag".into()));
-    obj.insert("position_info".into(), Pos::new(start, header_end).to_value());
-    obj.insert(
-        "struct_position_info".into(),
-        Pos::new(start, end).to_value(),
-    );
-    obj.insert("tag".into(), Value::String(tag_name(tag)));
+    let mut obj = tag_object(start, header_end, end, tag);
     obj.insert("value".into(), inner);
-    Ok(attach_oddities(Value::Object(obj), oddities))
+    attach_oddities(Value::Object(obj), oddities)
 }
 
 /// Analyse a tag-2 (unsigned bignum) or tag-3 (negative bignum) payload for
@@ -740,7 +853,10 @@ fn bignum_oddities(tag: u64, inner: &Value) -> Vec<Oddity> {
     if raw.first() == Some(&0) {
         out.push(oddity(
             OddityKind::BignumLeadingZeroes,
-            format!("bignum byte string starts with {} zero byte(s)", leading_zero_count(&raw)),
+            format!(
+                "bignum byte string starts with {} zero byte(s)",
+                leading_zero_count(&raw)
+            ),
         ));
     }
 
@@ -782,7 +898,7 @@ fn fits_native_cbor_int(tag: u64, raw: &[u8]) -> bool {
         magnitude = (magnitude << 8) | u64::from(*b);
     }
     match tag {
-        2 => true, // any magnitude < 2^64 fits in Positive
+        2 => true,                 // any magnitude < 2^64 fits in Positive
         3 => magnitude < u64::MAX, // tag-3 encodes -(magnitude+1); needs magnitude+1 <= u64::MAX
         _ => false,
     }
@@ -926,7 +1042,10 @@ fn decode_indefinite_chunks(
     let end = decoder.offset();
     let mut obj = Map::new();
     obj.insert("type".into(), Value::String(kind.type_name().into()));
-    obj.insert("position_info".into(), Pos::new(start, header_end).to_value());
+    obj.insert(
+        "position_info".into(),
+        Pos::new(start, header_end).to_value(),
+    );
     obj.insert(
         "struct_position_info".into(),
         Pos::new(start, end).to_value(),
@@ -945,12 +1064,7 @@ fn simple_token(type_name: &str, value: Value, pos: Pos) -> Value {
     Value::Object(obj)
 }
 
-fn negative_value(
-    v: u64,
-    start: usize,
-    end: usize,
-    path: &[PathSeg],
-) -> DecodeResult<Value> {
+fn negative_value(v: u64, start: usize, end: usize, path: &[PathSeg]) -> DecodeResult<Value> {
     let signed = i128::from(v) ^ !0;
     let pos = Pos::new(start, end);
     let type_name = negative_type_name(start, end, signed);
@@ -1004,19 +1118,32 @@ fn number_from_f64(f: f64, offset: usize, path: &[PathSeg]) -> DecodeResult<Valu
         .ok_or_else(|| err::non_finite_float(path, offset))
 }
 
+/// The break marker that ends an indefinite-length container
+/// (RFC 8949 §3.2.1).
+const BREAK: u8 = 0xff;
+
+/// Consume a following break (`0xff`), if present.
+///
+/// Peeks the raw byte — do not pull-and-unpull: non-shortest headers
+/// rewind by the wrong length and corrupt later offsets (RFC 8949 §3).
 fn consume_break(
     decoder: &mut CborDecoder<'_>,
+    bytes: &[u8],
     path: &mut Path,
 ) -> DecodeResult<Option<Pos>> {
     let before = decoder.offset();
-    let header = pull_header(decoder, path)?;
-    if matches!(header, Header::Break) {
-        let after = decoder.offset();
-        Ok(Some(Pos::new(before, after)))
-    } else {
-        decoder.push(header);
-        debug_assert!(decoder.offset() == before);
-        Ok(None)
+    match bytes.get(before) {
+        Some(&BREAK) => {
+            pull_header(decoder, path)?;
+            Ok(Some(Pos::new(before, decoder.offset())))
+        }
+        Some(_) => Ok(None),
+        // Out of input: let the pull report the truncation, so the
+        // container ends the same way it always has.
+        None => {
+            pull_header(decoder, path)?;
+            Ok(None)
+        }
     }
 }
 
@@ -1025,20 +1152,28 @@ fn pull_header(decoder: &mut CborDecoder<'_>, path: &[PathSeg]) -> DecodeResult<
     decoder.pull().map_err(|e| map_cbor_error(e, before, path))
 }
 
+/// Payload read/alloc chunk size — never allocate a declared length up front.
+const READ_CHUNK: usize = 64 * 1024;
+
 fn read_exact(
     decoder: &mut CborDecoder<'_>,
     len: usize,
     path: &[PathSeg],
 ) -> DecodeResult<Vec<u8>> {
     let before = decoder.offset();
-    let mut buf = vec![0u8; len];
-    decoder.read_exact(&mut buf).map_err(|e| {
-        if e.kind() == std::io::ErrorKind::UnexpectedEof {
-            err::unexpected_eof(path, before)
-        } else {
-            err::io(path, Some(before), e.to_string())
+    let mut buf: Vec<u8> = Vec::new();
+    while buf.len() < len {
+        let filled = buf.len();
+        let step = (len - filled).min(READ_CHUNK);
+        buf.resize(filled + step, 0);
+        if let Err(e) = decoder.read_exact(&mut buf[filled..]) {
+            return Err(if e.kind() == std::io::ErrorKind::UnexpectedEof {
+                err::unexpected_eof(path, before)
+            } else {
+                err::io(path, Some(before), e.to_string())
+            });
         }
-    })?;
+    }
     Ok(buf)
 }
 
@@ -1058,13 +1193,15 @@ fn map_cbor_error(
 
 #[cfg(test)]
 mod tests {
-    use super::{decode_cbor_to_value, CborDecodeError};
+    use super::{decode_cbor_to_value, CborDecodeError, MAX_CBOR_DECODE_NESTING_DEPTH};
     use crate::cbor::errors::ErrorKind;
     use serde_json::{json, Value};
 
     fn decode(hex: &str) -> Value {
         let bytes = hex::decode(hex).expect("invalid test hex");
-        decode_cbor_to_value(&bytes).expect("decode failed")
+        decode_cbor_to_value(&bytes)
+            .expect("decode failed")
+            .into_inner()
     }
 
     fn decode_err(hex: &str) -> CborDecodeError {
@@ -1399,6 +1536,78 @@ mod tests {
         assert_eq!(e.offset, Some(6));
     }
 
+    /// Break lookahead must not shift offsets before non-shortest headers.
+    #[test]
+    fn item_offsets_survive_a_break_check_before_a_non_shortest_header() {
+        for (hex, first_len, total) in [
+            // [_ 1] with the 1 written at each header width.
+            ("9f01ff", 1usize, 3usize),
+            ("9f1801ff", 2, 4),
+            ("9f190001ff", 3, 5),
+            ("9f1a00000001ff", 5, 7),
+            ("9f1b0000000000000001ff", 9, 11),
+            // A float written wider than the value needs.
+            ("9ffbbff0000000000000ff", 9, 11),
+        ] {
+            let tree = decode(hex);
+            assert_eq!(
+                tree["struct_position_info"],
+                json!({"offset": 0, "length": total}),
+                "{}",
+                hex
+            );
+            assert_eq!(
+                tree["values"][0]["position_info"],
+                json!({"offset": 1, "length": first_len}),
+                "{}",
+                hex
+            );
+            // The break is the last byte, and it is where the container
+            // says it ends.
+            assert_eq!(
+                tree["values"][1]["position_info"],
+                json!({"offset": total - 1, "length": 1}),
+                "{}",
+                hex
+            );
+        }
+        // Nested: the inner container is entered through the same
+        // look-ahead as the outer one.
+        let nested = decode("9f9f1801ffff");
+        assert_eq!(
+            nested["struct_position_info"],
+            json!({"offset": 0, "length": 6}),
+            "{}",
+            nested
+        );
+        assert_eq!(
+            nested["values"][0]["struct_position_info"],
+            json!({"offset": 1, "length": 4}),
+            "{}",
+            nested
+        );
+        assert_eq!(
+            nested["values"][0]["values"][0]["position_info"],
+            json!({"offset": 2, "length": 2}),
+            "{}",
+            nested
+        );
+        // Map keys and values are reached through the same look-ahead.
+        let tree = decode("bf18011802ff");
+        assert_eq!(
+            tree["values"][0]["key"]["position_info"],
+            json!({"offset": 1, "length": 2}),
+            "{}",
+            tree
+        );
+        assert_eq!(
+            tree["values"][0]["value"]["position_info"],
+            json!({"offset": 3, "length": 2}),
+            "{}",
+            tree
+        );
+    }
+
     #[test]
     fn error_path_pinpoints_nested_array_position() {
         // 82_01_82_02_1c = [1, [2, <reserved-minor>]]
@@ -1492,36 +1701,24 @@ mod tests {
     fn indefinite_array_is_flagged() {
         // 9f0102ff = [_ 1, 2]
         let v = decode("9f0102ff");
-        assert_eq!(
-            oddity_kinds(&v),
-            vec!["IndefiniteLength".to_string()]
-        );
+        assert_eq!(oddity_kinds(&v), vec!["IndefiniteLength".to_string()]);
     }
 
     #[test]
     fn indefinite_map_is_flagged() {
         // bf_6161_01_6162_02_ff
         let v = decode("bf616101616202ff");
-        assert_eq!(
-            oddity_kinds(&v),
-            vec!["IndefiniteLength".to_string()]
-        );
+        assert_eq!(oddity_kinds(&v), vec!["IndefiniteLength".to_string()]);
     }
 
     #[test]
     fn indefinite_bytes_and_text_are_flagged() {
         // 5f42010243030405ff
         let v = decode("5f42010243030405ff");
-        assert_eq!(
-            oddity_kinds(&v),
-            vec!["IndefiniteLength".to_string()]
-        );
+        assert_eq!(oddity_kinds(&v), vec!["IndefiniteLength".to_string()]);
         // 7f6548656c6c6f612065576f726c64ff
         let v = decode("7f6548656c6c6f612065576f726c64ff");
-        assert_eq!(
-            oddity_kinds(&v),
-            vec!["IndefiniteLength".to_string()]
-        );
+        assert_eq!(oddity_kinds(&v), vec!["IndefiniteLength".to_string()]);
     }
 
     #[test]
@@ -1578,10 +1775,7 @@ mod tests {
     fn unsorted_map_keys_are_flagged() {
         // a2_02_61 62_01_61 61 → {2:"b", 1:"a"}
         let v = decode("a2026162016161");
-        assert_eq!(
-            oddity_kinds(&v),
-            vec!["MapKeysNotSorted".to_string()]
-        );
+        assert_eq!(oddity_kinds(&v), vec!["MapKeysNotSorted".to_string()]);
     }
 
     #[test]
@@ -1675,7 +1869,7 @@ mod tests {
         let e = decode_err("0100");
         let partial = e.partial.as_ref().expect("partial present");
         assert_eq!(
-            partial,
+            &**partial,
             &json!({"type": "U8", "position_info": {"offset": 0, "length": 1}, "value": 1})
         );
     }
@@ -1740,7 +1934,10 @@ mod tests {
         let e = decode_err("5f4201024303040518");
         assert_eq!(e.kind, ErrorKind::UnexpectedEof);
         let partial = e.partial.as_ref().expect("partial chunks");
-        assert_eq!(partial["type"], Value::String("IndefiniteLengthBytes".into()));
+        assert_eq!(
+            partial["type"],
+            Value::String("IndefiniteLengthBytes".into())
+        );
         assert_eq!(partial["incomplete"], Value::Bool(true));
         let chunks = partial["chunks"].as_array().unwrap();
         assert_eq!(chunks.len(), 2);
@@ -1771,6 +1968,143 @@ mod tests {
         assert_eq!(entries[2]["value"], Value::Null);
     }
 
+    // === Partial trees built by the unwind of the explicit stack ===
+
+    /// A key that fails leaves an entry with no key, marked at the key.
+    #[test]
+    fn map_key_failure_marks_entry_incomplete_at_key_without_a_key() {
+        // a2_6161_01_1c — {"a": 1, <invalid key>}.
+        let e = decode_err("a26161011c");
+        assert_eq!(e.kind, ErrorKind::InvalidSyntax);
+        assert_eq!(e.path, "$.entries[1].key");
+        let partial = e.partial.as_ref().expect("partial map");
+        assert_eq!(partial["incomplete"], json!(true));
+        let entries = partial["values"].as_array().unwrap();
+        assert_eq!(entries.len(), 2);
+        assert!(entries[0].get("incomplete").is_none());
+        assert_eq!(entries[1]["incomplete_at"], json!("key"));
+        assert!(entries[1].get("key").is_none());
+        assert!(entries[1].get("value").is_none());
+    }
+
+    /// A key that is itself a container which fails is handed back as
+    /// the entry's partial key.
+    #[test]
+    fn partial_container_key_is_kept_on_the_incomplete_entry() {
+        // a1_82_01_1c — {[1, <invalid>]: …}.
+        let e = decode_err("a182011c");
+        assert_eq!(e.path, "$.entries[0].key[1]");
+        let partial = e.partial.as_ref().expect("partial map");
+        let entries = partial["values"].as_array().unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0]["incomplete_at"], json!("key"));
+        assert_eq!(entries[0]["key"]["type"], json!("Array"));
+        assert_eq!(entries[0]["key"]["incomplete"], json!(true));
+        assert_eq!(entries[0]["key"]["values"].as_array().unwrap().len(), 1);
+        assert!(entries[0].get("value").is_none());
+    }
+
+    /// A value that is a container which fails is handed back as the
+    /// entry's partial value, next to its complete key.
+    #[test]
+    fn partial_container_value_is_kept_on_the_incomplete_entry() {
+        // a1_00_82_01_1c — {0: [1, <invalid>]}.
+        let e = decode_err("a10082011c");
+        assert_eq!(e.path, "$.entries[0].value[1]");
+        let partial = e.partial.as_ref().expect("partial map");
+        let entries = partial["values"].as_array().unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0]["incomplete_at"], json!("value"));
+        assert_eq!(entries[0]["key"]["value"], json!(0));
+        assert_eq!(entries[0]["value"]["type"], json!("Array"));
+        assert_eq!(entries[0]["value"]["incomplete"], json!(true));
+    }
+
+    /// An indefinite map cut off between entries has no entry open, so
+    /// the partial holds only the entries it completed.
+    #[test]
+    fn indefinite_map_truncated_between_entries_adds_no_partial_entry() {
+        // bf_00_01 — {0: 1, <input ends before the next key or the break>}.
+        let e = decode_err("bf0001");
+        assert_eq!(e.kind, ErrorKind::UnexpectedEof);
+        assert_eq!(e.path, "$");
+        let partial = e.partial.as_ref().expect("partial map");
+        assert_eq!(partial["items"], json!("Indefinite"));
+        assert_eq!(partial["incomplete"], json!(true));
+        let entries = partial["values"].as_array().unwrap();
+        assert_eq!(entries.len(), 1);
+        assert!(entries[0].get("incomplete").is_none());
+        assert_eq!(entries[0]["key"]["value"], json!(0));
+        assert_eq!(entries[0]["value"]["value"], json!(1));
+    }
+
+    /// The same for an indefinite array cut off between items.
+    #[test]
+    fn indefinite_array_truncated_between_items_keeps_only_decoded_items() {
+        let e = decode_err("9f0102");
+        assert_eq!(e.kind, ErrorKind::UnexpectedEof);
+        assert_eq!(e.path, "$");
+        let partial = e.partial.as_ref().expect("partial array");
+        assert_eq!(partial["incomplete"], json!(true));
+        let values = partial["values"].as_array().unwrap();
+        assert_eq!(values.len(), 2);
+        assert_eq!(values[1]["value"], json!(2));
+    }
+
+    /// A tag around a container that fails carries the partial container.
+    #[test]
+    fn tag_failure_keeps_the_partial_inner_container() {
+        // c1_82_01_1c — tag(1) around [1, <invalid>].
+        let e = decode_err("c182011c");
+        assert_eq!(e.path, "$.tag[1]");
+        let partial = e.partial.as_ref().expect("partial tag");
+        assert_eq!(partial["type"], json!("Tag"));
+        assert_eq!(partial["incomplete"], json!(true));
+        assert_eq!(partial["value"]["type"], json!("Array"));
+        assert_eq!(partial["value"]["incomplete"], json!(true));
+        assert_eq!(partial["value"]["values"].as_array().unwrap().len(), 1);
+    }
+
+    /// Every container open around a failure is closed innermost first,
+    /// each with what it had decoded, and all of them end where the
+    /// decode stopped.
+    #[test]
+    fn partials_nest_through_every_container_kind_around_the_failure() {
+        // 82_00_a1_01_c2_9f_02_1c — [0, {1: tag(2)([_ 2, <invalid>])}].
+        let e = decode_err("8200a101c29f021c");
+        assert_eq!(e.kind, ErrorKind::InvalidSyntax);
+        assert_eq!(e.path, "$[1].entries[0].value.tag[1]");
+        assert_eq!(e.offset, Some(7));
+        let root = e.partial.as_ref().expect("partial root");
+        assert_eq!(root["type"], json!("Array"));
+        assert_eq!(root["incomplete"], json!(true));
+        let root_values = root["values"].as_array().unwrap();
+        assert_eq!(root_values.len(), 2);
+        assert_eq!(root_values[0]["value"], json!(0));
+        let map = &root_values[1];
+        assert_eq!(map["type"], json!("Map"));
+        assert_eq!(map["incomplete"], json!(true));
+        let entry = &map["values"][0];
+        assert_eq!(entry["incomplete_at"], json!("value"));
+        assert_eq!(entry["key"]["value"], json!(1));
+        let tag = &entry["value"];
+        assert_eq!(tag["type"], json!("Tag"));
+        assert_eq!(tag["incomplete"], json!(true));
+        let array = &tag["value"];
+        assert_eq!(array["type"], json!("Array"));
+        assert_eq!(array["items"], json!("Indefinite"));
+        assert_eq!(array["incomplete"], json!(true));
+        assert_eq!(array["values"].as_array().unwrap().len(), 1);
+        let end = |v: &Value| {
+            let span = &v["struct_position_info"];
+            span["offset"].as_u64().unwrap() + span["length"].as_u64().unwrap()
+        };
+        assert_eq!(end(root), end(map));
+        assert_eq!(end(map), end(tag));
+        assert_eq!(end(tag), end(array));
+        assert!(end(array) >= 7);
+    }
+
     #[test]
     fn tag_failure_returns_partial_tag_without_value_when_inner_lost() {
         // d8_66_1c — tag(102) wrapping a byte that's an invalid CBOR minor.
@@ -1782,5 +2116,200 @@ mod tests {
         assert_eq!(partial["incomplete"], Value::Bool(true));
         // Inner wasn't recoverable, so `value` is absent.
         assert!(partial.get("value").is_none());
+    }
+
+    // ============================================================
+    // Nesting limit
+    // ============================================================
+
+    fn nested_arrays_hex(levels: usize) -> String {
+        let mut s = String::with_capacity(levels * 2 + 2);
+        for _ in 0..levels {
+            s.push_str("81");
+        }
+        s.push_str("05");
+        s
+    }
+
+    /// Decode succeeds for documents nested exactly to the depth limit.
+    #[test]
+    fn decode_accepts_cbor_nested_to_the_limit() {
+        let hex = nested_arrays_hex(MAX_CBOR_DECODE_NESTING_DEPTH);
+        let bytes = hex::decode(&hex).unwrap();
+        let value = decode_cbor_to_value(&bytes).expect("expected a full decode");
+        // Walk to the bottom to prove nothing was silently truncated.
+        let mut node: &Value = &value;
+        for level in 0..MAX_CBOR_DECODE_NESTING_DEPTH {
+            assert!(
+                node.get("incomplete").is_none(),
+                "level {} is incomplete",
+                level
+            );
+            node = &node["values"][0];
+        }
+        assert_eq!(node["value"], json!(5));
+    }
+
+    #[test]
+    fn decode_rejects_cbor_nested_past_the_limit() {
+        let hex = nested_arrays_hex(MAX_CBOR_DECODE_NESTING_DEPTH + 1);
+        let bytes = hex::decode(&hex).unwrap();
+        let e = decode_cbor_to_value(&bytes).expect_err("expected a rejection");
+        assert_eq!(e.kind, ErrorKind::NestingTooDeep);
+        assert_eq!(e.kind.as_str(), "nesting_too_deep");
+        // The path names one segment per enclosing container.
+        assert_eq!(
+            e.path.matches('[').count(),
+            MAX_CBOR_DECODE_NESTING_DEPTH + 1
+        );
+        assert_eq!(e.offset, Some(MAX_CBOR_DECODE_NESTING_DEPTH + 1));
+        // Partial prefix nests to the bound.
+        let partial = e.partial.as_ref().expect("expected a partial tree");
+        assert_eq!(partial["type"], Value::String("Array".into()));
+        assert_eq!(partial["incomplete"], Value::Bool(true));
+        let mut node: &Value = partial;
+        for _ in 0..MAX_CBOR_DECODE_NESTING_DEPTH {
+            node = &node["values"][0];
+        }
+        assert_eq!(node["type"], Value::String("Array".into()));
+        assert_eq!(node["incomplete"], Value::Bool(true));
+        assert_eq!(node["values"].as_array().map(Vec::len), Some(0));
+    }
+
+    /// The guard counts every kind of nesting, not only definite arrays.
+    #[test]
+    fn nesting_limit_counts_maps_tags_and_indefinite_containers() {
+        // Indefinite maps: `bf` opens, key `01`, value is the next
+        // container, `ff` closes.
+        let mut indefinite_maps = String::new();
+        for _ in 0..MAX_CBOR_DECODE_NESTING_DEPTH + 1 {
+            indefinite_maps.push_str("bf01");
+        }
+        indefinite_maps.push_str("05");
+        indefinite_maps.push_str(&"ff".repeat(MAX_CBOR_DECODE_NESTING_DEPTH + 1));
+
+        // Definite maps: `a1` then key `01` then the value.
+        let mut definite_maps = String::new();
+        for _ in 0..MAX_CBOR_DECODE_NESTING_DEPTH + 1 {
+            definite_maps.push_str("a101");
+        }
+        definite_maps.push_str("05");
+
+        // Indefinite arrays.
+        let mut indefinite_arrays = "9f".repeat(MAX_CBOR_DECODE_NESTING_DEPTH + 1);
+        indefinite_arrays.push_str("05");
+        indefinite_arrays.push_str(&"ff".repeat(MAX_CBOR_DECODE_NESTING_DEPTH + 1));
+
+        // A chain of tag 1 headers.
+        let mut tags = "c1".repeat(MAX_CBOR_DECODE_NESTING_DEPTH + 1);
+        tags.push_str("05");
+
+        for (label, hex) in [
+            ("indefinite maps", indefinite_maps),
+            ("definite maps", definite_maps),
+            ("indefinite arrays", indefinite_arrays),
+            ("tag chain", tags),
+        ] {
+            let bytes = hex::decode(&hex).unwrap();
+            let e = decode_cbor_to_value(&bytes)
+                .err()
+                .unwrap_or_else(|| panic!("{} was not rejected", label));
+            assert_eq!(e.kind, ErrorKind::NestingTooDeep, "{}", label);
+        }
+    }
+
+    /// Indefinite string chunks are not nesting levels (match pre-scan).
+    #[test]
+    fn indefinite_string_chunks_are_not_a_nesting_level() {
+        // An indefinite byte string sitting at the deepest allowed
+        // level, with chunks inside it.
+        let mut hex = "81".repeat(MAX_CBOR_DECODE_NESTING_DEPTH);
+        hex.push_str("5f41014102ff");
+        let bytes = hex::decode(&hex).unwrap();
+        assert!(decode_cbor_to_value(&bytes).is_ok(), "{}", hex);
+        assert_eq!(
+            crate::cbor::limits::cbor_nesting_depth_capped(&bytes, usize::MAX),
+            MAX_CBOR_DECODE_NESTING_DEPTH
+        );
+
+        // One level further out and it is past the limit for both.
+        let mut hex = "81".repeat(MAX_CBOR_DECODE_NESTING_DEPTH + 1);
+        hex.push_str("5f4101ff");
+        let bytes = hex::decode(&hex).unwrap();
+        assert!(decode_cbor_to_value(&bytes).is_err());
+        assert_eq!(
+            crate::cbor::limits::cbor_nesting_depth_capped(&bytes, usize::MAX),
+            MAX_CBOR_DECODE_NESTING_DEPTH + 1
+        );
+    }
+
+    /// The same shapes one level shallower must still decode, so the
+    /// counting above is a boundary and not a blanket refusal.
+    #[test]
+    fn maps_tags_and_chunks_at_the_limit_still_decode() {
+        let mut definite_maps = String::new();
+        for _ in 0..MAX_CBOR_DECODE_NESTING_DEPTH {
+            definite_maps.push_str("a101");
+        }
+        definite_maps.push_str("05");
+
+        let mut tags = "c1".repeat(MAX_CBOR_DECODE_NESTING_DEPTH);
+        tags.push_str("05");
+
+        let mut indefinite_arrays = "9f".repeat(MAX_CBOR_DECODE_NESTING_DEPTH);
+        indefinite_arrays.push_str("05");
+        indefinite_arrays.push_str(&"ff".repeat(MAX_CBOR_DECODE_NESTING_DEPTH));
+
+        for (label, hex) in [
+            ("definite maps", definite_maps),
+            ("indefinite arrays", indefinite_arrays),
+            ("tag chain", tags),
+        ] {
+            let bytes = hex::decode(&hex).unwrap();
+            assert!(
+                decode_cbor_to_value(&bytes).is_ok(),
+                "{} at the limit was rejected",
+                label
+            );
+        }
+    }
+
+    /// Declared length of 2^64-1 must error, not abort on allocation.
+    #[test]
+    fn a_declared_length_no_input_could_carry_is_an_error_not_an_abort() {
+        for (hex, offset) in [
+            // Byte string, text string, array and map, each declaring
+            // 2^64-1 of content with nothing after the header.
+            ("5bffffffffffffffff", 9),
+            ("7bffffffffffffffff", 9),
+            ("9bffffffffffffffff", 9),
+            ("bbffffffffffffffff", 9),
+            // Representable but still unbacked: 2 GiB and 4 GiB.
+            ("5a7fffffff", 5),
+            ("5b0000000100000000", 9),
+            // A chunk of an indefinite-length string, one level in.
+            ("5f5bffffffffffffffff", 10),
+        ] {
+            let e = decode_err(hex);
+            assert_eq!(e.kind, ErrorKind::UnexpectedEof, "{}", hex);
+            assert_eq!(e.offset, Some(offset), "{}", hex);
+        }
+    }
+
+    /// The same bound must not cost anything for a payload that really
+    /// is there: a byte string is read in one pass whatever its size.
+    #[test]
+    fn a_backed_payload_longer_than_one_read_chunk_still_decodes() {
+        let len = super::READ_CHUNK * 2 + 7;
+        let mut bytes = vec![0x5a];
+        bytes.extend_from_slice(&(len as u32).to_be_bytes());
+        bytes.extend(std::iter::repeat(0xabu8).take(len));
+        let value = decode_cbor_to_value(&bytes).expect("payload is backed by real bytes");
+        assert_eq!(value["type"], Value::String("Bytes".into()));
+        assert_eq!(
+            value["value"].as_str().map(str::len),
+            Some(len * 2),
+            "the whole payload has to come back"
+        );
     }
 }

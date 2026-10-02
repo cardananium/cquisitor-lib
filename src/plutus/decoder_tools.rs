@@ -58,7 +58,7 @@ fn to_json_constant(constant: &Constant) -> Value {
         Constant::ProtoList(ty, items) => json!({
             "list": {
                 "type": to_json_type(ty),
-                "items": items.iter().map(to_json_constant).collect::<Vec<_>>(),
+                "items": items.iter().map(|item| to_json_constant(item)).collect::<Vec<_>>(),
             }
         }),
         Constant::ProtoPair(left_type, right_type, left, right) => json!({
@@ -85,7 +85,32 @@ fn to_json_constant(constant: &Constant) -> Value {
         Constant::Bls12_381MlResult(_) => {
             json!({ "bls12_381_mlresult": "<not serializable>" })
         }
+        Constant::Value(value) => json!({ "value": to_json_value(value) }),
     }
+}
+
+// Quantities are rendered as decimal strings: they are signed 128-bit and do
+// not fit a JSON number losslessly.
+fn to_json_value(value: &uplc::ast::Value) -> Value {
+    Value::Array(
+        value
+            .clone()
+            .into_entries()
+            .into_iter()
+            .map(|(currency, tokens)| {
+                json!({
+                    "currency_symbol": hex::encode(currency),
+                    "tokens": tokens
+                        .into_iter()
+                        .map(|(token, quantity)| json!({
+                            "token_name": hex::encode(token),
+                            "quantity": quantity.to_string(),
+                        }))
+                        .collect::<Vec<_>>(),
+                })
+            })
+            .collect(),
+    )
 }
 
 fn json_blst_p2(p2: &blst_p2) -> Value {
@@ -141,5 +166,31 @@ fn to_json_type(term_type: &Type) -> Value {
         Type::Bls12_381G1Element => json!("bls12_381_G1_element"),
         Type::Bls12_381G2Element => json!("bls12_381_G2_element"),
         Type::Bls12_381MlResult => json!("bls12_381_mlresult"),
+        Type::Value => json!("value"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn value_constant_renders_entries_with_string_quantities() {
+        let value = uplc::ast::Value::from_canonical_bounded_entries(vec![(
+            vec![0xaa],
+            vec![(vec![0xbb], -5), (vec![0xcc], i128::MAX)],
+        )])
+        .unwrap();
+        assert_eq!(
+            to_json_constant(&Constant::Value(value)),
+            json!({ "value": [{
+                "currency_symbol": "aa",
+                "tokens": [
+                    { "token_name": "bb", "quantity": "-5" },
+                    { "token_name": "cc", "quantity": i128::MAX.to_string() },
+                ],
+            }]})
+        );
+        assert_eq!(to_json_type(&Type::Value), json!("value"));
     }
 }

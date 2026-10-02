@@ -264,6 +264,13 @@ fn ledger_corpus() -> Vec<(&'static str, &'static str, String)> {
         ("datum_big_uint", "datum", "c24101".to_string()),
         ("datum_big_nint", "datum", "c34101".to_string()),
         ("datum_bounded_bytes", "datum", "41ab".to_string()),
+        // 64 + 36 bytes in chunks: past `.size (0..64)` as a whole, within
+        // it per chunk, which is how the ledger bounds Plutus byte strings.
+        (
+            "datum_chunked_bounded_bytes",
+            "datum",
+            format!("5f5840{}5824{}ff", "ab".repeat(64), "cd".repeat(36)),
+        ),
         (
             "payload_embedded_cbor",
             "payload",
@@ -490,6 +497,19 @@ fn synthetic_corpus() -> Vec<(&'static str, &'static str, &'static str, &'static
             "m = { 0: uint }",
             "m",
             "a181011864",
+        ),
+        (
+            "inline_array_key_over_several_entries",
+            "m = [ + r ] / { + [ tag: 0 .. 5, index: uint ] => [ data: int, units: [uint, uint] ] }\n\
+             r = [ tag: 0 .. 5, index: uint, data: int, units: [uint, uint] ]",
+            "m",
+            "a282000082008201018201008200820101",
+        ),
+        (
+            "inline_tagged_key_over_several_entries",
+            "m = { * #6.24(uint) => uint }",
+            "m",
+            "a2d8180101d8180202",
         ),
         (
             "duplicate_keys_force_entries_form",
@@ -932,6 +952,19 @@ fn tag_wrapper_rows_agree_with_the_decoder() {
                 "{}: decoder wraps={} but map wraps={}",
                 name, decoder_wraps, map_wraps
             );
+        }
+    }
+}
+
+/// The socket corpus: whichever alternative of a socket, a `/=` or a `//=`
+/// the decoder reads a document through, the position map has a row for
+/// every path the decoded tree holds and no other.
+#[test]
+fn socket_corpus_maps_every_decoded_path() {
+    for (source, rule, documents) in crate::cbor::socket_parity::corpus() {
+        let schema = Schema::new(source);
+        for (hex, _) in documents {
+            schema.assert_case(&format!("{:?} {} {}", source, rule, hex), rule, hex);
         }
     }
 }

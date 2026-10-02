@@ -9,10 +9,12 @@ mod cbor_cddl_map;
 mod cbor_cddl_map_parity;
 mod cddl_tools;
 mod decoder;
+mod diagnostic;
 mod document_cache;
-mod errors;
+pub(crate) mod errors;
 pub(crate) mod limits;
 mod schema_mapper;
+mod socket_parity;
 mod source_index;
 #[cfg(test)]
 mod stack_calibration;
@@ -41,6 +43,20 @@ pub fn cbor_to_json(cbor_hex: &str) -> Result<String, JsError> {
         Err(e) => err_result(errors::invalid_hex(e.to_string()).to_json(), None),
     };
     Ok(json_text(DeepJson::new(result)))
+}
+
+/// The positional decoder's verdict on `bytes` as one CBOR item: `None`
+/// when it decodes whole, otherwise the same error `cbor_to_json` would
+/// report (its partial tree dropped). Used to refuse input before it
+/// reaches parsers that abort on malformed framing.
+pub(crate) fn well_formedness_error(bytes: &[u8]) -> Option<errors::CborDecodeError> {
+    match decoder::decode_cbor_to_value(bytes) {
+        Ok(_) => None,
+        Err(mut e) => {
+            e.partial = None;
+            Some(e)
+        }
+    }
 }
 
 fn ok_result(value: Value) -> Value {
@@ -543,7 +559,7 @@ mod tests {
             let v = parse(validate_cbor_against_cddl(&hex_deep, &schema, "x").unwrap());
             assert_eq!(v["valid"], Value::Bool(true), "{}", v);
 
-            let hex_deeper = format!("{}05", "81".repeat(1200));
+            let hex_deeper = format!("{}05", "81".repeat(3000));
             for (name, v) in [
                 (
                     "map_cbor_to_cddl",

@@ -43,7 +43,7 @@ pub fn get_error_hint(error: &Phase1Error) -> Option<String> {
             "Reduce the output size by splitting into multiple outputs.".to_string()
         ),
         Phase1Error::InsufficientCollateral { .. } => Some(
-            "Add more collateral inputs or increase the Ada amount in existing collateral inputs. Ensure collateral covers the required percentage of the transaction fee.".to_string()
+            "Add more collateral inputs or increase the Ada amount in existing collateral inputs. The ledger requires 100 × collateral ≥ collateralPercentage × fee, so the collateral balance (collateral inputs less the collateral return) must be at least ceil(fee × collateralPercentage / 100) lovelace: the required amount reported here.".to_string()
         ),
         Phase1Error::ExUnitsTooBigUTxO { .. } => Some(
             "Optimize Plutus scripts to use fewer execution units, or split the transaction to distribute script execution across multiple transactions.".to_string()
@@ -178,7 +178,7 @@ pub fn get_error_hint(error: &Phase1Error) -> Option<String> {
             "Use the correct deposit amount for proposal submission as specified in the current protocol parameters.".to_string()
         ),
         Phase1Error::DisallowedVoters { .. } => Some(
-            "Ensure voters are authorized to vote on the specified governance actions. Check voter eligibility and action types.".to_string()
+            "The voter kind may not vote on this action type: stake pools do not vote on NewConstitution or TreasuryWithdrawals, nor on a ParameterChange unless it changes a security-group parameter (txFeePerByte, txFeeFixed, maxBlockBodySize, maxTxSize, maxBlockHeaderSize, utxoCostPerByte, maxBlockExecutionUnits, maxValueSize, govActionDeposit, minFeeRefScriptCostPerByte); the constitutional committee does not vote on NoConfidence or UpdateCommittee. For a stake pool vote on a ParameterChange whose changed parameters the validation context does not list (govActionContexts[].changedParameters), this is reported without that knowledge: check the proposal before removing the vote.".to_string()
         ),
         Phase1Error::ConflictingCommitteeUpdate { .. } => Some(
             "Remove the conflicting credentials from either the add or remove sets in the committee update proposal.".to_string()
@@ -326,6 +326,9 @@ pub fn get_warning_hint(warning: &Phase1Warning) -> Option<String> {
         ),
         Phase1Warning::DelegationToRetiringPool { .. } => Some(
             "The pool you are delegating to is being retired in the same transaction. The delegation is valid but will only earn rewards until the pool's retirement epoch. Consider delegating to an active pool instead.".to_string()
+        ),
+        Phase1Warning::NativeScriptNotExamined { .. } => Some(
+            "The script reference nests deeper than the library follows, so whether the script is satisfied was not checked. The rest of the transaction was validated.".to_string()
         ),
     }
 }

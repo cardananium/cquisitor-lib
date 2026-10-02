@@ -70,9 +70,15 @@ pub enum InlineScriptType {
 pub fn extract_hashes_from_transaction(tx_hex: &str) -> Result<ExtractedHashes, String> {
     let tx_bytes = hex::decode(tx_hex)
         .map_err(|e| format!("Failed to decode hex: {}", e))?;
-    
-    let tx = csl::Transaction::from_bytes(tx_bytes)
-        .map_err(|e| format!("Failed to decode transaction: {:?}", e))?;
+    crate::csl_preflight::check_cbor(&tx_bytes, crate::csl_preflight::CslShape::Transaction)
+        .map_err(|e| format!("Failed to decode transaction: {}", e))?;
+
+    let tx = csl::Transaction::from_bytes(tx_bytes.clone()).map_err(|e| {
+        format!(
+            "Failed to decode transaction: {}",
+            crate::csl_preflight::transaction_parse_failure(&tx_bytes, &e)
+        )
+    })?;
     
     let tx_body = tx.body();
     let witness_set = tx.witness_set();

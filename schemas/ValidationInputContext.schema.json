@@ -543,6 +543,16 @@
         },
         "isActive": {
           "type": "boolean"
+        },
+        "changedParameters": {
+          "description": "For a `ParameterChangeAction`: the names of the protocol parameters\n it changes. Ledger names (`maxBlockBodySize`), CDDL names\n (`max_block_body_size`), db-sync / Koios names (`max_block_size`,\n `max_block_ex_mem`) and the CDDL keys as text (`\"2\"`) are all read.\n Stake pools may vote on the action only when one of them is in the\n ledger's security group. Absent when not known; a stake pool's vote on\n the action is then reported as disallowed.",
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          }
         }
       },
       "required": [

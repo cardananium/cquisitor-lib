@@ -19,8 +19,9 @@ use std::mem;
 use std::rc::Rc;
 
 use cddl::ast::{
-    GenericArgs, GenericParams, Group, GroupChoice, GroupEntry, MemberKey, Occur, Occurrence,
-    OptionalComma, RangeCtlOp, Rule, Span, Type, Type1, Type2, TypeGroupnameEntry, TypeRule, CDDL,
+    GenericArgs, GenericParams, Group, GroupChoice, GroupEntry, GroupRule, Identifier, MemberKey,
+    Occur, Occurrence, OptionalComma, RangeCtlOp, Rule, Span, Type, Type1, Type2,
+    TypeGroupnameEntry, TypeRule, CDDL,
 };
 use cddl::token::{ControlOperator, TagConstraint};
 use cddl::validator::cbor_value::{decode_cbor, Value as CborValue};
@@ -31,6 +32,7 @@ use crate::cbor::decoder;
 use crate::cbor::document_cache;
 use crate::cbor::limits;
 use crate::cbor::validation;
+use crate::cbor::validation::RuleKey;
 use crate::cbor::walk_driver::{run_above, run_root, Spawner};
 use crate::deep_json::DeepJson;
 
@@ -124,19 +126,8 @@ pub(crate) fn decode_against_ast(
     cbor: &[u8],
     rule_name: &str,
 ) -> Result<Value, WalkError> {
+    let root_name = resolve_root(ast, rule_name)?;
     let rules = RuleIndex::build(ast);
-    let Some(root) = rules.get(rule_name) else {
-        return Err(WalkError::new(
-            "missing_rule",
-            &missing_rule_message(rule_name),
-        ));
-    };
-    if matches!(root, Rule::Group { .. }) {
-        return Err(WalkError::new(
-            "group_rule_root",
-            &group_rule_root_message(rule_name),
-        ));
-    }
 
     // Positional decode first: path + byte offsets on failure.
     if let Err(e) = decoder::decode_cbor_to_value(cbor) {
@@ -155,12 +146,42 @@ pub(crate) fn decode_against_ast(
     let value = decode_cbor(cbor).map_err(|e| value_decoder_error(&e.to_string()))?;
 
     let mapper = Mapper::new(rules, budget);
-    let (mapped, _trace) = mapper.map_by_rule_name(&value, rule_name);
+    let ((mapped, _trace), _body) = mapper.map_by_rule_name(&value, &root_name);
     let mapped = DeepJson::new(mapped);
     if let Some(refusal) = mapper.refusal() {
         return Err(refusal);
     }
     Ok(mapped.into_inner())
+}
+
+/// The root `rule_name` names, as written in the schema (`$m` for the type
+/// socket a bare `m` stands for), resolved the way the validator resolves it.
+pub(crate) fn resolve_root(ast: &CDDL<'_>, rule_name: &str) -> Result<String, WalkError> {
+    validation::resolve_root_rule(ast, rule_name)
+        .map(|root| RuleKey::of(root).to_string())
+        .map_err(|refusal| WalkError::new(refusal.kind, &refusal.message))
+}
+
+/// Whether the root `rule_name` resolves to reads `cbor` strictly, for
+/// tests holding the decoder to the validator's verdict.
+#[cfg(test)]
+pub(crate) fn decode_fits_strictly(
+    cbor: &[u8],
+    cddl: &str,
+    rule_name: &str,
+) -> Result<bool, WalkError> {
+    document_cache::with_ast_checked(cddl, |parsed| {
+        let ast = parsed.map_err(|e| WalkError::from_object(validation::schema_error(cddl, e)))?;
+        let root_name = resolve_root(ast, rule_name)?;
+        let budget = limits::NestingBudget::for_document(cbor).expect("a shallow test document");
+        let value = decode_cbor(cbor).map_err(|e| value_decoder_error(&e.to_string()))?;
+        let mapper = Mapper::new(RuleIndex::build(ast), budget);
+        let fits = mapper.fits_strictly(&value, &root_name);
+        match mapper.refusal() {
+            Some(refusal) => Err(refusal),
+            None => Ok(fits),
+        }
+    })
 }
 
 /// Value-decoder reject after positional accept (same shape as validator).
@@ -177,25 +198,132 @@ pub(crate) fn value_decoder_error(message: &str) -> WalkError {
 // ============================================================
 
 pub(crate) struct RuleIndex<'a> {
-    by_name: HashMap<&'a str, &'a Rule<'a>>,
+    /// The rules of each name, by its socket prefix (none, `$`, `$$`: `m`,
+    /// `$m` and `$$m` are three names, and `cddl_outline` names a socket
+    /// with its prefix) and then its identifier: the definition first, then
+    /// each `/=` or `//=` alternative in document order. They are the one
+    /// choice the name stands for (RFC 8610 Section 3.9), in the order the
+    /// validator tries them.
+    by_name: [HashMap<&'a str, Bodies<'a>>; 3],
+    /// The socket an identifier without a prefix stands for when no rule
+    /// is written so (`m` for `$m`): the type socket of that identifier
+    /// when it has one, else its group socket.
+    socket_of: HashMap<&'a str, usize>,
+}
+
+/// The rules of one name: most names have one, held without a vector.
+enum Bodies<'a> {
+    One(&'a Rule<'a>),
+    Many(Vec<&'a Rule<'a>>),
+}
+
+impl<'a> Bodies<'a> {
+    fn as_slice(&self) -> &[&'a Rule<'a>] {
+        match self {
+            Bodies::One(rule) => std::slice::from_ref(rule),
+            Bodies::Many(rules) => rules,
+        }
+    }
+}
+
+/// The slot of [`RuleIndex::by_name`] for the prefix of `key`.
+fn prefix_slot(key: &RuleKey<'_>) -> usize {
+    match key.prefix() {
+        "" => 0,
+        "$" => 1,
+        _ => 2,
+    }
 }
 
 impl<'a> RuleIndex<'a> {
     pub(crate) fn build(cddl_ast: &'a CDDL<'a>) -> Self {
-        let mut by_name = HashMap::with_capacity(cddl_ast.rules.len());
+        let mut by_name: [HashMap<&'a str, Bodies<'a>>; 3] = [
+            HashMap::with_capacity(cddl_ast.rules.len()),
+            HashMap::new(),
+            HashMap::new(),
+        ];
+        let mut socket_of = HashMap::new();
         for rule in &cddl_ast.rules {
-            let name = match rule {
-                Rule::Type { rule, .. } => rule.name.ident,
-                Rule::Group { rule, .. } => rule.name.ident,
+            let key = match rule {
+                Rule::Type { rule, .. } => RuleKey::of(&rule.name),
+                Rule::Group { rule, .. } => RuleKey::of(&rule.name),
             };
-            by_name.entry(name).or_insert(rule);
+            let slot = prefix_slot(&key);
+            // A type socket is what a bare identifier stands for whenever
+            // there is one, as it is for a root: a group socket never
+            // stands for a type.
+            if slot == 1 {
+                socket_of.insert(key.ident(), slot);
+            } else if slot == 2 {
+                socket_of.entry(key.ident()).or_insert(slot);
+            }
+            match by_name[slot].entry(key.ident()) {
+                std::collections::hash_map::Entry::Vacant(vacant) => {
+                    vacant.insert(Bodies::One(rule));
+                }
+                std::collections::hash_map::Entry::Occupied(mut occupied) => {
+                    let bodies = occupied.get_mut();
+                    match bodies {
+                        Bodies::One(first) => *bodies = Bodies::Many(vec![*first, rule]),
+                        Bodies::Many(rules) => rules.push(rule),
+                    }
+                }
+            }
         }
-        RuleIndex { by_name }
+        for bodies in by_name.iter_mut().flat_map(HashMap::values_mut) {
+            if let Bodies::Many(rules) = bodies {
+                // Stable: the alternatives keep their document order.
+                rules.sort_by_key(|rule| match rule {
+                    Rule::Type { rule, .. } => rule.is_type_choice_alternate,
+                    Rule::Group { rule, .. } => rule.is_group_choice_alternate,
+                });
+            }
+        }
+        RuleIndex { by_name, socket_of }
     }
 
-    pub(crate) fn get(&self, name: &str) -> Option<&'a Rule<'a>> {
-        self.by_name.get(name).copied()
+    /// The rules of the name `written` spells (`$m` for a socket).
+    pub(crate) fn get(&self, written: &str) -> Option<&[&'a Rule<'a>]> {
+        self.lookup(RuleKey::parse(written))
     }
+
+    /// The rules a reference names.
+    pub(crate) fn resolve(&self, reference: &Identifier<'_>) -> Option<&[&'a Rule<'a>]> {
+        self.lookup(RuleKey::of(reference))
+    }
+
+    fn lookup(&self, key: RuleKey<'_>) -> Option<&[&'a Rule<'a>]> {
+        let slot = prefix_slot(&key);
+        if let Some(bodies) = self.by_name[slot].get(key.ident()) {
+            return Some(bodies.as_slice());
+        }
+        if slot != 0 {
+            return None;
+        }
+        let socket = *self.socket_of.get(key.ident())?;
+        self.by_name[socket].get(key.ident()).map(Bodies::as_slice)
+    }
+}
+
+/// The type rules among a name's rules, in the order they are tried.
+fn type_rules<'r, 'a>(rules: &'r [&'a Rule<'a>]) -> impl Iterator<Item = &'a TypeRule<'a>> + 'r {
+    rules.iter().filter_map(|&rule| match rule {
+        Rule::Type { rule, .. } => Some(rule),
+        Rule::Group { .. } => None,
+    })
+}
+
+/// The group rules among a name's rules, in the order they are tried.
+fn group_rules<'r, 'a>(rules: &'r [&'a Rule<'a>]) -> impl Iterator<Item = &'a GroupRule<'a>> + 'r {
+    rules.iter().filter_map(|&rule| match rule {
+        Rule::Group { rule, .. } => Some(&**rule),
+        Rule::Type { .. } => None,
+    })
+}
+
+/// What stands for a name on the recursion guards: its first rule.
+fn rule_identity(rules: &[&Rule<'_>]) -> usize {
+    rules.first().map_or(0, |&rule| addr(rule))
 }
 
 // ============================================================
@@ -627,20 +755,70 @@ impl<'a> Mapper<'a> {
         }
     }
 
-    /// Walk the root rule (driver root; nesting is heap tasks).
-    pub(crate) fn map_by_rule_name<'v>(&'v self, cbor: &'v CborValue, name: &str) -> Mapped {
-        match self.rules.get(name) {
-            Some(Rule::Type { rule, .. }) => {
-                let spawner = Spawner::new();
-                let walk = Walk {
-                    m: self,
-                    spawner: spawner.clone(),
-                };
-                let ty = &rule.value;
-                run_root(&spawner, async move { walk.map_type(cbor, ty, 0).await })
+    /// Whether some body of the root rule `name` reads `cbor` strictly: every
+    /// entry and item accounted for, every value of its declared type.
+    #[cfg(test)]
+    pub(crate) fn fits_strictly<'v>(&'v self, cbor: &'v CborValue, name: &str) -> bool {
+        let rules = match self.rules.get(name) {
+            Some(rules) if matches!(rules.first(), Some(Rule::Type { .. })) => rules,
+            _ => &[],
+        };
+        let spawner = Spawner::new();
+        let walk = Walk {
+            m: self,
+            spawner: spawner.clone(),
+        };
+        run_root(&spawner, async move {
+            for rule in type_rules(rules) {
+                if walk
+                    .try_map_type(cbor, &rule.value, Mode::Strict, 0)
+                    .await
+                    .is_some()
+                {
+                    return true;
+                }
             }
-            _ => (self.raw(cbor), self.trace_push(TraceNode::Raw)),
-        }
+            false
+        })
+    }
+
+    /// Walk the root rule (driver root; nesting is heap tasks). Each body of
+    /// the rule is an alternative of one choice: the first that fits
+    /// strictly, else the first that fits leniently, else the value raw.
+    /// Also the body the value was read against (the first when none
+    /// fitted), or `None` when `name` is not a type rule.
+    pub(crate) fn map_by_rule_name<'v>(
+        &'v self,
+        cbor: &'v CborValue,
+        name: &str,
+    ) -> (Mapped, Option<&'a TypeRule<'a>>) {
+        let rules = match self.rules.get(name) {
+            Some(rules) if matches!(rules.first(), Some(Rule::Type { .. })) => rules,
+            _ => &[],
+        };
+        let Some(first) = type_rules(rules).next() else {
+            return ((self.raw(cbor), self.trace_push(TraceNode::Raw)), None);
+        };
+        let spawner = Spawner::new();
+        let walk = Walk {
+            m: self,
+            spawner: spawner.clone(),
+        };
+        run_root(&spawner, async move {
+            for mode in [Mode::Strict, Mode::Lenient] {
+                for rule in type_rules(rules) {
+                    if let Some(mapped) = walk.try_map_type(cbor, &rule.value, mode, 0).await {
+                        return (mapped, Some(rule));
+                    }
+                }
+            }
+            let raw = if walk.m.refused() {
+                Value::Null
+            } else {
+                walk.m.raw(cbor)
+            };
+            ((raw, walk.push(TraceNode::Raw)), Some(first))
+        })
     }
 }
 
@@ -828,6 +1006,58 @@ fn flatten_entry<'a>(ge: &'a GroupEntry<'a>, out: &mut Vec<&'a GroupEntry<'a>>) 
         }
     }
 }
+
+/// Member entries of `ge` as a map reads them: an inline group holding a
+/// single choice and no occurrence indicator is spliced in place; one
+/// holding a choice between groups, or repeated, stays an entry of its own,
+/// read as the choice it is.
+fn flatten_map_entry<'a>(ge: &'a GroupEntry<'a>, out: &mut Vec<&'a GroupEntry<'a>>) {
+    type Entries<'a> = std::slice::Iter<'a, (GroupEntry<'a>, OptionalComma<'a>)>;
+    fn spliced<'a>(ge: &'a GroupEntry<'a>) -> Option<Entries<'a>> {
+        match ge {
+            GroupEntry::InlineGroup {
+                group, occur: None, ..
+            } if group.group_choices.len() == 1 => {
+                Some(group.group_choices[0].group_entries.iter())
+            }
+            _ => None,
+        }
+    }
+    let mut open: Vec<Entries<'a>> = match spliced(ge) {
+        Some(entries) => vec![entries],
+        None => {
+            out.push(ge);
+            return;
+        }
+    };
+    while let Some(entries) = open.last_mut() {
+        match entries.next() {
+            None => {
+                open.pop();
+            }
+            Some((ge, _)) => match spliced(ge) {
+                Some(inner) => open.push(inner),
+                None => out.push(ge),
+            },
+        }
+    }
+}
+
+/// Member entries of one group choice as a map reads them.
+fn flatten_map_choice<'a>(choice: &'a GroupChoice<'a>) -> Vec<&'a GroupEntry<'a>> {
+    let mut out = Vec::with_capacity(choice.group_entries.len());
+    for (ge, _) in &choice.group_entries {
+        flatten_map_entry(ge, &mut out);
+    }
+    out
+}
+
+/// One alternative of a choice between groups read against a map: its
+/// members, and the generic parameters in scope while they are read.
+type MapBody<'a> = (
+    Option<&'a Option<GenericParams<'a>>>,
+    Vec<&'a GroupEntry<'a>>,
+);
 
 /// Member entries of one group choice (inline groups spliced).
 fn flatten_choice<'a>(choice: &'a GroupChoice<'a>) -> Vec<&'a GroupEntry<'a>> {
@@ -1021,7 +1251,7 @@ impl<'a: 'v, 'v> Walk<'a, 'v> {
                 generic_args,
                 ..
             } => {
-                self.try_map_typename(cbor, ident.ident, generic_args.as_ref(), mode, hops)
+                self.try_map_typename(cbor, ident, generic_args.as_ref(), mode, hops)
                     .await
             }
 
@@ -1056,7 +1286,7 @@ impl<'a: 'v, 'v> Walk<'a, 'v> {
             },
             Type2::TextValue { value, .. } => match cbor {
                 CborValue::Text(t) if t == value.as_ref() => {
-                    Some((Value::String(t.clone()), self.push(TraceNode::Leaf)))
+                    Some((Value::String(t.to_string()), self.push(TraceNode::Leaf)))
                 }
                 _ => None,
             },
@@ -1080,7 +1310,7 @@ impl<'a: 'v, 'v> Walk<'a, 'v> {
             Type2::ChoiceFromGroup { ident, .. } => {
                 // `&(group_name)` enum: matching literal entry.
                 self.m
-                    .try_enum_from_group(cbor, ident.ident)
+                    .try_enum_from_group(cbor, ident)
                     .map(|v| (v, self.push(TraceNode::Leaf)))
             }
 
@@ -1090,7 +1320,7 @@ impl<'a: 'v, 'v> Walk<'a, 'v> {
                 ..
             } => {
                 // `~rule` in type position; group unwrap is at GroupEntry.
-                self.try_map_typename(cbor, ident.ident, generic_args.as_ref(), mode, hops)
+                self.try_map_typename(cbor, ident, generic_args.as_ref(), mode, hops)
                     .await
             }
 
@@ -1099,17 +1329,20 @@ impl<'a: 'v, 'v> Walk<'a, 'v> {
         }
     }
 
-    /// Name in type/array position: generic param → prelude → type rule.
+    /// Name in type/array position: generic param → prelude → type rule,
+    /// each body of the rule an alternative of one choice.
     async fn try_map_typename(
         &self,
         cbor: &'v CborValue,
-        name: &'a str,
+        ident: &'a Identifier<'a>,
         generic_args: Option<&'a GenericArgs<'a>>,
         mode: Mode,
         hops: usize,
     ) -> Option<Mapped> {
-        // Generic param (no args) → prelude scalar (no args) → rule.
-        if generic_args.is_none() {
+        let name = ident.ident;
+        // Generic param (no args) → prelude scalar (no args) → rule. A
+        // socket (`$m`) is neither a parameter nor a prelude name.
+        if generic_args.is_none() && ident.socket.is_none() {
             if let Some(binding) = self.m.lookup_binding(name) {
                 let _hop = self.m.substitute()?;
                 let walk = self.clone();
@@ -1134,23 +1367,30 @@ impl<'a: 'v, 'v> Walk<'a, 'v> {
                 return Some((prim, self.push(TraceNode::Prelude { container })));
             }
         }
-        match self.m.rules.get(name) {
-            Some(r) => match r {
-                Rule::Type { rule, .. } => {
-                    let _guard = self.m.enter(&self.m.mapping, addr(r), addr(cbor), hops)?;
-                    let walk = self.clone();
-                    let (value, inner) = self
-                        .above(async move {
+        let rules = self.m.rules.resolve(ident)?;
+        match rules.first()? {
+            Rule::Type { .. } => {
+                let _guard =
+                    self.m
+                        .enter(&self.m.mapping, rule_identity(rules), addr(cbor), hops)?;
+                let walk = self.clone();
+                let (value, inner, rule) = self
+                    .above(async move {
+                        for rule in type_rules(rules) {
                             let _scope = walk.m.enter_scope(&rule.generic_params, generic_args);
-                            walk.try_map_type(cbor, &rule.value, mode, hops + 1).await
-                        })
-                        .await?;
-                    Some((value, self.push(TraceNode::Rule { rule, inner })))
-                }
-                // Group rule in type position → decline.
-                Rule::Group { .. } => None,
-            },
-            None => None,
+                            if let Some((value, inner)) =
+                                walk.try_map_type(cbor, &rule.value, mode, hops + 1).await
+                            {
+                                return Some((value, inner, rule));
+                            }
+                        }
+                        None
+                    })
+                    .await?;
+                Some((value, self.push(TraceNode::Rule { rule, inner })))
+            }
+            // Group rule in type position → decline.
+            Rule::Group { .. } => None,
         }
     }
 
@@ -1319,7 +1559,7 @@ impl<'a: 'v, 'v> Walk<'a, 'v> {
             slots: Vec::new(),
         };
 
-        for ge in flatten_choice(choice) {
+        for ge in flatten_map_choice(choice) {
             self.consume_map_entry(ge, entries, &mut ctx, mode, hops)
                 .await?;
         }
@@ -1424,6 +1664,7 @@ impl<'a: 'v, 'v> Walk<'a, 'v> {
                 };
 
                 let mut found_any = false;
+                let mut claimed = 0usize;
                 for (i, (k, v)) in entries.iter().enumerate() {
                     if ctx.used[i] {
                         continue;
@@ -1462,7 +1703,18 @@ impl<'a: 'v, 'v> Walk<'a, 'v> {
                     });
                     ctx.used[i] = true;
                     found_any = true;
+                    claimed += 1;
                     // Duplicate keys are well-formed (RFC 8949 §5.3.1); claim all.
+                }
+
+                // A member key naming a type answers for as many entries as
+                // its occurrence indicator admits; more entries of that type
+                // than that is a map the group does not describe.
+                if mode == Mode::Strict
+                    && !is_literal_member_key(mk)
+                    && claimed > occur_bounds(vmk.occur.as_ref()).1
+                {
+                    return None;
                 }
 
                 if !found_any && !is_optional {
@@ -1482,8 +1734,9 @@ impl<'a: 'v, 'v> Walk<'a, 'v> {
             }
             GroupEntry::TypeGroupname { ge, .. } => {
                 self.flatten_group_name_into_map(
-                    ge.name.ident,
+                    &ge.name,
                     ge.generic_args.as_ref(),
+                    ge.occur.as_ref(),
                     entries,
                     ctx,
                     mode,
@@ -1491,8 +1744,137 @@ impl<'a: 'v, 'v> Walk<'a, 'v> {
                 )
                 .await
             }
-            GroupEntry::InlineGroup { .. } => Some(()),
+            // What `flatten_map_entry` leaves in place: a choice between
+            // groups, or a repeated group.
+            GroupEntry::InlineGroup { group, occur, .. } => {
+                let bodies = group
+                    .group_choices
+                    .iter()
+                    .map(|choice| (None, flatten_map_choice(choice)))
+                    .collect();
+                self.consume_alternatives(bodies, None, occur.as_ref(), entries, ctx, mode, hops)
+                    .await
+            }
         }
+    }
+
+    /// Read a choice between groups against the map entries `ctx` has not
+    /// claimed, as the validator settles it (RFC 8610 Section 2.2.2).
+    ///
+    /// Once (no occurrence indicator, or `?`): of the alternatives that
+    /// hold, the one claiming the most entries is taken, the earliest of
+    /// those claiming equally many; an alternative of optional members alone
+    /// holds against any map, and taking it first would leave the entries
+    /// another alternative describes unclaimed. Repeated (`*`, `+`, `n*m`):
+    /// in each round the first alternative that holds and claims a further
+    /// entry is taken, until none does; the rounds taken must reach the
+    /// indicator's lower bound.
+    #[allow(clippy::too_many_arguments)]
+    async fn consume_alternatives(
+        &self,
+        bodies: Vec<MapBody<'a>>,
+        generic_args: Option<&'a GenericArgs<'a>>,
+        occur: Option<&'a Occurrence<'a>>,
+        entries: &'v [(CborValue, CborValue)],
+        ctx: &mut MapCtx<'a>,
+        mode: Mode,
+        hops: usize,
+    ) -> Option<()> {
+        let (min, max) = occur_bounds(occur);
+        let claimed = |ctx: &MapCtx<'a>| ctx.used.iter().filter(|used| **used).count();
+        let snapshot = |ctx: &MapCtx<'a>| (ctx.used.clone(), ctx.slots.len(), self.m.trace_mark());
+        let rollback = |ctx: &mut MapCtx<'a>, (used, slots, mark): &(Vec<bool>, usize, usize)| {
+            ctx.used.clone_from(used);
+            ctx.slots.truncate(*slots);
+            self.m.trace_discard(*mark);
+        };
+
+        if max <= 1 {
+            let base = snapshot(ctx);
+            // The alternative taken and what it claims; the alternative
+            // whose claims `ctx` holds.
+            let mut best: Option<(usize, usize)> = None;
+            let mut held = None;
+            for (i, body) in bodies.iter().enumerate() {
+                rollback(ctx, &base);
+                held = None;
+                if self
+                    .consume_body(body, generic_args, entries, ctx, mode, hops)
+                    .await
+                    .is_some()
+                {
+                    held = Some(i);
+                    let count = claimed(ctx);
+                    if best.map_or(true, |(_, most)| count > most) {
+                        best = Some((i, count));
+                    }
+                    if count == entries.len() {
+                        break;
+                    }
+                }
+            }
+            return match best {
+                Some((i, _)) if held == Some(i) => Some(()),
+                Some((i, _)) => {
+                    rollback(ctx, &base);
+                    self.consume_body(&bodies[i], generic_args, entries, ctx, mode, hops)
+                        .await
+                }
+                None => {
+                    rollback(ctx, &base);
+                    (min == 0).then_some(())
+                }
+            };
+        }
+
+        let mut rounds = 0usize;
+        while rounds < max {
+            let before = claimed(ctx);
+            let mut progressed = false;
+            for body in &bodies {
+                let mark = snapshot(ctx);
+                if self
+                    .consume_body(body, generic_args, entries, ctx, mode, hops)
+                    .await
+                    .is_some()
+                    && claimed(ctx) > before
+                {
+                    progressed = true;
+                    break;
+                }
+                rollback(ctx, &mark);
+            }
+            if !progressed {
+                break;
+            }
+            rounds += 1;
+        }
+        if rounds >= min {
+            return Some(());
+        }
+        match (mode, bodies.first()) {
+            // Leniently the first alternative stands in for what is missing.
+            (Mode::Lenient, Some(body)) => {
+                self.consume_body(body, generic_args, entries, ctx, mode, hops)
+                    .await
+            }
+            _ => None,
+        }
+    }
+
+    /// Read one alternative of [`Self::consume_alternatives`].
+    async fn consume_body(
+        &self,
+        (params, members): &MapBody<'a>,
+        generic_args: Option<&'a GenericArgs<'a>>,
+        entries: &'v [(CborValue, CborValue)],
+        ctx: &mut MapCtx<'a>,
+        mode: Mode,
+        hops: usize,
+    ) -> Option<()> {
+        let _scope = params.map(|params| self.m.enter_scope(params, generic_args));
+        self.consume_spliced_entries(members.clone(), entries, ctx, mode, hops)
+            .await
     }
 
     /// Splice a rule body's members into the map (one hop deeper).
@@ -1527,34 +1909,54 @@ impl<'a: 'v, 'v> Walk<'a, 'v> {
         out
     }
 
+    /// Splice the members of the group `ident` names into the map. The
+    /// bodies of a group rule (its definition, then each `//=`) are the
+    /// alternatives of one choice, read under the entry's occurrence
+    /// indicator by [`Self::consume_alternatives`], as the validator reads
+    /// them.
+    #[allow(clippy::too_many_arguments)]
     async fn flatten_group_name_into_map(
         &self,
-        name: &'a str,
+        ident: &'a Identifier<'a>,
         generic_args: Option<&'a GenericArgs<'a>>,
+        occur: Option<&'a Occurrence<'a>>,
         entries: &'v [(CborValue, CborValue)],
         ctx: &mut MapCtx<'a>,
         mode: Mode,
         hops: usize,
     ) -> Option<()> {
-        let Some(r) = self.m.rules.get(name) else {
+        let Some(rules) = self.m.rules.resolve(ident) else {
+            // A group socket no plug fills matches no entry (RFC 8610
+            // Section 3.9): it holds only where it may occur zero times.
+            if mode == Mode::Strict && RuleKey::of(ident).prefix() == "$$" {
+                return (occur_bounds(occur).0 == 0).then_some(());
+            }
             return Some(());
         };
-        let _guard = self
-            .m
-            .enter(&self.m.mapping, addr(r), entries.as_ptr() as usize, hops)?;
-        match r {
-            Rule::Group { rule, .. } => {
-                let _scope = self.m.enter_scope(&rule.generic_params, generic_args);
-                let mut spliced = Vec::new();
-                flatten_entry(&rule.entry, &mut spliced);
-                self.consume_spliced_entries(spliced, entries, ctx, mode, hops + 1)
+        let _guard = self.m.enter(
+            &self.m.mapping,
+            rule_identity(rules),
+            entries.as_ptr() as usize,
+            hops,
+        )?;
+        match rules.first()? {
+            Rule::Group { .. } => {
+                let bodies = group_rules(rules)
+                    .map(|rule| {
+                        let mut spliced = Vec::new();
+                        flatten_map_entry(&rule.entry, &mut spliced);
+                        (Some(&rule.generic_params), spliced)
+                    })
+                    .collect();
+                self.consume_alternatives(bodies, generic_args, occur, entries, ctx, mode, hops + 1)
                     .await
             }
-            Rule::Type { rule, .. } => {
-                let _scope = self.m.enter_scope(&rule.generic_params, generic_args);
-                // Type rule as group entry → flatten Map / ParenthesizedType.
+            Rule::Type { rule: first, .. } => {
+                let _scope = self.m.enter_scope(&first.generic_params, generic_args);
+                // Type rule as group entry → flatten Map / ParenthesizedType
+                // of every body.
                 let mut spliced = Vec::new();
-                for choice in &rule.value.type_choices {
+                for choice in type_rules(rules).flat_map(|rule| &rule.value.type_choices) {
                     match &choice.type1.type2 {
                         Type2::Map { group, .. } => {
                             for gc in &group.group_choices {
@@ -1792,37 +2194,56 @@ impl<'a: 'v, 'v> Walk<'a, 'v> {
         let name = ge.name.ident;
         let (min, max) = occur_bounds(ge.occur.as_ref());
 
-        // Group rule splices its entries into this array.
-        if let Some(r) = self.m.rules.get(name) {
-            if let Rule::Group { rule, .. } = r {
-                let _guard =
-                    self.m
-                        .enter(&self.m.mapping, addr(r), items.as_ptr() as usize, hops)?;
-                let _scope = self
-                    .m
-                    .enter_scope(&rule.generic_params, ge.generic_args.as_ref());
-                let mut spliced = Vec::new();
-                flatten_entry(&rule.entry, &mut spliced);
-                let spliced = Rc::new(spliced);
+        // Group rule splices its entries into this array. Each body is an
+        // alternative: every repetition takes the first that consumes the
+        // items, as the validator tries them.
+        if let Some(rules) = self.m.rules.resolve(&ge.name) {
+            if let Some(Rule::Group { .. }) = rules.first() {
+                let _guard = self.m.enter(
+                    &self.m.mapping,
+                    rule_identity(rules),
+                    items.as_ptr() as usize,
+                    hops,
+                )?;
+                // Each body's members, flattened once; a vector only for
+                // the bodies after the first.
+                let flattened = |rule: &'a GroupRule<'a>| {
+                    let mut spliced = Vec::new();
+                    flatten_entry(&rule.entry, &mut spliced);
+                    (rule, Rc::new(spliced))
+                };
+                let mut bodies = group_rules(rules);
+                let first = bodies.next().map(flattened);
+                let more: Vec<_> = bodies.map(flattened).collect();
                 let mut taken = 0usize;
                 while taken < max {
-                    let save = ctx.checkpoint();
-                    let mark = self.m.trace_mark();
                     let before = ctx.cursor;
-                    let ok = self
-                        .consume_spliced_array_entries(
-                            Rc::clone(&spliced),
-                            items,
-                            ctx,
-                            labels,
-                            mode,
-                            hops + 1,
-                        )
-                        .await;
-                    // Zero-width repeat would loop forever.
-                    if !ok || (taken > 0 && ctx.cursor == before) {
+                    let mut consumed = false;
+                    for (rule, spliced) in first.iter().chain(&more) {
+                        let save = ctx.checkpoint();
+                        let mark = self.m.trace_mark();
+                        let _scope = self
+                            .m
+                            .enter_scope(&rule.generic_params, ge.generic_args.as_ref());
+                        let ok = self
+                            .consume_spliced_array_entries(
+                                Rc::clone(spliced),
+                                items,
+                                ctx,
+                                labels,
+                                mode,
+                                hops + 1,
+                            )
+                            .await;
+                        // Zero-width repeat would loop forever.
+                        if ok && !(taken > 0 && ctx.cursor == before) {
+                            consumed = true;
+                            break;
+                        }
                         ctx.rollback(save);
                         self.m.trace_discard(mark);
+                    }
+                    if !consumed {
                         break;
                     }
                     taken += 1;
@@ -1842,9 +2263,10 @@ impl<'a: 'v, 'v> Walk<'a, 'v> {
             let item = &items[ctx.cursor];
             let walk = self.clone();
             let generic_args = ge.generic_args.as_ref();
+            let ident = &ge.name;
             let Some((mapped, trace)) = self
                 .above(async move {
-                    walk.try_map_typename(item, name, generic_args, mode, 0)
+                    walk.try_map_typename(item, ident, generic_args, mode, 0)
                         .await
                 })
                 .await
@@ -1948,8 +2370,10 @@ impl<'a> Mapper<'a> {
         None
     }
 
-    fn try_enum_from_group(&self, cbor: &CborValue, group_name: &str) -> Option<Value> {
-        if let Some(Rule::Group { rule, .. }) = self.rules.get(group_name) {
+    /// `&group`: the literal member that equals `cbor`, over every body of
+    /// the group.
+    fn try_enum_from_group(&self, cbor: &CborValue, group: &Identifier<'_>) -> Option<Value> {
+        for rule in group_rules(self.rules.resolve(group)?) {
             if let GroupEntry::InlineGroup { group, .. } = &rule.entry {
                 for choice in &group.group_choices {
                     for (ge, _) in &choice.group_entries {
@@ -2037,11 +2461,11 @@ fn choice_label_counts<'a>(
     /// Entry run being counted, and splice source rule if any.
     struct Run<'a> {
         entries: std::vec::IntoIter<&'a GroupEntry<'a>>,
-        spliced_from: Option<&'a str>,
+        spliced_from: Option<usize>,
     }
 
     let mut counts = HashMap::new();
-    let mut open: HashSet<&'a str> = HashSet::new();
+    let mut open: HashSet<usize> = HashSet::new();
     let mut runs: Vec<Run<'a>> = vec![Run {
         entries: flatten_choice(choice).into_iter(),
         spliced_from: None,
@@ -2049,7 +2473,7 @@ fn choice_label_counts<'a>(
     while let Some(run) = runs.last_mut() {
         let Some(ge) = run.entries.next() else {
             if let Some(name) = runs.pop().and_then(|run| run.spliced_from) {
-                open.remove(name);
+                open.remove(&name);
             }
             continue;
         };
@@ -2061,14 +2485,20 @@ fn choice_label_counts<'a>(
             }
             GroupEntry::TypeGroupname { ge, .. } => {
                 let name = ge.name.ident;
-                if let Some(Rule::Group { rule, .. }) = rules.get(name) {
-                    // Spliced group rule contributes its members.
-                    if open.insert(name) {
+                let group = rules
+                    .resolve(&ge.name)
+                    .filter(|group| matches!(group.first(), Some(Rule::Group { .. })));
+                if let Some(group) = group {
+                    // Spliced group rule contributes the members of every body.
+                    let identity = rule_identity(group);
+                    if open.insert(identity) {
                         let mut spliced = Vec::new();
-                        flatten_entry(&rule.entry, &mut spliced);
+                        for rule in group_rules(group) {
+                            flatten_entry(&rule.entry, &mut spliced);
+                        }
                         runs.push(Run {
                             entries: spliced.into_iter(),
-                            spliced_from: Some(name),
+                            spliced_from: Some(identity),
                         });
                     }
                     continue;
@@ -2358,19 +2788,32 @@ impl<'a> Mapper<'a> {
     }
 
     /// `.size` on bytes/text length or uint byte-width.
+    ///
+    /// A string is sized as a whole (RFC 8610), except while a rule named in
+    /// [`crate::cbor::validation::PER_CHUNK_SIZE_RULES`] is being resolved
+    /// against that same string (the validator's
+    /// `size_control_per_chunk_rules`): an indefinite-length string there is
+    /// held to a range's upper bound one chunk at a time, and to the lower
+    /// bound (or an exact size) as a whole. The alternative chosen here is
+    /// then the one the validator accepts.
     fn size_accepts(&self, controller: &'a Type2<'a>, value: &CborValue) -> bool {
-        let Some((min, max)) = self.size_bounds(controller) else {
+        let Some(SizeBounds { min, max, range }) = self.size_bounds(controller) else {
             return true;
         };
+        let per_chunk = self.resolving_per_chunk_rule(value);
+        let string_fits = |len: usize, chunks: Option<&[usize]>| {
+            let len = len as i128;
+            len >= min
+                && match chunks {
+                    Some(chunks) if range && per_chunk => {
+                        chunks.iter().all(|c| (*c as i128) <= max)
+                    }
+                    _ => len <= max,
+                }
+        };
         match value {
-            CborValue::Bytes(b) => {
-                let n = b.len() as i128;
-                n >= min && n <= max
-            }
-            CborValue::Text(s) => {
-                let n = s.len() as i128;
-                n >= min && n <= max
-            }
+            CborValue::Bytes(b) => string_fits(b.len(), b.chunks()),
+            CborValue::Text(s) => string_fits(s.len(), s.chunks()),
             CborValue::Integer(_) | CborValue::Tag(2, _) | CborValue::Tag(3, _) => {
                 let Some(Num::Int(v)) = numeric_value(value) else {
                     return false;
@@ -2387,8 +2830,29 @@ impl<'a> Mapper<'a> {
         }
     }
 
-    /// `.size` controller as `(min, max)`; bare `N` means exactly N.
-    fn size_bounds(&self, controller: &'a Type2<'a>) -> Option<(i128, i128)> {
+    /// Whether a rule of [`crate::cbor::validation::PER_CHUNK_SIZE_RULES`] is
+    /// on the chain of rule references being resolved against `value` itself,
+    /// by the walk or by an accept test (a rule resolved against an item
+    /// enclosing `value` does not count).
+    fn resolving_per_chunk_rule(&self, value: &CborValue) -> bool {
+        let node = addr(value);
+        let per_chunk_rule = |rule: usize| {
+            crate::cbor::validation::PER_CHUNK_SIZE_RULES
+                .iter()
+                .filter_map(|name| self.rules.get(name))
+                .any(|rules| rule_identity(rules) == rule)
+        };
+        let open = |stack: &RefCell<Vec<(usize, usize)>>| {
+            stack
+                .borrow()
+                .iter()
+                .any(|&(rule, open_node)| open_node == node && per_chunk_rule(rule))
+        };
+        open(&self.mapping) || open(&self.accepting)
+    }
+
+    /// `.size` controller as inclusive bounds; bare `N` means exactly N.
+    fn size_bounds(&self, controller: &'a Type2<'a>) -> Option<SizeBounds> {
         if let Type2::ParenthesizedType { pt, .. } = controller {
             if pt.type_choices.len() != 1 {
                 return None;
@@ -2398,15 +2862,19 @@ impl<'a> Mapper<'a> {
                 if let RangeCtlOp::RangeOp { is_inclusive, .. } = &op.operator {
                     let lo = self.literal_bound(&t1.type2, 0)?.as_int()?;
                     let hi = self.literal_bound(&op.type2, 0)?.as_int()?;
-                    return Some((lo, if *is_inclusive { hi } else { hi - 1 }));
+                    return Some(SizeBounds {
+                        min: lo,
+                        max: if *is_inclusive { hi } else { hi - 1 },
+                        range: true,
+                    });
                 }
                 return None;
             }
             let n = self.literal_bound(&t1.type2, 0)?.as_int()?;
-            return Some((n, n));
+            return Some(SizeBounds::exact(n));
         }
         let n = self.literal_bound(controller, 0)?.as_int()?;
-        Some((n, n))
+        Some(SizeBounds::exact(n))
     }
 
     /// Resolve a range/control operand to a number (follow type aliases).
@@ -2435,10 +2903,12 @@ impl<'a> Mapper<'a> {
                         });
                     }
                 }
-                match self.rules.get(ident.ident) {
-                    Some(Rule::Type { rule, .. }) => {
-                        self.single_choice_bound(&rule.value, depth + 1)
-                    }
+                // A rule of several bodies is a choice, not one bound.
+                match self.rules.resolve(ident) {
+                    Some([rule]) => match rule {
+                        Rule::Type { rule, .. } => self.single_choice_bound(&rule.value, depth + 1),
+                        Rule::Group { .. } => None,
+                    },
                     _ => None,
                 }
             }
@@ -2463,12 +2933,12 @@ impl<'a> Mapper<'a> {
                 ident,
                 generic_args,
                 ..
-            } => self.typename_accepts(ident.ident, generic_args.as_ref(), value, hops),
+            } => self.typename_accepts(ident, generic_args.as_ref(), value, hops),
             Type2::Unwrap {
                 ident,
                 generic_args,
                 ..
-            } => self.typename_accepts(ident.ident, generic_args.as_ref(), value, hops),
+            } => self.typename_accepts(ident, generic_args.as_ref(), value, hops),
             Type2::Any { .. } => true,
             Type2::ParenthesizedType { pt, .. } => self.type_accepts(pt, value, hops),
             Type2::IntValue { value: v, .. } => matches!(
@@ -2500,44 +2970,53 @@ impl<'a> Mapper<'a> {
                 _ => false,
             },
             Type2::ChoiceFromGroup { ident, .. } => {
-                self.try_enum_from_group(value, ident.ident).is_some()
+                self.try_enum_from_group(value, ident).is_some()
             }
             _ => false,
         }
     }
 
+    /// Whether the type `ident` names accepts `value`: a rule when any of
+    /// its bodies does.
     fn typename_accepts(
         &self,
-        name: &str,
+        ident: &'a Identifier<'a>,
         generic_args: Option<&'a GenericArgs<'a>>,
         value: &CborValue,
         hops: usize,
     ) -> bool {
-        if generic_args.is_none() {
-            if let Some(binding) = self.lookup_binding(name) {
-                let Some(_hop) = self.substitute() else {
-                    return false;
-                };
-                return self.in_binding_scope(binding, |t1| self.type1_accepts(t1, value, hops));
-            }
-        }
-        if let Some(b) = prelude_accepts(name, value) {
-            return b;
-        }
-        match self.rules.get(name) {
-            Some(r) => match r {
-                Rule::Type { rule, .. } => {
-                    let Some(_guard) = self.enter(&self.accepting, addr(r), addr(value), hops)
-                    else {
+        // A socket (`$m`) is neither a parameter nor a prelude name.
+        if ident.socket.is_none() {
+            if generic_args.is_none() {
+                if let Some(binding) = self.lookup_binding(ident.ident) {
+                    let Some(_hop) = self.substitute() else {
                         return false;
                     };
+                    return self
+                        .in_binding_scope(binding, |t1| self.type1_accepts(t1, value, hops));
+                }
+            }
+            if let Some(b) = prelude_accepts(ident.ident, value) {
+                return b;
+            }
+        }
+        let Some(rules) = self.rules.resolve(ident) else {
+            return false;
+        };
+        match rules.first() {
+            Some(Rule::Type { .. }) => {
+                let Some(_guard) =
+                    self.enter(&self.accepting, rule_identity(rules), addr(value), hops)
+                else {
+                    return false;
+                };
+                type_rules(rules).any(|rule| {
                     let _scope = self.enter_scope(&rule.generic_params, generic_args);
                     self.type_accepts(&rule.value, value, hops + 1)
-                }
-                // Group rule cannot fill a type-position slot.
-                Rule::Group { .. } => false,
-            },
-            None => false,
+                })
+            }
+            // Group rule cannot fill a type-position slot.
+            Some(Rule::Group { .. }) | None => false,
         }
     }
 }
@@ -2634,7 +3113,7 @@ fn try_prelude(value: &CborValue, name: &str) -> Option<Value> {
             Some(Value::String(hex::encode(b)))
         }
         ("tstr", CborValue::Text(s)) | ("text", CborValue::Text(s)) => {
-            Some(Value::String(s.clone()))
+            Some(Value::String(s.to_string()))
         }
         ("bool", CborValue::Bool(b)) => Some(Value::Bool(*b)),
         ("false", CborValue::Bool(false)) => Some(Value::Bool(false)),
@@ -2671,7 +3150,7 @@ pub(crate) fn specialise_known_tag(tag: u64, payload: &CborValue) -> Option<Valu
             })
         }
         // RFC 8949 §3.4.1 — tag 0 carries a standard date-time string.
-        (0, CborValue::Text(s)) => Some(Value::String(s.clone())),
+        (0, CborValue::Text(s)) => Some(Value::String(s.to_string())),
         _ => None,
     }
 }
@@ -2704,7 +3183,7 @@ fn int_to_json(i: Integer) -> Value {
 /// Collisions (`1` vs `"1"`) are gated by `map_needs_entries`.
 pub(crate) fn json_key(k: &CborValue) -> String {
     match k {
-        CborValue::Text(s) => s.clone(),
+        CborValue::Text(s) => s.to_string(),
         CborValue::Integer(i) => {
             let v: i128 = (*i).into();
             v.to_string()
@@ -2748,7 +3227,7 @@ fn raw_scalar(v: &CborValue) -> Value {
         CborValue::Float(f) => Number::from_f64(*f)
             .map(Value::Number)
             .unwrap_or(Value::Null),
-        CborValue::Text(s) => Value::String(s.clone()),
+        CborValue::Text(s) => Value::String(s.to_string()),
         CborValue::Bytes(b) => Value::String(hex::encode(b)),
         CborValue::Simple(n) => json!({"@simple": n}),
         CborValue::Array(_) | CborValue::Map(_) | CborValue::Tag(..) => {
@@ -2915,6 +3394,26 @@ impl Mapper<'_> {
 // Tests
 // ============================================================
 
+/// The inclusive bounds of a `.size` control.
+#[derive(Clone, Copy, Debug)]
+struct SizeBounds {
+    min: i128,
+    max: i128,
+    /// Written as a range (`(lo..hi)`) rather than an exact size; only a
+    /// range's upper bound reads per chunk.
+    range: bool,
+}
+
+impl SizeBounds {
+    fn exact(n: i128) -> SizeBounds {
+        SizeBounds {
+            min: n,
+            max: n,
+            range: false,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2993,11 +3492,179 @@ mod tests {
         assert_eq!(out, json!([1, 2, 3]));
     }
 
+    /// The mapper reads `.size` per chunk exactly where the validator does:
+    /// only while `bounded_bytes` is resolved against the string itself, so
+    /// a chunked string past a range as a whole takes the alternative the
+    /// validator accepts.
+    #[test]
+    fn size_is_read_per_chunk_only_under_bounded_bytes() {
+        // 4 + 4 bytes in chunks.
+        let quarters = "815f44010203044401020304ff";
+        let out = run(
+            "x = [small: small] / [big: bytes]\nsmall = bytes .size (0..4)",
+            "x",
+            quarters,
+        );
+        assert_eq!(out, json!({"big": "0102030401020304"}));
+        let out = run(
+            "x = [small: bounded_bytes] / [big: bytes]\nbounded_bytes = bytes .size (0..4)",
+            "x",
+            quarters,
+        );
+        assert_eq!(out, json!({"small": "0102030401020304"}));
+        // The rule resolved against an item enclosing the string does not
+        // bring the string under the reading.
+        let out = run(
+            "x = [small: bounded_bytes] / [big: [bytes]]\nbounded_bytes = [bytes .size (0..4)]",
+            "x",
+            &format!("81{}", quarters),
+        );
+        assert_eq!(out, json!({"big": ["0102030401020304"]}));
+    }
+
     #[test]
     fn type_choice_picks_first_matching_alternative() {
         // int | tstr — give it an int, get an int.
         assert_eq!(run("v = int / tstr", "v", "182a"), json!(42));
         assert_eq!(run("v = int / tstr", "v", "6568656c6c6f"), json!("hello"));
+    }
+
+    #[test]
+    fn every_body_of_a_type_rule_is_an_alternative_of_one_choice() {
+        let socket = "$m /= {1: uint}\n$m /= {3: tstr}";
+        // The root, named as written or by its identifier.
+        for root in ["$m", "m"] {
+            assert_eq!(run(socket, root, "a1036178"), json!({"3": "x"}), "{}", root);
+        }
+        // The first body that fits still wins.
+        assert_eq!(run(socket, "$m", "a10105"), json!({"1": 5}));
+        // Neither fits: read leniently against the first, as a choice is.
+        assert_eq!(
+            run(socket, "$m", "a10301"),
+            json!({"1": null, "@extra": {"3": 1}})
+        );
+        // A later body that fits beats an earlier one that fits only leniently.
+        assert_eq!(
+            run(
+                "$m /= {1: uint}\n$m /= {1: uint, 2: uint}",
+                "$m",
+                "a201050206"
+            ),
+            json!({"1": 5, "2": 6})
+        );
+        // Three bodies, the third fitting.
+        assert_eq!(
+            run(
+                "$m /= {1: uint}\n$m /= {2: bool}\n$m /= {3: tstr}",
+                "$m",
+                "a1036178"
+            ),
+            json!({"3": "x"})
+        );
+        // A definition extended with `/=`.
+        assert_eq!(
+            run("m = {1: uint}\nm /= {3: tstr}", "m", "a1036178"),
+            json!({"3": "x"})
+        );
+        // Referenced from a rule and from a map value.
+        assert_eq!(
+            run(
+                "start = $m\n$m /= {1: uint}\n$m /= {3: tstr}",
+                "start",
+                "a1036178"
+            ),
+            json!({"3": "x"})
+        );
+        assert_eq!(
+            run(
+                "start = {5: $m}\n$m /= {1: uint}\n$m /= {3: tstr}",
+                "start",
+                "a105a1036178"
+            ),
+            json!({"5": {"3": "x"}})
+        );
+        // A key accepted by any body of the socket that types it.
+        assert_eq!(
+            run(
+                "start = {* $k => uint}\n$k /= 1\n$k /= 3",
+                "start",
+                "a10307"
+            ),
+            json!({"3": 7})
+        );
+    }
+
+    #[test]
+    fn a_reference_names_the_rule_written_so() {
+        // `$m` and `m` are two rules: each reference reaches its own (the
+        // socket's array is labelled only when `$m` reaches the socket).
+        let both = "start = [$m, m]\nm = uint\n$m /= [x: uint]";
+        assert_eq!(run(both, "start", "8281050a"), json!([{"x": 5}, 10]));
+        // A name no rule is written as still reaches the socket of that identifier.
+        assert_eq!(
+            run("start = [m]\n$m /= tstr", "start", "816178"),
+            json!({"m": "x"})
+        );
+    }
+
+    #[test]
+    fn a_group_rule_splices_the_first_body_that_fits() {
+        // In a map.
+        let map = "start = {$$g}\n$$g //= (1: uint)\n$$g //= (3: tstr)";
+        assert_eq!(run(map, "start", "a1036178"), json!({"3": "x"}));
+        assert_eq!(run(map, "start", "a10105"), json!({"1": 5}));
+        assert_eq!(
+            run(
+                "start = {g}\ng = (1: uint)\ng //= (3: tstr)",
+                "start",
+                "a1036178"
+            ),
+            json!({"3": "x"})
+        );
+        // In an array.
+        let array = "start = [$$g]\n$$g //= (a: uint)\n$$g //= (b: tstr, c: tstr)";
+        assert_eq!(
+            run(array, "start", "8261786179"),
+            json!({"b": "x", "c": "y"})
+        );
+        assert_eq!(run(array, "start", "8105"), json!({"a": 5}));
+    }
+
+    #[test]
+    fn a_group_choice_in_a_map_takes_the_alternative_claiming_the_most_entries() {
+        // An optional-only first body holds vacuously; the body that claims
+        // the entry is the one the validator settles on.
+        let extended = "start = {g}\ng = (? 1: uint)\ng //= (3: tstr)";
+        assert_eq!(run(extended, "start", "a1036178"), json!({"3": "x"}));
+        assert_eq!(run(extended, "start", "a10105"), json!({"1": 5}));
+        // The same choice written out, beside another entry.
+        let inline = "start = {c: 1, g}\ng = (? a: uint // b: tstr)";
+        assert_eq!(
+            run(
+                inline,
+                "start",
+                "a2616301616261 78".replace(' ', "").as_str()
+            ),
+            json!({"c": 1, "b": "x"})
+        );
+        assert_eq!(run(inline, "start", "a1616301"), json!({"c": 1}));
+        // Repeated, each round may take another alternative.
+        let repeated = "start = {* $$g}\n$$g //= (1: uint)\n$$g //= (3: tstr)";
+        assert_eq!(
+            run(repeated, "start", "a2010503 6178".replace(' ', "").as_str()),
+            json!({"1": 5, "3": "x"})
+        );
+        assert_eq!(run(repeated, "start", "a0"), json!({}));
+    }
+
+    #[test]
+    fn a_type_socket_keys_a_map_through_every_plug() {
+        let schema = "start = {* $k => uint}\n$k /= 1\n$k /= 3";
+        assert_eq!(run(schema, "start", "a10307"), json!({"3": 7}));
+        assert_eq!(
+            run(schema, "start", "a2010703 07".replace(' ', "").as_str()),
+            json!({"1": 7, "3": 7})
+        );
     }
 
     #[test]

@@ -24,11 +24,15 @@ use std::convert::TryFrom;
 /// Containers are heap-held; JSON write/drop (`crate::deep_json`) is
 /// iterative — this bound is memory, not stack. Measured on nested
 /// single-element arrays: ~1.9 KB tree + ~135 B JSON + ~200 B host heap
-/// per level. At this depth: ~31 MB tree, ~2.2 MB text, ~38 MB peak
+/// per level. At this depth: ~62 MB tree, ~4.4 MB text, ~76 MB peak
 /// linear memory (never returned once grown). Without a bound, 2 MB of
 /// hex input could open ~10⁶ levels. Exceeding it is an implementation
 /// limit; the decoded prefix is returned incomplete.
-pub(crate) const MAX_CBOR_DECODE_NESTING_DEPTH: usize = 16_384;
+///
+/// Twice the depth of the deepest native script a maximum-size
+/// transaction can carry (~5.4k script levels ≈ 10.9k CBOR levels) with
+/// room for synthetic inputs of about 16k script levels.
+pub(crate) const MAX_CBOR_DECODE_NESTING_DEPTH: usize = 32_768;
 
 /// Deepest nesting schema walkers admit, counted like
 /// [`MAX_CBOR_DECODE_NESTING_DEPTH`].
@@ -40,7 +44,11 @@ pub(crate) const MAX_CBOR_DECODE_NESTING_DEPTH: usize = 16_384;
 /// [`POSITION_MAP_DESCENT`]), which may bind first when many rule hops
 /// resolve per level. `super::stack_calibration` checks walkers stay
 /// within a small stack at this depth.
-pub(crate) const MAX_CBOR_NESTING_DEPTH: usize = 16_384;
+///
+/// The descent budgets are products of this bound and fit a 32-bit
+/// `usize` (the wasm target) only while it stays below ~95k levels;
+/// `the_descent_budgets_fit_a_32_bit_usize` checks that.
+pub(crate) const MAX_CBOR_NESTING_DEPTH: usize = 32_768;
 
 /// Validator nesting depth, counted like [`MAX_CBOR_NESTING_DEPTH`].
 ///
@@ -59,8 +67,8 @@ pub(crate) const MAX_CBOR_VALIDATION_NESTING_DEPTH: usize = MAX_CBOR_NESTING_DEP
 /// Each nested item charges a level; each rule hop charges a hop; the
 /// step that would exceed the budget is refused.
 ///
-/// Sized so the level bound wins for ≤2 hops/level (~320 MiB charged).
-/// Longer chains refuse shallower (~395 KB/level → ~849 levels). Failed
+/// Sized so the level bound wins for ≤2 hops/level (~640 MiB charged).
+/// Longer chains refuse shallower (~395 KB/level → ~1700 levels). Failed
 /// choice alternatives are charged as they accumulate. Exceeding this
 /// is an implementation limit.
 pub(crate) const MAX_CBOR_VALIDATION_DESCENT_COST: usize =
@@ -98,22 +106,108 @@ pub(crate) const VALIDATOR_RULE_HOP_COST: usize = 6144;
 pub(crate) const MAX_CBOR_VALIDATION_WORK: usize = 4_000_000;
 
 /// Nesting depth for typed decoders (`decode_specific_type`,
-/// `get_possible_types_for_input`), counted like [`MAX_CBOR_NESTING_DEPTH`].
+/// `get_possible_types_for_input`, `get_possible_types_report`), counted
+/// like [`MAX_CBOR_NESTING_DEPTH`], through tag-24 payloads, **outside
+/// native scripts**.
 ///
-/// Those paths recurse on the host stack; overflow can leave the wasm
-/// shadow-stack pointer unrestored. Depth is scanned iteratively first;
-/// past this bound is an implementation limit. On the shipped wasm the
-/// dearest shape (a chain of one-entry maps decoded as Plutus data) walks
-/// 256 levels on a little over 256 KB of host stack, so the bound holds
-/// on a worker's ~500 KB with margin and on a main thread's ~1 MB with
-/// more; the calibration test drives the same walk on the native build.
-pub(crate) const MAX_TYPED_DECODER_NESTING_DEPTH: usize = 256;
+/// Levels inside a native script the decoded type holds where the ledger
+/// puts one (a witness set's native scripts, an auxiliary data's scripts,
+/// an output's script reference, a `NativeScript` itself; see
+/// `crate::csl_preflight::native_script_sites`) do not count: the
+/// serialization library (18) reads, clones, drops and renders native
+/// scripts without recursion, and so does every walk of them here. Such a
+/// script nests up to [`MAX_CBOR_NESTING_DEPTH`] levels (the whole input,
+/// payloads included, is held to that). Every other level counts.
+///
+/// The bound is for what still recurses once per level on the host stack
+/// in these paths (the library's reading and JSON rendering of the
+/// containers around Plutus data and metadata, and the serde rendering of
+/// the typed value); overflow traps the instance (a `RangeError` the caller
+/// cannot tell from a crash). Depth is scanned iteratively first; past
+/// this bound is an implementation limit.
+///
+/// Sized for the smallest host stack the library runs on, a cold WebKit
+/// (Safari) Web Worker: it decodes a 64-level map chain as Plutus data, as
+/// metadata, and as every type `get_possible_types_report` tries, using
+/// ~2% of the stack a trivial call leaves free. V8 hosts (Chromium workers,
+/// Node) reach well past it.
+pub(crate) const MAX_TYPED_DECODER_NESTING_DEPTH: usize = 64;
+
+/// Nesting depth for bytes the serialization library deserializes but does
+/// not render as JSON: the transaction as `validate_transaction_js`,
+/// `get_necessary_data_list_js`, `extract_hashes_from_transaction_js` and
+/// `check_block_or_tx_signatures` read it, and a validation context's
+/// script references. Counted like [`MAX_TYPED_DECODER_NESTING_DEPTH`],
+/// native scripts left out the same way (they nest up to
+/// [`MAX_CBOR_NESTING_DEPTH`]).
+///
+/// A cold WebKit Web Worker extracts the hashes of, and lists the necessary
+/// data for, a transaction whose witness datum brings it to 128 levels
+/// using ~2% of the stack a trivial call leaves free. The bound matches
+/// [`MAX_PALLAS_NESTING_DEPTH`]: the validator hands the same bytes to
+/// pallas and the evaluator.
+pub(crate) const MAX_CSL_NESTING_DEPTH: usize = 128;
+
+/// Nesting depth for bytes only pallas and the Plutus evaluator (uplc)
+/// read, never the serialization library: a validation context's inline
+/// datum, and the transaction as `get_utxo_list_from_tx`,
+/// `get_ref_script_bytes`, `execute_tx_scripts` and the phase-2 part of
+/// `validate_transaction_js` read it. Counted like
+/// [`MAX_TYPED_DECODER_NESTING_DEPTH`], through tag-24 payloads, native
+/// scripts left out the same way: the pallas-primitives this crate builds
+/// with decodes, encodes, clones, compares and drops `NativeScript` without
+/// recursion.
+///
+/// pallas decodes Plutus data and metadata recursively, one call per data
+/// level, and the evaluator converts and hashes a datum as deep. In a cold
+/// WebKit Web Worker a transaction whose redeemer is a chain of one-entry
+/// maps is evaluated to about 176 levels and read for its outputs to about
+/// 169 (a metadatum map chain); lists reach about 212–248. At 128 a cold
+/// WebKit worker reads
+/// the inputs of a transaction whose witness datum brings it to 128 levels
+/// using ~55–70% of the stack a trivial call leaves free, and validates or
+/// executes one whose redeemer does using ~62–71% (≥29% free). (On V8 the
+/// same walks reach ~970–2150 levels.)
+pub(crate) const MAX_PALLAS_NESTING_DEPTH: usize = 128;
+
+/// The clause every bounded reader's refusal ends with: native scripts are
+/// not what the bound counts.
+fn native_script_clause() -> String {
+    format!(
+        "; native scripts do not count toward it and may nest up to {} levels",
+        MAX_CBOR_NESTING_DEPTH
+    )
+}
 
 /// Human-readable refusal for typed-decoder nesting past [`MAX_TYPED_DECODER_NESTING_DEPTH`].
 pub(crate) fn typed_decoder_nesting_message(limit: usize) -> String {
     format!(
-        "CBOR nesting is deeper than the supported limit of {} levels for typed decoding",
-        limit
+        "CBOR nesting is deeper than the supported limit of {} levels for typed decoding{}",
+        limit,
+        native_script_clause()
+    )
+}
+
+/// Human-readable refusal for nesting past [`MAX_CSL_NESTING_DEPTH`] in
+/// bytes the serialization library deserializes without rendering them.
+pub(crate) fn csl_nesting_message(limit: usize) -> String {
+    format!(
+        "CBOR nesting is deeper than the supported limit of {} levels for decoding by the \
+         serialization library{}",
+        limit,
+        native_script_clause()
+    )
+}
+
+/// Human-readable refusal for nesting past [`MAX_PALLAS_NESTING_DEPTH`] in
+/// bytes only pallas and the Plutus evaluator read. Worded apart from
+/// [`typed_decoder_nesting_message`], which names the other bound.
+pub(crate) fn pallas_nesting_message(limit: usize) -> String {
+    format!(
+        "CBOR nesting is deeper than the supported limit of {} levels for decoding by pallas \
+         and the Plutus evaluator{}",
+        limit,
+        native_script_clause()
     )
 }
 
@@ -243,7 +337,7 @@ impl NestingBudget {
 /// Like the validator: rule hops restart per level (capped by
 /// [`MAX_CBOR_MAPPING_RULE_NESTING`]), so memory is budgeted separately
 /// from [`MAX_CBOR_NESTING_DEPTH`]. Sized so ≤2 hops/level hit the level
-/// bound first; longest chain ~270 KB/level → ~1000 levels. Exceeding
+/// bound first; longest chain ~270 KB/level → ~2000 levels. Exceeding
 /// this is an implementation limit (whole call refused).
 pub(crate) const MAX_CBOR_MAPPING_DESCENT_COST: usize = (MAX_CBOR_NESTING_DEPTH + 1)
     * (SCHEMA_WALKER_DESCENT.level + 2 * SCHEMA_WALKER_DESCENT.rule_hop);
@@ -252,7 +346,7 @@ pub(crate) const MAX_CBOR_MAPPING_DESCENT_COST: usize = (MAX_CBOR_NESTING_DEPTH 
 /// [`MAX_CBOR_MAPPING_DESCENT_COST`], charged via [`POSITION_MAP_DESCENT`].
 ///
 /// Replay holds emitted rows plus the positional tree, so weights are
-/// larger (~552 KB/level for the longest chain → ~1300 levels).
+/// larger (~552 KB/level for the longest chain → ~2670 levels).
 pub(crate) const MAX_CBOR_POSITION_MAP_DESCENT_COST: usize =
     (MAX_CBOR_NESTING_DEPTH + 1) * (POSITION_MAP_DESCENT.level + 2 * POSITION_MAP_DESCENT.rule_hop);
 
@@ -484,13 +578,106 @@ pub(crate) const MAX_CDDL_PARSE_WORK: u64 = 10_000;
 /// Deepest nesting in `bytes` (root = 0). Stops once past `ceiling` or
 /// at the first malformed header (reports depth of the valid prefix).
 pub(crate) fn cbor_nesting_depth_capped(bytes: &[u8], ceiling: usize) -> usize {
-    scan_cbor_shape(bytes, ceiling, usize::MAX).depth
+    scan_cbor_shape(bytes, ceiling, usize::MAX, None, &[]).depth
+}
+
+/// Embedding levels [`cbor_nesting_depth_through_embedded_capped`] follows.
+/// The typed decoders parse one level in place (an output's inline datum,
+/// a script reference, a Byron address root) and none of those payloads
+/// holds another that they parse; one more level is followed for margin.
+/// The bound keeps the scan's time and the copies of chunked payloads it
+/// splices linear in the input.
+pub(crate) const MAX_FOLLOWED_EMBEDDINGS: usize = 2;
+
+/// Deepest nesting in `bytes` (root = 0), reading every byte string under
+/// tag 24 (`#6.24(bstr)`, CBOR data item, RFC 8949 §3.4.5.1) as the item it
+/// carries, in place: the payload's root sits at the byte string's level
+/// and its items below it. An indefinite-length byte string there counts
+/// as its spliced chunks. A payload is measured as far as its bytes are
+/// well-formed, like the document itself: a decoder that parses it
+/// recurses through that prefix before it meets any fault. Stops once past
+/// `ceiling`.
+///
+/// This is the depth a decoder that parses embedded payloads eagerly
+/// recurses to: CSL and pallas read an output's `[1, #6.24(bytes)]` datum
+/// and its `#6.24(bytes)` script reference while reading the transaction.
+pub(crate) fn cbor_nesting_depth_through_embedded_capped(bytes: &[u8], ceiling: usize) -> usize {
+    cbor_nesting_depth_through_embedded_skipping(bytes, ceiling, &[], &|_, _| Vec::new())
+}
+
+/// [`cbor_nesting_depth_through_embedded_capped`] with subtrees left out:
+/// an item starting at the first offset of a `(start, end)` range of
+/// `skip` (sorted, disjoint, each one whole item of `bytes`) counts at the
+/// level it sits at and its contents are not scanned. A definite-length
+/// payload under tag 24 in `bytes` itself is scanned with the ranges
+/// `payload_skip(start, payload)` gives for it, `start` being the offset
+/// of its first byte in `bytes` (offsets in the ranges are the payload's
+/// own); deeper payloads are scanned whole.
+///
+/// This is how nesting a reader handles without recursion (a native
+/// script, read iteratively by every decoder here) is kept out of a bound
+/// that only the reader's recursive parts need.
+pub(crate) fn cbor_nesting_depth_through_embedded_skipping(
+    bytes: &[u8],
+    ceiling: usize,
+    skip: &[(usize, usize)],
+    payload_skip: &dyn Fn(usize, &[u8]) -> Vec<(usize, usize)>,
+) -> usize {
+    use std::borrow::Cow;
+
+    let mut deepest = 0usize;
+    // (document, level its root sits at, embedding levels above it,
+    //  subtrees of it left out)
+    let mut pending: Vec<(Cow<'_, [u8]>, usize, usize, Vec<(usize, usize)>)> =
+        vec![(Cow::Borrowed(bytes), 0, 0, skip.to_vec())];
+    while let Some((document, base, embedding, skipped)) = pending.pop() {
+        let mut found = Vec::new();
+        let sink = if embedding < MAX_FOLLOWED_EMBEDDINGS {
+            Some(&mut found)
+        } else {
+            None
+        };
+        let shape = scan_cbor_shape(
+            &document,
+            ceiling.saturating_sub(base),
+            usize::MAX,
+            sink,
+            &skipped,
+        );
+        deepest = deepest.max(base.saturating_add(shape.depth));
+        if deepest > ceiling {
+            break;
+        }
+        let borrowed: Option<&[u8]> = match &document {
+            Cow::Borrowed(root) => Some(*root),
+            Cow::Owned(_) => None,
+        };
+        for payload in found {
+            let (level, bytes, skipped) = match payload {
+                EmbeddedPayload::Range { level, start, end } => match borrowed {
+                    Some(root) => {
+                        let payload = &root[start..end];
+                        let skipped = if embedding == 0 {
+                            payload_skip(start, payload)
+                        } else {
+                            Vec::new()
+                        };
+                        (level, Cow::Borrowed(payload), skipped)
+                    }
+                    None => (level, Cow::Owned(document[start..end].to_vec()), Vec::new()),
+                },
+                EmbeddedPayload::Spliced { level, bytes } => (level, Cow::Owned(bytes), Vec::new()),
+            };
+            pending.push((bytes, base.saturating_add(level), embedding + 1, skipped));
+        }
+    }
+    deepest
 }
 
 /// Lower bound on position-map row items in `bytes` (excludes tag headers
 /// and indefinite-string chunks). Stops past `ceiling` or at a fault.
 pub(crate) fn cbor_item_count_capped(bytes: &[u8], ceiling: usize) -> usize {
-    scan_cbor_shape(bytes, usize::MAX, ceiling).items
+    scan_cbor_shape(bytes, usize::MAX, ceiling, None, &[]).items
 }
 
 /// One iterative header pass over a document.
@@ -501,14 +688,42 @@ struct CborShape {
     items: usize,
 }
 
+/// A byte string under tag 24 met by [`scan_cbor_shape`].
+enum EmbeddedPayload {
+    /// Definite length: the payload is `start..end` of the scanned bytes.
+    Range {
+        level: usize,
+        start: usize,
+        end: usize,
+    },
+    /// Indefinite length: the chunks, spliced in order.
+    Spliced { level: usize, bytes: Vec<u8> },
+}
+
 /// Shared scan for [`cbor_nesting_depth_capped`] and [`cbor_item_count_capped`].
-fn scan_cbor_shape(bytes: &[u8], depth_ceiling: usize, item_ceiling: usize) -> CborShape {
+/// With `embedded`, every byte string directly under tag 24 is recorded
+/// there with the level it sits at; its bytes are not scanned here.
+///
+/// An item starting at the first offset of a range of `skip` (sorted,
+/// disjoint, whole items) counts at its level as one item, and the scan
+/// resumes past the range.
+fn scan_cbor_shape(
+    bytes: &[u8],
+    depth_ceiling: usize,
+    item_ceiling: usize,
+    mut embedded: Option<&mut Vec<EmbeddedPayload>>,
+    skip: &[(usize, usize)],
+) -> CborShape {
     /// One open container.
     struct Frame {
         /// Remaining items, or `None` for indefinite (break-closed).
         remaining: Option<usize>,
         /// Whether contents nest one level deeper (false for string chunks).
         nests: bool,
+        /// Tag 24: its byte string carries an embedded payload.
+        embeds: bool,
+        /// Indefinite byte string under tag 24: its level and the chunks read so far.
+        splice: Option<(usize, Vec<u8>)>,
     }
 
     let mut stack: Vec<Frame> = Vec::new();
@@ -516,6 +731,7 @@ fn scan_cbor_shape(bytes: &[u8], depth_ceiling: usize, item_ceiling: usize) -> C
     let mut max_depth = 0usize;
     let mut items = 0usize;
     let mut i = 0usize;
+    let mut next_skip = 0usize;
 
     loop {
         // Close every container that has taken all the items it declared.
@@ -546,8 +762,17 @@ fn scan_cbor_shape(bytes: &[u8], depth_ceiling: usize, item_ceiling: usize) -> C
                     ..
                 })
             ) {
-                if stack.pop().is_some_and(|f| f.nests) {
-                    depth -= 1;
+                if let Some(frame) = stack.pop() {
+                    if frame.nests {
+                        depth -= 1;
+                    }
+                    if let (Some((level, spliced)), Some(sink)) = (frame.splice, embedded.as_mut())
+                    {
+                        sink.push(EmbeddedPayload::Spliced {
+                            level,
+                            bytes: spliced,
+                        });
+                    }
                 }
                 continue;
             }
@@ -563,12 +788,30 @@ fn scan_cbor_shape(bytes: &[u8], depth_ceiling: usize, item_ceiling: usize) -> C
             }
         }
         let chunk = matches!(stack.last(), Some(Frame { nests: false, .. }));
+        let under_tag_24 = matches!(stack.last(), Some(Frame { embeds: true, .. }));
         if let Some(Frame {
             remaining: Some(remaining),
             ..
         }) = stack.last_mut()
         {
             *remaining -= 1;
+        }
+        while next_skip < skip.len() && skip[next_skip].0 < i {
+            next_skip += 1;
+        }
+        if next_skip < skip.len() && skip[next_skip].0 == i && !chunk {
+            // A subtree left out: one item at this level.
+            let end = skip[next_skip].1;
+            next_skip += 1;
+            if end <= i || end > bytes.len() {
+                break;
+            }
+            items += 1;
+            if items > item_ceiling {
+                break;
+            }
+            i = end;
+            continue;
         }
 
         let major = initial >> 5;
@@ -595,11 +838,23 @@ fn scan_cbor_shape(bytes: &[u8], depth_ceiling: usize, item_ceiling: usize) -> C
                 break;
             }
         }
+        let embeds = embedded.is_some() && under_tag_24 && major == 2;
+        let level = depth;
 
-        let mut open = |remaining: Option<usize>, nests: bool| {
-            stack.push(Frame { remaining, nests });
+        let open = |stack: &mut Vec<Frame>,
+                    depth: &mut usize,
+                    remaining: Option<usize>,
+                    nests: bool,
+                    embeds: bool,
+                    splice: Option<(usize, Vec<u8>)>| {
+            stack.push(Frame {
+                remaining,
+                nests,
+                embeds,
+                splice,
+            });
             if nests {
-                depth += 1;
+                *depth += 1;
             }
         };
 
@@ -608,30 +863,63 @@ fn scan_cbor_shape(bytes: &[u8], depth_ceiling: usize, item_ceiling: usize) -> C
             // indefinite forms carry chunks the decoder reads in place.
             2 | 3 => match argument {
                 Some(len) => match usize::try_from(len).ok().and_then(|l| i.checked_add(l)) {
-                    Some(end) if end <= bytes.len() => i = end,
+                    Some(end) if end <= bytes.len() => {
+                        if let Some(sink) = embedded.as_mut() {
+                            if embeds {
+                                sink.push(EmbeddedPayload::Range {
+                                    level,
+                                    start: i,
+                                    end,
+                                });
+                            } else if chunk && major == 2 {
+                                if let Some(Frame {
+                                    splice: Some((_, spliced)),
+                                    ..
+                                }) = stack.last_mut()
+                                {
+                                    spliced.extend_from_slice(&bytes[i..end]);
+                                }
+                            }
+                        }
+                        i = end
+                    }
                     _ => break,
                 },
-                None => open(None, false),
+                None => open(
+                    &mut stack,
+                    &mut depth,
+                    None,
+                    false,
+                    false,
+                    embeds.then(|| (level, Vec::new())),
+                ),
             },
             4 => match argument {
                 Some(0) => {}
                 Some(len) => match usize::try_from(len) {
-                    Ok(n) => open(Some(n), true),
+                    Ok(n) => open(&mut stack, &mut depth, Some(n), true, false, None),
                     Err(_) => break,
                 },
-                None => open(None, true),
+                None => open(&mut stack, &mut depth, None, true, false, None),
             },
             5 => match argument {
                 Some(0) => {}
                 // A map of n pairs holds 2n items, all one level down.
                 Some(len) => match usize::try_from(len).ok().and_then(|n| n.checked_mul(2)) {
-                    Some(n) => open(Some(n), true),
+                    Some(n) => open(&mut stack, &mut depth, Some(n), true, false, None),
                     None => break,
                 },
-                None => open(None, true),
+                None => open(&mut stack, &mut depth, None, true, false, None),
             },
             // A tag encloses exactly one item.
-            6 => open(Some(1), true),
+            6 => open(
+                &mut stack,
+                &mut depth,
+                Some(1),
+                true,
+                argument == Some(24),
+                None,
+            ),
             // 0, 1 and 7 are complete in their header.
             _ => {}
         }
@@ -948,6 +1236,75 @@ mod tests {
         assert_eq!(depth("43818105"), 0);
     }
 
+    fn depth_through_embedded(hex: &str) -> usize {
+        cbor_nesting_depth_through_embedded_capped(&hex::decode(hex).unwrap(), usize::MAX)
+    }
+
+    /// A byte string under tag 24 is measured as the item it carries, in
+    /// place: the payload's root sits at the byte string's level.
+    #[test]
+    fn a_tag_24_payload_is_measured_where_it_is_embedded() {
+        // 24(h'818105'): the tag at 0, the bytes at 1, `[[5]]` from 1 down.
+        assert_eq!(depth("d81843818105"), 1);
+        assert_eq!(depth_through_embedded("d81843818105"), 3);
+        // A scalar payload adds nothing past the byte string's own level.
+        assert_eq!(depth_through_embedded("d8184100"), 1);
+        // Inside an output-like `[1, 24(h'8105')]`.
+        assert_eq!(depth_through_embedded("8201d818428105"), 3);
+        // Other tags keep their byte strings opaque.
+        assert_eq!(depth_through_embedded("d81943818105"), 1);
+        assert_eq!(depth_through_embedded("43818105"), 0);
+        // Tag 24 around something other than a byte string: nothing to follow.
+        assert_eq!(depth_through_embedded("d818818105"), 3);
+    }
+
+    /// An indefinite-length byte string under tag 24 counts as its spliced
+    /// chunks, as a decoder reads it.
+    #[test]
+    fn a_chunked_tag_24_payload_is_measured_as_its_spliced_chunks() {
+        // 24((_ h'8181', h'8105')): the payload `[[[5]]]` split across chunks.
+        assert_eq!(depth_through_embedded("d8185f428181428105ff"), 4);
+        assert_eq!(depth("d8185f428181428105ff"), 1);
+        // Indefinite text is not a byte string.
+        assert_eq!(depth_through_embedded("d8187f6161ff"), 1);
+    }
+
+    /// A payload counts as far as its bytes are well-formed, and payloads
+    /// inside payloads are followed up to [`MAX_FOLLOWED_EMBEDDINGS`].
+    #[test]
+    fn embedded_payloads_are_followed_through_their_well_formed_prefix_and_nesting() {
+        // `[[[` then a reserved header: three levels before the fault.
+        assert_eq!(depth_through_embedded("d818448181811c"), 4);
+        // 24(h'd818428105'): a payload holding a payload.
+        assert_eq!(depth_through_embedded("d81845d818428105"), 3);
+        // A chain of payloads deeper than the followed bound stops there.
+        let mut payload = hex::decode(nested_arrays(3)).unwrap();
+        for _ in 0..MAX_FOLLOWED_EMBEDDINGS + 3 {
+            let mut wrapped = vec![0xd8, 0x18, 0x5a];
+            wrapped.extend_from_slice(&(payload.len() as u32).to_be_bytes());
+            wrapped.extend_from_slice(&payload);
+            payload = wrapped;
+        }
+        let followed = cbor_nesting_depth_through_embedded_capped(&payload, usize::MAX);
+        assert_eq!(followed, MAX_FOLLOWED_EMBEDDINGS + 1);
+    }
+
+    /// The scan through payloads stops once past its ceiling, and a deep
+    /// payload at a shallow site is charged its full depth.
+    #[test]
+    fn the_scan_through_embedded_payloads_stops_at_the_ceiling() {
+        let inner = hex::decode(nested_arrays(5000)).unwrap();
+        let mut outer = hex::decode("8201d8185a").unwrap();
+        outer.extend_from_slice(&(inner.len() as u32).to_be_bytes());
+        outer.extend_from_slice(&inner);
+        assert_eq!(cbor_nesting_depth_capped(&outer, usize::MAX), 2);
+        assert_eq!(cbor_nesting_depth_through_embedded_capped(&outer, 10), 11);
+        assert_eq!(
+            cbor_nesting_depth_through_embedded_capped(&outer, usize::MAX),
+            5002
+        );
+    }
+
     #[test]
     fn the_scan_stops_at_the_ceiling() {
         let bytes = hex::decode(nested_arrays(5000)).unwrap();
@@ -1072,6 +1429,36 @@ mod tests {
                 + MAX_CBOR_MAPPING_RULE_NESTING * POSITION_MAP_DESCENT.rule_hop,
             552_960
         );
+    }
+
+    /// Every budget derived from the nesting bound fits the wasm target's
+    /// 32-bit `usize`, with room for one more level's charge on top.
+    #[test]
+    fn the_descent_budgets_fit_a_32_bit_usize() {
+        let validator_step = VALIDATOR_LEVEL_COST + 2 * VALIDATOR_RULE_HOP_COST;
+        for (budget, step) in [
+            (MAX_CBOR_VALIDATION_DESCENT_COST, validator_step),
+            (
+                MAX_CBOR_MAPPING_DESCENT_COST,
+                SCHEMA_WALKER_DESCENT.level + 2 * SCHEMA_WALKER_DESCENT.rule_hop,
+            ),
+            (
+                MAX_CBOR_POSITION_MAP_DESCENT_COST,
+                POSITION_MAP_DESCENT.level + 2 * POSITION_MAP_DESCENT.rule_hop,
+            ),
+        ] {
+            let with_one_more = (budget as u64) + (step as u64);
+            assert!(
+                with_one_more <= u32::MAX as u64,
+                "a descent budget of {} bytes does not fit a 32-bit usize",
+                budget
+            );
+        }
+        assert_eq!(MAX_CBOR_NESTING_DEPTH, 32_768);
+        assert_eq!(MAX_CBOR_DECODE_NESTING_DEPTH, 32_768);
+        // The CDDL fork decodes deeper than the walkers admit, so its own
+        // cap never fires first.
+        assert!(cddl::validator::cbor_value::MAX_DECODE_NESTING_DEPTH >= 2 * MAX_CBOR_NESTING_DEPTH);
     }
 
     /// Work steps are not refunded; past the limit every step fails.
@@ -1296,8 +1683,8 @@ mod tests {
     /// Max JSON bytes/level (~135 + margin).
     const WRITTEN_LEVEL_BYTES: usize = 180;
 
-    /// Max peak bytes for decode+write+free at the bound (~38 MB + margin).
-    const PEAK_BYTES: usize = 48 * 1024 * 1024;
+    /// Max peak bytes for decode+write+free at the bound (~76 MB + margin).
+    const PEAK_BYTES: usize = 96 * 1024 * 1024;
 
     /// Decode/write/free the deepest array chain; print held/written/peak/after.
     /// Driven as an ignored child of the resident-cost test.

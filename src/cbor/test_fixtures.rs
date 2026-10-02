@@ -435,7 +435,7 @@ mod fixture_tests {
     #[test]
     fn the_family_grows_and_the_largest_is_real_sized() {
         let sizes: Vec<usize> = schema_suite().iter().map(|(_, s)| s.len()).collect();
-        assert!(sizes.windows(2).all(|w| w[0] < w[1]), "{sizes:?}");
+        assert!(sizes.windows(2).all(|w| w[0] < w[1]), "{:?}", sizes);
         assert!(ledger_cddl().len() > 8_000, "{}", ledger_cddl().len());
         assert!(record_doc().len() > 2_000, "{}", record_doc().len());
     }

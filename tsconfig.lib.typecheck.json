@@ -1,0 +1,14 @@
+{
+  // `npm run lib:typecheck`: no emit, tests included, bun:test types available.
+  "extends": "./tsconfig.lib.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "declaration": false,
+    "declarationMap": false,
+    "sourceMap": false,
+    "inlineSources": false,
+    "types": ["node", "bun"]
+  },
+  "include": ["ts/**/*.ts"],
+  "exclude": ["pkg", "node_modules"]
+}

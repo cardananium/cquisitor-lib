@@ -81,17 +81,51 @@ pub fn get_error_hint(error: &Phase2Error) -> Option<String> {
         }
         Phase2Error::InlineDatumNotAllowedForPlutusV1 => {
             Some(
-                "PlutusV1 scripts do not support inline datums. If your transaction includes PlutusV1 scripts, \
-                all script inputs must use datum hashes instead of inline datums. \
-                Consider upgrading to PlutusV2 or higher to use inline datums.".to_string()
+                "PlutusV1 script contexts cannot represent inline datums: the ledger refuses a transaction that runs a \
+                PlutusV1 script while any of its inputs, reference inputs or outputs carries an inline datum. \
+                Use datum hashes there, or upgrade to PlutusV2 or higher.".to_string()
             )
         }
         Phase2Error::ReferenceInputsNotAllowedForPlutusV1 => {
             Some(
-                "PlutusV1 scripts do not support reference inputs or script references (CIP-31/CIP-33). \
-                If you need reference inputs, upgrade your script to PlutusV2 or higher. \
-                Remove any reference_inputs from the transaction body when using PlutusV1.".to_string()
+                "This is a limit of the script evaluator, not a ledger rule: in Conway the ledger builds a PlutusV1 \
+                context for a transaction with reference inputs, and for inputs or outputs that carry reference scripts; \
+                it refuses only inline datums (on inputs, reference inputs and outputs). The script was not run, so its \
+                verdict is unknown: confirm it against the chain before changing the transaction.".to_string()
             )
+        }
+        Phase2Error::UnreadableOutput { output_index, .. } => {
+            Some(format!(
+                "Output {} holds a value the node refuses while decoding the transaction. \
+                Use a well-formed Shelley address, drop tokens with quantity 0 and policies with no tokens.",
+                output_index
+            ))
+        }
+        Phase2Error::UnreadableTransactionField { field, .. } => {
+            Some(format!(
+                "The transaction's {} holds a value the node refuses while decoding the transaction, so no script \
+                runs. A withdrawal key, a proposal's return account and a treasury withdrawal key must be stake \
+                (reward) addresses: header 0xe0/0xe1 (key) or 0xf0/0xf1 (script) followed by a 28-byte hash. \
+                A rational number needs a denominator above 0.",
+                field
+            ))
+        }
+        Phase2Error::CertificateNotSupportedInPlutusV1V2 { language, .. } => {
+            Some(format!(
+                "PlutusV1 and PlutusV2 script contexts cannot represent the Conway certificates (vote delegation, \
+                combined registration-delegation, committee and DRep certificates), so the ledger refuses any \
+                transaction that runs a {} script alongside one. Move the certificate to a separate transaction, \
+                or use a PlutusV3 script.",
+                language
+            ))
+        }
+        Phase2Error::FieldNotSupportedInPlutusV1V2 { field, language } => {
+            Some(format!(
+                "PlutusV1 and PlutusV2 script contexts cannot represent the Conway body fields (voting procedures, \
+                proposal procedures, treasury donation, current treasury value), so the ledger refuses any transaction \
+                that runs a {} script and sets {}. Move it to a separate transaction, or use a PlutusV3 script.",
+                language, field
+            ))
         }
         Phase2Error::SlotTooFarInThePast { .. } => {
             Some(
@@ -129,5 +163,9 @@ pub fn get_warning_hint(warning: &Phase2Warning) -> Option<String> {
                 reported here as a baseline, adding a small safety margin (e.g., 10-20%) for variations.".to_string()
             )
         }
+        Phase2Warning::ScriptContextNotExamined { .. } => Some(
+            "The named UTxO's script reference or inline datum nests deeper than the library follows, so the \
+            scripts were not run. Nothing is known about their outcome; phase-1 results are unaffected.".to_string()
+        ),
     }
 }

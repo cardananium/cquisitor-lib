@@ -320,15 +320,13 @@ fn check_gov_action_ref(
             if !action.is_active {
                 errors.push(ValidationPhase1Error::new(
                     Phase1Error::VotingOnExpiredGovAction {
-                        expired_gov_action: local_id,
+                        expired_gov_action: local_id.clone(),
                     },
                     location.to_string(),
                 ));
             }
             // Matrix check: some voters aren't allowed for some action types.
-            if let Some(disallowed_pair) =
-                disallowed_voter_for_action(voter, &action.action_type)
-            {
+            if let Some(disallowed_pair) = disallowed_voter_for_action(voter, action, &local_id) {
                 errors.push(ValidationPhase1Error::new(
                     Phase1Error::DisallowedVoters {
                         disallowed_pairs: vec![disallowed_pair],
@@ -340,41 +338,105 @@ fn check_gov_action_ref(
     }
 }
 
-/// Conway voter × gov-action matrix (per
-/// cardano-ledger Conway/Rules/Gov.hs).
+/// Conway voter × gov-action matrix (the ledger's GOV rule,
+/// `checkDisallowedVotes` with `isStakePoolVotingAllowed`,
+/// `isCommitteeVotingAllowed` and `isDRepVotingAllowed`).
 ///
 /// Returns `Some(pair)` if the pair is disallowed.
 fn disallowed_voter_for_action(
     voter: &csl::Voter,
-    action_type: &crate::validators::common::GovernanceActionType,
+    action: &crate::validators::input_contexts::GovActionInputContext,
+    action_id: &GovernanceActionId,
 ) -> Option<(ErrVoter, GovernanceActionId)> {
     use crate::validators::common::GovernanceActionType as T;
     let is_disallowed = match voter.kind() {
-        csl::VoterKind::StakingPoolKeyHash => matches!(
-            action_type,
-            T::ParameterChangeAction
-                | T::NewConstitutionAction
-                | T::TreasuryWithdrawalsAction
-        ),
+        // Stake pools vote on a parameter change only when it changes a
+        // parameter of the security group (`paramChangeThreshold`).
+        csl::VoterKind::StakingPoolKeyHash => match action.action_type {
+            T::ParameterChangeAction => {
+                !changes_security_group(action.changed_parameters.as_deref())
+            }
+            T::NewConstitutionAction | T::TreasuryWithdrawalsAction => true,
+            _ => false,
+        },
         csl::VoterKind::ConstitutionalCommitteeHotKeyHash
         | csl::VoterKind::ConstitutionalCommitteeHotScriptHash => {
-            matches!(action_type, T::NoConfidenceAction | T::UpdateCommitteeAction)
+            matches!(
+                action.action_type,
+                T::NoConfidenceAction | T::UpdateCommitteeAction
+            )
         }
         csl::VoterKind::DRepKeyHash | csl::VoterKind::DRepScriptHash => false,
     };
     if is_disallowed {
-        Some((
-            err_voter_from_csl(voter),
-            // We don't have a gov_action_id readily here — use a zero id
-            // placeholder; the error surface is the location + voter type.
-            GovernanceActionId {
-                tx_hash: vec![0; 32],
-                index: 0,
-            },
-        ))
+        Some((err_voter_from_csl(voter), action_id.clone()))
     } else {
         None
     }
+}
+
+/// The protocol parameters of the ledger's security group, the only ones a
+/// stake pool votes on (Conway `PParams.hs`, the fields typed
+/// `PPGroups _ 'SecurityGroup`): each by its CDDL key and its spellings,
+/// normalised by [`normalise_parameter_name`].
+const SECURITY_GROUP_PARAMETERS: &[(u8, &[&str])] = &[
+    (0, &["txfeeperbyte", "minfeea", "minfeecoefficienta"]),
+    (1, &["txfeefixed", "minfeeb", "minfeeconstantb"]),
+    (2, &["maxblockbodysize", "maxblocksize", "maxbbsize"]),
+    (3, &["maxtxsize", "maxtransactionsize"]),
+    (4, &["maxblockheadersize", "maxbhsize"]),
+    (
+        17,
+        &[
+            "utxocostperbyte",
+            "coinsperutxobyte",
+            "coinsperutxosize",
+            "adaperutxobyte",
+        ],
+    ),
+    (
+        21,
+        &[
+            "maxblockexecutionunits",
+            "maxblockexunits",
+            "maxblockexmem",
+            "maxblockexsteps",
+        ],
+    ),
+    (22, &["maxvaluesize", "maxvalsize"]),
+    (30, &["govactiondeposit", "governanceactiondeposit"]),
+    (
+        33,
+        &[
+            "minfeerefscriptcostperbyte",
+            "minfeerefscriptcoinsperbyte",
+            "minfeerefscriptcoinsperbytes",
+            "refscriptcoinsperbyte",
+            "referencescriptcostperbyte",
+        ],
+    ),
+];
+
+/// A parameter name compared case-insensitively, without separators.
+fn normalise_parameter_name(name: &str) -> String {
+    name.chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .map(|c| c.to_ascii_lowercase())
+        .collect()
+}
+
+/// Whether a parameter change touching `changed` (see
+/// `GovActionInputContext::changed_parameters`) changes a parameter of the
+/// security group. Unknown (`None`) is not.
+fn changes_security_group(changed: Option<&[String]>) -> bool {
+    changed.is_some_and(|names| {
+        names.iter().any(|name| {
+            let name = normalise_parameter_name(name);
+            SECURITY_GROUP_PARAMETERS.iter().any(|(key, spellings)| {
+                name == key.to_string() || spellings.contains(&name.as_str())
+            })
+        })
+    })
 }
 
 fn validate_proposals(

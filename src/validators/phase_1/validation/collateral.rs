@@ -1,3 +1,4 @@
+use crate::js_error::JsError;
 use crate::validators::{
     helpers::{csl_tx_input_to_string, string_to_csl_address},
     input_contexts::ValidationInputContext,
@@ -32,8 +33,9 @@ impl CollateralValidator {
         tx_body: &csl::TransactionBody,
         tx_witness_set: &csl::TransactionWitnessSet,
         validation_input_context: &ValidationInputContext,
-    ) -> Self {
-        let total_input = calculate_total_input(tx_body, validation_input_context);
+    ) -> Result<Self, JsError> {
+        let total_input = calculate_total_input(tx_body, validation_input_context)
+            .map_err(|e| JsError::new(&format!("Invalid UTxO in the validation context: {}", e)))?;
         let collateral_return = calculate_total_output(tx_body);
         let total_collateral = get_total_collateral(tx_body);
         let need_collateral = is_need_collateral(tx_witness_set);
@@ -64,7 +66,7 @@ impl CollateralValidator {
             .max_collateral_inputs;
         let min_ada_for_collateral_return =
             calculate_min_ada_for_collateral_return(tx_body, validation_input_context);
-        Self {
+        Ok(Self {
             invalid_inputs,
             total_input,
             collateral_return,
@@ -75,7 +77,7 @@ impl CollateralValidator {
             max_number_of_inputs,
             need_collateral,
             min_ada_for_collateral_return,
-        }
+        })
     }
 
     pub fn validate(&self) -> ValidationResult {
@@ -131,11 +133,12 @@ impl CollateralValidator {
                 }
             }
         } else {
-            if let Some(total_input) = &self.total_input {
-                if total_input.coins < self.estimated_minimal_collateral {
+            // The collateral balance is the inputs less the collateral return.
+            if let Some(actual_collateral) = &self.actual_collateral {
+                if actual_collateral.coins < self.estimated_minimal_collateral {
                     errors.push(ValidationPhase1Error::new(
                         Phase1Error::InsufficientCollateral {
-                            total_collateral: total_input.coins,
+                            total_collateral: actual_collateral.coins,
                             required_collateral: self.estimated_minimal_collateral,
                         },
                         "transaction.body.collateral".to_string(),
@@ -214,25 +217,19 @@ impl CollateralValidator {
 fn calculate_total_input(
     tx_body: &csl::TransactionBody,
     validation_input_context: &ValidationInputContext,
-) -> Option<Value> {
-    let collateral = tx_body.collateral();
-    if let Some(collateral) = collateral {
-        let total = collateral
-            .into_iter()
-            .map(|input| {
-                let utxo = validation_input_context
-                    .find_utxo(input.transaction_id().to_hex(), input.index());
-                if let Some(utxo) = utxo {
-                    Value::new_from_common_assets(&utxo.utxo.output.amount)
-                } else {
-                    Value::new_from_coins(0)
-                }
-            })
-            .fold(Value::new_from_coins(0), |acc, value| acc + value);
-        Some(total)
-    } else {
-        None
+) -> Result<Option<Value>, String> {
+    let Some(collateral) = tx_body.collateral() else {
+        return Ok(None);
+    };
+    let mut total = Value::new_from_coins(0);
+    for input in collateral.into_iter() {
+        let utxo =
+            validation_input_context.find_utxo(input.transaction_id().to_hex(), input.index());
+        if let Some(utxo) = utxo {
+            total = total + Value::new_from_common_assets(&utxo.utxo.output.amount)?;
+        }
     }
+    Ok(Some(total))
 }
 
 fn calculate_total_output(tx_body: &csl::TransactionBody) -> Option<Value> {
@@ -264,8 +261,12 @@ fn calculate_estimated_minimal_collateral(
         .protocol_parameters
         .collateral_percentage
         .into();
-    let collateral_amount: i128 = tx_fee * collateral_percentage / 100;
-    collateral_amount
+    // The ledger's rule is `100 * collateral >= collateralPercentage * fee`
+    // (Alonzo UTXO `validateInsufficientCollateral`), and the amount it
+    // reports is rounded up: the least collateral that passes is the
+    // ceiling of `fee * collateralPercentage / 100`.
+    let scaled_fee: i128 = tx_fee.max(0) * collateral_percentage.max(0);
+    (scaled_fee + 99) / 100
 }
 
 fn is_need_collateral(tx_witness_set: &csl::TransactionWitnessSet) -> bool {

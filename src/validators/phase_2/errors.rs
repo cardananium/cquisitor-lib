@@ -95,8 +95,39 @@ pub enum Phase2Error {
     /// Inline datums are not allowed when PlutusV1 scripts are present
     InlineDatumNotAllowedForPlutusV1,
     
-    /// Reference inputs and script references are not allowed in PlutusV1
+    /// The evaluator cannot build a PlutusV1 context for a transaction with
+    /// reference inputs, or spending an output that carries a reference
+    /// script. The Conway ledger accepts both for PlutusV1 (it refuses
+    /// only inline datums), so this is the evaluator's limit, not a ledger rule.
     ReferenceInputsNotAllowedForPlutusV1,
+
+    /// A transaction output the script context cannot be built from: an
+    /// address that cannot be read, a zero token quantity or a policy with
+    /// no tokens (values the node refuses while decoding the transaction)
+    UnreadableOutput { output_index: u64, reason: String },
+
+    /// A body field other than an output the script context cannot be
+    /// built from: a reward account (withdrawal key, proposal return
+    /// account, treasury withdrawal key) that is not a stake address, or a
+    /// rational number with denominator 0 in a proposal (values the node
+    /// refuses while decoding the transaction). `field` names it, e.g.
+    /// `withdrawals[0]`, `proposal_procedures[1].gov_action.quorum`
+    UnreadableTransactionField { field: String, reason: String },
+
+    /// A Conway certificate (kinds 9-18) in a transaction that runs a
+    /// PlutusV1/V2 script: the ledger's `CertificateNotSupported`
+    CertificateNotSupportedInPlutusV1V2 {
+        certificate_index: u64,
+        certificate_type: String,
+        language: String,
+    },
+
+    /// A Conway body field (votes, proposals, treasury donation, current
+    /// treasury value) in a transaction that runs a PlutusV1/V2 script: the
+    /// ledger's `VotingProceduresFieldNotSupported`,
+    /// `ProposalProceduresFieldNotSupported`, `TreasuryDonationFieldNotSupported`
+    /// and `CurrentTreasuryFieldNotSupported`
+    FieldNotSupportedInPlutusV1V2 { field: String, language: String },
     
     /// The validity slot is too far in the past for slot-to-time conversion
     SlotTooFarInThePast { oldest_allowed: u64 },
@@ -174,7 +205,35 @@ impl Phase2Error {
                 "Inline datums are not supported in PlutusV1, use datum hash instead".to_string()
             }
             Phase2Error::ReferenceInputsNotAllowedForPlutusV1 => {
-                "Reference inputs and script references are not supported in PlutusV1".to_string()
+                "The evaluator cannot build a PlutusV1 script context for a transaction with reference inputs or spending an output with a reference script (the Conway ledger accepts both for PlutusV1; it refuses only inline datums)".to_string()
+            }
+            Phase2Error::UnreadableOutput { output_index, reason } => {
+                format!(
+                    "Output {} cannot be translated into a script context: {}",
+                    output_index, reason
+                )
+            }
+            Phase2Error::UnreadableTransactionField { field, reason } => {
+                format!(
+                    "The transaction's {} cannot be translated into a script context: {}",
+                    field, reason
+                )
+            }
+            Phase2Error::CertificateNotSupportedInPlutusV1V2 {
+                certificate_index,
+                certificate_type,
+                language,
+            } => {
+                format!(
+                    "Certificate {} ({}) is a Conway certificate, which a {} script context cannot represent (CertificateNotSupported)",
+                    certificate_index, certificate_type, language
+                )
+            }
+            Phase2Error::FieldNotSupportedInPlutusV1V2 { field, language } => {
+                format!(
+                    "The transaction body sets {}, which a {} script context cannot represent",
+                    field, language
+                )
             }
             Phase2Error::SlotTooFarInThePast { oldest_allowed } => {
                 format!(
@@ -243,6 +302,14 @@ pub enum Phase2Warning {
         expected_budget: ExUnits,
         actual_budget: ExUnits,
     },
+    /// A UTxO the transaction spends or references carries a script
+    /// reference or inline datum nested deeper than the library reads, so
+    /// no script context was built and the redeemer was not evaluated. An
+    /// implementation limit, not a finding about the transaction.
+    ScriptContextNotExamined {
+        input: String,
+        reason: String,
+    },
 }
 
 impl Phase2Warning {
@@ -252,6 +319,12 @@ impl Phase2Warning {
                 format!(
                     "Budget is bigger than expected. Expected: {:?}, Actual: {:?}",
                     expected_budget, actual_budget
+                )
+            }
+            Phase2Warning::ScriptContextNotExamined { input, reason } => {
+                format!(
+                    "The redeemer was not evaluated (implementation limit, not a finding): UTxO {} cannot enter a script context: {}",
+                    input, reason
                 )
             }
         }

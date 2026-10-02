@@ -3,7 +3,8 @@
 //!
 //! Matches Babbage/Conway collateral rules:
 //! * If the tx contains any redeemer, collateral is required
-//! * Collateral ≥ fee * collateralPercentage / 100
+//! * 100 * collateral ≥ fee * collateralPercentage, i.e. collateral ≥
+//!   ceil(fee * collateralPercentage / 100)
 //! * All collateral UTxOs must be key-locked, non-reward addresses, ADA-only
 //! * Optional `collateral_return` must satisfy min-ada
 //! * total_collateral (if declared) must equal sum(inputs) − collateral_return
@@ -84,7 +85,7 @@ fn no_redeemers_no_collateral_is_ok() {
     let witness_set = csl::TransactionWitnessSet::new();
     let ctx = preview_simple_context();
 
-    let validator = CollateralValidator::new(&body, &witness_set, &ctx);
+    let validator = CollateralValidator::new(&body, &witness_set, &ctx).expect("validator context is well-formed");
     let result = validator.validate();
 
     assert!(!validator.need_collateral);
@@ -120,7 +121,7 @@ fn script_tx_with_valid_collateral_has_no_errors_or_warnings() {
         }],
     ));
 
-    let validator = CollateralValidator::new(&body, &witness_set, &ctx);
+    let validator = CollateralValidator::new(&body, &witness_set, &ctx).expect("validator context is well-formed");
     let result = validator.validate();
 
     assert!(
@@ -151,7 +152,7 @@ fn unnecessary_collateral_on_non_script_tx_emits_warning() {
         }],
     ));
 
-    let validator = CollateralValidator::new(&body, &witness_set, &ctx);
+    let validator = CollateralValidator::new(&body, &witness_set, &ctx).expect("validator context is well-formed");
     let result = validator.validate();
 
     assert!(
@@ -170,7 +171,7 @@ fn script_tx_without_collateral_is_rejected() {
     let witness_set = witness_set_with_one_redeemer();
     let ctx = preview_simple_context();
 
-    let validator = CollateralValidator::new(&body, &witness_set, &ctx);
+    let validator = CollateralValidator::new(&body, &witness_set, &ctx).expect("validator context is well-formed");
     let result = validator.validate();
 
     assert!(validator.need_collateral);
@@ -202,7 +203,7 @@ fn insufficient_collateral_is_reported() {
         }],
     ));
 
-    let validator = CollateralValidator::new(&body, &witness_set, &ctx);
+    let validator = CollateralValidator::new(&body, &witness_set, &ctx).expect("validator context is well-formed");
     let result = validator.validate();
 
     assert!(
@@ -238,7 +239,7 @@ fn collateral_with_non_ada_assets_is_rejected() {
         ],
     ));
 
-    let validator = CollateralValidator::new(&body, &witness_set, &ctx);
+    let validator = CollateralValidator::new(&body, &witness_set, &ctx).expect("validator context is well-formed");
     let result = validator.validate();
 
     assert!(
@@ -272,7 +273,7 @@ fn too_many_collateral_inputs_is_rejected() {
         ));
     }
 
-    let validator = CollateralValidator::new(&body, &witness_set, &ctx);
+    let validator = CollateralValidator::new(&body, &witness_set, &ctx).expect("validator context is well-formed");
     let result = validator.validate();
 
     assert!(
@@ -319,7 +320,7 @@ fn calculated_collateral_with_non_ada_assets_is_rejected_when_return_present() {
         ],
     ));
 
-    let validator = CollateralValidator::new(&body, &witness_set, &ctx);
+    let validator = CollateralValidator::new(&body, &witness_set, &ctx).expect("validator context is well-formed");
     let result = validator.validate();
 
     assert!(
@@ -357,7 +358,7 @@ fn collateral_return_below_min_ada_is_rejected() {
         }],
     ));
 
-    let validator = CollateralValidator::new(&body, &witness_set, &ctx);
+    let validator = CollateralValidator::new(&body, &witness_set, &ctx).expect("validator context is well-formed");
     let result = validator.validate();
 
     assert!(
@@ -397,7 +398,7 @@ fn collateral_input_from_reward_address_emits_warning() {
         }],
     ));
 
-    let validator = CollateralValidator::new(&body, &witness_set, &ctx);
+    let validator = CollateralValidator::new(&body, &witness_set, &ctx).expect("validator context is well-formed");
     let result = validator.validate();
 
     assert!(
@@ -427,7 +428,7 @@ fn incorrect_total_collateral_field_is_rejected() {
         }],
     ));
 
-    let validator = CollateralValidator::new(&body, &witness_set, &ctx);
+    let validator = CollateralValidator::new(&body, &witness_set, &ctx).expect("validator context is well-formed");
     let result = validator.validate();
 
     assert!(
@@ -437,5 +438,96 @@ fn incorrect_total_collateral_field_is_rejected() {
         )),
         "expected IncorrectTotalCollateralField, got: {:?}",
         result.errors
+    );
+}
+
+/// The ledger requires `100 * collateral >= collateralPercentage * fee`: at
+/// an odd fee and 150 % the least collateral that passes is the ceiling of
+/// `fee * 1.5`, one lovelace above the floor.
+#[test]
+fn required_collateral_is_the_ceiling_of_the_fee_share() {
+    let fee = 274_147u64;
+    let ceiling = 411_221i128; // 274147 * 150 / 100 = 411220.5
+    let run = |collateral_lovelace: u64, declare_total: bool| {
+        let mut collateral = csl::TransactionInputs::new();
+        collateral.add(&mock_input(1));
+        let total = declare_total.then(|| collateral_lovelace);
+        let body = build_body_with_redeemer_requirement(Some(collateral), total, fee);
+        let witness_set = witness_set_with_one_redeemer();
+        let mut ctx = preview_simple_context();
+        ctx.protocol_parameters.collateral_percentage = 150;
+        ctx.utxo_set.push(mock_utxo_ctx(
+            1,
+            key_payment_address_bech32(),
+            vec![Asset {
+                unit: "lovelace".to_string(),
+                quantity: collateral_lovelace.to_string(),
+            }],
+        ));
+        let validator = CollateralValidator::new(&body, &witness_set, &ctx)
+            .expect("validator context is well-formed");
+        assert_eq!(validator.estimated_minimal_collateral, ceiling);
+        validator.validate().errors
+    };
+    for declare_total in [true, false] {
+        let errors = run(411_220, declare_total);
+        assert!(
+            errors.iter().any(|e| matches!(
+                e.error,
+                Phase1Error::InsufficientCollateral {
+                    total_collateral: 411_220,
+                    required_collateral: 411_221,
+                }
+            )),
+            "one lovelace short of the ceiling is insufficient: {:?}",
+            errors
+        );
+        let errors = run(411_221, declare_total);
+        assert!(
+            !errors
+                .iter()
+                .any(|e| matches!(e.error, Phase1Error::InsufficientCollateral { .. })),
+            "the ceiling itself suffices: {:?}",
+            errors
+        );
+    }
+}
+
+/// Without a declared total, the collateral balance compared is the inputs
+/// less the collateral return, as the ledger computes it.
+#[test]
+fn undeclared_total_collateral_is_the_inputs_less_the_return() {
+    let mut collateral = csl::TransactionInputs::new();
+    collateral.add(&mock_input(1));
+    // Fee 200_000 → 300_000 required. 5 ADA in, 4.8 ADA returned: 200_000 left.
+    let mut body = build_body_with_redeemer_requirement(Some(collateral), None, 200_000);
+    let return_address = csl::Address::from_bech32(&key_payment_address_bech32()).unwrap();
+    body.set_collateral_return(&csl::TransactionOutput::new(
+        &return_address,
+        &csl::Value::new(&csl::BigNum::from(4_800_000u64)),
+    ));
+    let witness_set = witness_set_with_one_redeemer();
+    let mut ctx = preview_simple_context();
+    ctx.utxo_set.push(mock_utxo_ctx(
+        1,
+        key_payment_address_bech32(),
+        vec![Asset {
+            unit: "lovelace".to_string(),
+            quantity: "5000000".to_string(),
+        }],
+    ));
+    let validator = CollateralValidator::new(&body, &witness_set, &ctx)
+        .expect("validator context is well-formed");
+    let errors = validator.validate().errors;
+    assert!(
+        errors.iter().any(|e| matches!(
+            e.error,
+            Phase1Error::InsufficientCollateral {
+                total_collateral: 200_000,
+                required_collateral: 300_000,
+            }
+        )),
+        "{:?}",
+        errors
     );
 }

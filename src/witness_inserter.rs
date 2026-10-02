@@ -6,6 +6,7 @@ use serde::Serialize;
 use std::collections::HashSet;
 
 use crate::bingen::wasm_bindgen;
+use crate::csl_preflight::{self, CslShape};
 use crate::js_error::JsError;
 use crate::js_value::{to_js_value, JsValue};
 
@@ -43,8 +44,7 @@ impl ExtractedWitnesses {
 /// Returns the hex of the resulting transaction.
 #[wasm_bindgen]
 pub fn add_witnesses_to_tx(tx_hex: &str, witnesses: Vec<String>) -> Result<String, JsError> {
-    let mut tx = FixedTransaction::from_hex(tx_hex)
-        .map_err(|e| JsError::new(&format!("Failed to parse transaction: {:?}", e)))?;
+    let mut tx = parse_fixed_transaction(tx_hex).map_err(|e| JsError::new(&e))?;
 
     for (i, input) in witnesses.iter().enumerate() {
         let extracted = extract_witnesses(input)
@@ -63,13 +63,16 @@ pub fn add_vkey_witnesses_to_tx(
     tx_hex: &str,
     vkey_witnesses_hex: Vec<String>,
 ) -> Result<String, JsError> {
-    let mut tx = FixedTransaction::from_hex(tx_hex)
-        .map_err(|e| JsError::new(&format!("Failed to parse transaction: {:?}", e)))?;
+    let mut tx = parse_fixed_transaction(tx_hex).map_err(|e| JsError::new(&e))?;
 
     for (i, witness_hex) in vkey_witnesses_hex.iter().enumerate() {
-        let witness = Vkeywitness::from_hex(witness_hex).map_err(|e| {
-            JsError::new(&format!("Failed to parse vkey witness at index {}: {:?}", i, e))
-        })?;
+        let witness = csl_preflight::check_cbor_hex(witness_hex, CslShape::Item)
+            .and_then(|bytes| {
+                Vkeywitness::from_bytes(bytes).map_err(|e| format!("{:?}", e))
+            })
+            .map_err(|e| {
+                JsError::new(&format!("Failed to parse vkey witness at index {}: {}", i, e))
+            })?;
         tx.add_vkey_witness(&witness);
     }
 
@@ -81,11 +84,13 @@ pub fn add_vkey_witnesses_to_tx(
 /// Use [`add_witnesses_to_tx`] if the input format may vary.
 #[wasm_bindgen]
 pub fn add_witness_set_to_tx(tx_hex: &str, witness_set_hex: &str) -> Result<String, JsError> {
-    let mut tx = FixedTransaction::from_hex(tx_hex)
-        .map_err(|e| JsError::new(&format!("Failed to parse transaction: {:?}", e)))?;
+    let mut tx = parse_fixed_transaction(tx_hex).map_err(|e| JsError::new(&e))?;
 
-    let witness_set = TransactionWitnessSet::from_hex(witness_set_hex)
-        .map_err(|e| JsError::new(&format!("Failed to parse witness set: {:?}", e)))?;
+    let witness_set = csl_preflight::check_cbor_hex(witness_set_hex, CslShape::WitnessSet)
+        .and_then(|bytes| {
+            TransactionWitnessSet::from_bytes(bytes).map_err(|e| format!("{:?}", e))
+        })
+        .map_err(|e| JsError::new(&format!("Failed to parse witness set: {}", e)))?;
 
     apply_witnesses(&mut tx, &witnesses_from_set(&witness_set));
 
@@ -128,8 +133,7 @@ fn add_witnesses_with_report_internal(
     tx_hex: &str,
     witnesses: &[String],
 ) -> Result<AddWitnessesReport, String> {
-    let mut tx = FixedTransaction::from_hex(tx_hex)
-        .map_err(|e| format!("Failed to parse transaction: {:?}", e))?;
+    let mut tx = parse_fixed_transaction(tx_hex)?;
     let tx_hash = tx.transaction_hash().to_bytes();
 
     // Public keys already in the witness set — used to dedupe and to count
@@ -264,20 +268,48 @@ fn extract_witnesses_from_bytes(bytes: &[u8]) -> Result<ExtractedWitnesses, Stri
     Err("could not decode input as a vkey witness, bootstrap witness, witness set or transaction".to_string())
 }
 
-/// Try every directly-recognised witness-bearing CBOR shape.
+/// A transaction from its hex, refused before CSL reads it when the
+/// bytes could make CSL abort (see `crate::csl_preflight`).
+fn parse_fixed_transaction(tx_hex: &str) -> Result<FixedTransaction, String> {
+    let bytes = csl_preflight::check_cbor_hex(tx_hex, CslShape::Transaction)
+        .map_err(|e| format!("Failed to parse transaction: {}", e))?;
+    FixedTransaction::from_bytes(bytes.clone()).map_err(|e| {
+        format!(
+            "Failed to parse transaction: {}",
+            csl_preflight::transaction_parse_failure(&bytes, &e)
+        )
+    })
+}
+
+/// Try every directly-recognised witness-bearing CBOR shape. Bytes that
+/// are not one well-formed item match none of them; a witness list
+/// holding a simple value is not offered to the shapes that read it.
 fn try_decode_witnesses(bytes: &[u8]) -> Option<ExtractedWitnesses> {
-    if let Ok(witness_set) = TransactionWitnessSet::from_bytes(bytes.to_vec()) {
-        let extracted = witnesses_from_set(&witness_set);
-        if !extracted.is_empty() {
-            return Some(extracted);
+    // Each shape is admitted on its own: nesting is counted as that shape
+    // reads the bytes (a witness set's or a transaction's native scripts do
+    // not count), and the witness-list and address hazards are its own.
+    let admits = |shape| csl_preflight::check_cbor(bytes, shape).is_ok();
+
+    if admits(CslShape::WitnessSet) {
+        if let Ok(witness_set) = TransactionWitnessSet::from_bytes(bytes.to_vec()) {
+            let extracted = witnesses_from_set(&witness_set);
+            if !extracted.is_empty() {
+                return Some(extracted);
+            }
         }
     }
 
-    if let Ok(tx) = FixedTransaction::from_bytes(bytes.to_vec()) {
-        let extracted = witnesses_from_set(&tx.witness_set());
-        if !extracted.is_empty() {
-            return Some(extracted);
+    if admits(CslShape::Transaction) {
+        if let Ok(tx) = FixedTransaction::from_bytes(bytes.to_vec()) {
+            let extracted = witnesses_from_set(&tx.witness_set());
+            if !extracted.is_empty() {
+                return Some(extracted);
+            }
         }
+    }
+
+    if !admits(CslShape::Item) {
+        return None;
     }
 
     if let Ok(vkey) = Vkeywitness::from_bytes(bytes.to_vec()) {
@@ -303,6 +335,12 @@ fn try_decode_witnesses(bytes: &[u8]) -> Option<ExtractedWitnesses> {
 /// array, but its first element is a byte string (the vkey), not an integer, so
 /// the two are unambiguous.
 fn unwrap_cli_key_witness(bytes: &[u8]) -> Option<Vec<u8>> {
+    // The wrapper and the witness in it are a few levels deep; the reader
+    // below recurses once per level, so deeper input is none of this shape.
+    let bound = crate::cbor::limits::MAX_CSL_NESTING_DEPTH;
+    if crate::cbor::limits::cbor_nesting_depth_capped(bytes, bound) > bound {
+        return None;
+    }
     let value: ciborium::value::Value = ciborium::de::from_reader(bytes).ok()?;
     let items = value.as_array()?;
     if items.len() != 2 || !items[0].is_integer() {

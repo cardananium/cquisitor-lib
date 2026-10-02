@@ -19,7 +19,7 @@ use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
 use std::future::Future;
 
-use cddl::ast::{Group, MemberKey, Rule, Span, Type, Type1, Type2};
+use cddl::ast::{Group, MemberKey, Span, Type, Type1, Type2};
 use cddl::validator::cbor_value::{decode_cbor, Value as CborValue};
 use serde_json::Value;
 
@@ -257,23 +257,9 @@ pub(crate) fn map_against_ast(
     cddl: &str,
     rule_name: &str,
 ) -> Result<(), sm::WalkError> {
+    // Missing and group roots are refused the same way on every export.
+    let root_name = sm::resolve_root(ast, rule_name)?;
     let rules = sm::RuleIndex::build(ast);
-    let Some(root) = rules.get(rule_name) else {
-        return Err(sm::WalkError::new(
-            "missing_rule",
-            &sm::missing_rule_message(rule_name),
-        ));
-    };
-    let Rule::Type {
-        rule: root_rule, ..
-    } = root
-    else {
-        // Group roots are rejected the same way on every export.
-        return Err(sm::WalkError::new(
-            "group_rule_root",
-            &sm::group_rule_root_message(rule_name),
-        ));
-    };
 
     // Refuse oversized docs before decoding (≈1 row per item).
     let bound = limits::MAX_CBOR_POSITION_MAP_ROWS;
@@ -298,11 +284,18 @@ pub(crate) fn map_against_ast(
 
     // schema_mapper walk for decisions; free its JSON; keep the trace.
     let mapper = sm::Mapper::new(rules, budget);
-    let (decoded, root_decision) = mapper.map_by_rule_name(&value, rule_name);
+    let ((decoded, root_decision), root_rule) = mapper.map_by_rule_name(&value, &root_name);
     drop(DeepJson::new(decoded));
     if let Some(refusal) = mapper.refusal() {
         return Err(refusal);
     }
+    // The body of the root rule the walk read the value against.
+    let Some(root_rule) = root_rule else {
+        return Err(sm::WalkError::new(
+            "missing_rule",
+            &sm::missing_rule_message(rule_name),
+        ));
+    };
     let trace = mapper.take_trace();
 
     // Truncate `out` back to `start` if replay refuses.
@@ -330,7 +323,7 @@ pub(crate) fn map_against_ast(
     pm.emit(
         Some(&*tree),
         Some(root_rule.name.span),
-        Some(rule_name),
+        Some(&root_name),
         "value",
         None,
     );
@@ -1816,6 +1809,61 @@ mod tests {
         let off = s["offset"].as_u64().unwrap() as usize;
         let len = s["length"].as_u64().unwrap() as usize;
         &cddl[off..off + len]
+    }
+
+    #[test]
+    fn a_rule_with_several_bodies_is_mapped_against_the_body_that_fits() {
+        let key_at = |entries: &[Value], path: &str| -> Value {
+            entries
+                .iter()
+                .find(|e| e["cbor_path"] == json!(path) && e["entry_role"] == json!("key"))
+                .unwrap_or_else(|| panic!("no key entry at {} in {:?}", path, paths(entries)))
+                .clone()
+        };
+        let value_at = |entries: &[Value], path: &str| -> Value {
+            entries
+                .iter()
+                .filter(|e| e["cbor_path"] == json!(path) && e["entry_role"] == json!("value"))
+                .last()
+                .unwrap_or_else(|| panic!("no value entry at {} in {:?}", path, paths(entries)))
+                .clone()
+        };
+        // The root: anchored at the name of the body that fits, its entries
+        // at that body's members.
+        let socket = "$m /= {1: uint}\n$m /= {3: tstr}";
+        for root in ["$m", "m"] {
+            let entries = run(socket, root, "a1036178");
+            let anchor = &entries[0];
+            assert_eq!(anchor["cbor_path"], json!("$"));
+            assert_eq!(anchor["cddl_byte_span"]["offset"], json!(16), "{}", root);
+            assert_eq!(snippet(socket, anchor), "$m");
+            assert_eq!(snippet(socket, &key_at(&entries, "$[3]")), "3");
+            assert_eq!(snippet(socket, &value_at(&entries, "$[3]")), "tstr");
+        }
+        // Referenced: the reference, then the body that fits.
+        let cddl = "start = {5: $m}\n$m /= {1: uint}\n$m /= {3: tstr}";
+        let entries = run(cddl, "start", "a105a1036178");
+        assert_eq!(snippet(cddl, &key_at(&entries, "$[5][3]")), "3");
+        assert_eq!(snippet(cddl, &value_at(&entries, "$[5][3]")), "tstr");
+        let body = entries
+            .iter()
+            .find(|e| e["cbor_path"] == json!("$[5]") && e["cddl_byte_span"]["offset"] == json!(32))
+            .unwrap_or_else(|| panic!("no row at the second body's name in {:?}", entries));
+        assert_eq!(snippet(cddl, body), "$m");
+        // A group socket in an array: the members of the body that fits.
+        let group = "start = [$$g]\n$$g //= (a: uint)\n$$g //= (b: tstr, c: tstr)";
+        let entries = run(group, "start", "8261786179");
+        assert!(
+            entries.iter().any(|e| e["cbor_path"] == json!("$.b")),
+            "{:?}",
+            paths(&entries)
+        );
+        assert!(
+            entries.iter().any(|e| e["cbor_path"] == json!("$.c")),
+            "{:?}",
+            paths(&entries)
+        );
+        assert!(snippet(group, entry_at(&entries, "$.c")).contains("tstr"));
     }
 
     #[test]

@@ -39,7 +39,7 @@ fn balanced_tx_produces_no_errors() {
         + tx.body().fee().to_str().parse::<i128>().unwrap();
     ctx.utxo_set[0].utxo.output.amount[0].quantity = produced.to_string();
 
-    let validator = BalanceValidator::new(&tx.body(), &ctx);
+    let validator = BalanceValidator::new(&tx.body(), &ctx).expect("validator context is well-formed");
     let result = validator.validate();
 
     assert!(
@@ -57,7 +57,7 @@ fn inflating_input_triggers_value_not_conserved() {
     let mut ctx = preview_simple_context();
     ctx.utxo_set[0].utxo.output.amount[0].quantity = "9999999999".to_string();
 
-    let validator = BalanceValidator::new(&tx.body(), &ctx);
+    let validator = BalanceValidator::new(&tx.body(), &ctx).expect("validator context is well-formed");
     let result = validator.validate();
 
     assert!(
@@ -76,7 +76,7 @@ fn deflating_input_also_triggers_value_not_conserved() {
     let mut ctx = preview_simple_context();
     ctx.utxo_set[0].utxo.output.amount[0].quantity = "100".to_string();
 
-    let validator = BalanceValidator::new(&tx.body(), &ctx);
+    let validator = BalanceValidator::new(&tx.body(), &ctx).expect("validator context is well-formed");
     let result = validator.validate();
 
     let err = result
@@ -114,7 +114,7 @@ fn treasury_value_mismatch_is_reported_when_body_declares_it() {
     ctx.utxo_set.clear();
     ctx.treasury_value = 99999;
 
-    let validator = BalanceValidator::new(&body, &ctx);
+    let validator = BalanceValidator::new(&body, &ctx).expect("validator context is well-formed");
     let result = validator.validate();
 
     assert!(
@@ -150,7 +150,7 @@ fn withdrawal_from_unknown_account_is_rejected() {
     let mut ctx = preview_simple_context();
     ctx.utxo_set.clear();
 
-    let validator = BalanceValidator::new(&body, &ctx);
+    let validator = BalanceValidator::new(&body, &ctx).expect("validator context is well-formed");
     let result = validator.validate();
 
     assert!(
@@ -198,7 +198,7 @@ fn withdrawal_from_explicitly_deregistered_account_is_rejected() {
         balance: Some(1_000), // balance field is ignored while unregistered
     });
 
-    let validator = BalanceValidator::new(&body, &ctx);
+    let validator = BalanceValidator::new(&body, &ctx).expect("validator context is well-formed");
     let result = validator.validate();
 
     assert!(
@@ -256,7 +256,7 @@ fn withdrawal_exactly_matching_balance_is_accepted() {
         balance: Some(1_000),
     });
 
-    let validator = BalanceValidator::new(&body, &ctx);
+    let validator = BalanceValidator::new(&body, &ctx).expect("validator context is well-formed");
     let result = validator.validate();
 
     assert!(
@@ -303,7 +303,7 @@ fn withdrawal_over_available_balance_is_rejected() {
         balance: Some(1_000),
     });
 
-    let validator = BalanceValidator::new(&body, &ctx);
+    let validator = BalanceValidator::new(&body, &ctx).expect("validator context is well-formed");
     let result = validator.validate();
 
     let err = result
@@ -357,7 +357,7 @@ fn withdrawal_with_unknown_balance_is_not_flagged() {
         balance: None,
     });
 
-    let validator = BalanceValidator::new(&body, &ctx);
+    let validator = BalanceValidator::new(&body, &ctx).expect("validator context is well-formed");
     let result = validator.validate();
 
     assert!(
@@ -404,7 +404,7 @@ fn withdrawal_amount_mismatch_is_rejected() {
         balance: Some(1_000),
     });
 
-    let validator = BalanceValidator::new(&body, &ctx);
+    let validator = BalanceValidator::new(&body, &ctx).expect("validator context is well-formed");
     let result = validator.validate();
 
     assert!(
@@ -432,7 +432,7 @@ fn donation_is_counted_on_the_produced_side() {
     let mut ctx = preview_simple_context();
     ctx.utxo_set.clear();
 
-    let validator = BalanceValidator::new(&body, &ctx);
+    let validator = BalanceValidator::new(&body, &ctx).expect("validator context is well-formed");
     let result = validator.validate();
 
     let err = result
@@ -489,7 +489,7 @@ fn positive_mint_adds_to_consumed_side() {
     let mut ctx = preview_simple_context();
     ctx.utxo_set.clear();
 
-    let validator = BalanceValidator::new(&body, &ctx);
+    let validator = BalanceValidator::new(&body, &ctx).expect("validator context is well-formed");
     let result = validator.validate();
 
     assert!(
@@ -547,7 +547,7 @@ fn negative_mint_burn_adds_to_produced_side() {
     );
     body.set_mint(&mint);
 
-    let validator = BalanceValidator::new(&body, &ctx);
+    let validator = BalanceValidator::new(&body, &ctx).expect("validator context is well-formed");
     let result = validator.validate();
 
     assert!(
@@ -591,7 +591,7 @@ fn key_hash_withdrawal_without_drep_delegation_is_rejected() {
         balance: Some(1_000),
     });
 
-    let validator = BalanceValidator::new(&body, &ctx);
+    let validator = BalanceValidator::new(&body, &ctx).expect("validator context is well-formed");
     let result = validator.validate();
 
     assert!(

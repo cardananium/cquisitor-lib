@@ -20,7 +20,8 @@ use serde_json::Value;
 
 use super::limits::{
     MAX_CBOR_DECODE_NESTING_DEPTH, MAX_CBOR_NESTING_DEPTH, MAX_CBOR_VALIDATION_NESTING_DEPTH,
-    MAX_CDDL_NESTING_DEPTH, MAX_EMBEDDED_DEPTH, MAX_TYPED_DECODER_NESTING_DEPTH,
+    MAX_CDDL_NESTING_DEPTH, MAX_EMBEDDED_DEPTH, MAX_PALLAS_NESTING_DEPTH,
+    MAX_CSL_NESTING_DEPTH, MAX_TYPED_DECODER_NESTING_DEPTH,
 };
 
 /// Max rule-reference chain per data item (`cddl` default, unchanged here).
@@ -72,6 +73,10 @@ const EMBEDDED_CHAIN: &str = "embedded_chain";
 const VALIDATOR_EMBEDDED_CHAIN: &str = "validator_embedded_chain";
 const CDDL_PARSER: &str = "cddl_parser";
 const TYPED_DECODER: &str = "typed_decoder";
+const PALLAS: &str = "pallas";
+const NATIVE_SCRIPTS: &str = "native_scripts";
+const NATIVE_SCRIPTS_LEAF: &str = "native_scripts_leaf";
+const NATIVE_SCRIPTS_DEEP: &str = "native_scripts_deep";
 const REFUSAL: &str = "refusal";
 
 /// `levels` nested single-element arrays around `5`.
@@ -613,7 +618,7 @@ fn walk(name: &str) {
         // Past-bound input refused before the walk (cheap stack).
         REFUSAL => {
             // Far past the bound so an unguarded walker would overflow hard.
-            let bytes = hex::decode(nested_arrays_hex(20_000)).unwrap();
+            let bytes = hex::decode(nested_arrays_hex(MAX_CBOR_DECODE_NESTING_DEPTH + 20_000)).unwrap();
 
             let err = decoder::decode_cbor_to_value(&bytes)
                 .err()
@@ -674,6 +679,57 @@ fn walk(name: &str) {
                 decode_specific_type(doc, name, params())
                     .unwrap_or_else(|e| panic!("{} at the bound: {}", name, e));
             }
+            // The serialization library without rendering, at its own
+            // bound: a transaction whose witness datum brings it there.
+            let datum_depth = MAX_CSL_NESTING_DEPTH - 3;
+            for datum in [nested_arrays_hex(datum_depth), nested_maps_hex(datum_depth)] {
+                let tx_hex = format!("84a3008001800200a10481{datum}f5f6");
+                crate::hash_extractor::extract_hashes_from_transaction(&tx_hex)
+                    .unwrap_or_else(|e| panic!("a transaction at the CSL bound: {}", e));
+            }
+        }
+
+        // pallas' recursive decoders, as the exports that read with pallas
+        // alone reach them: a transaction whose witness datum brings it to
+        // the bound (array, witness set map, datum list: three levels
+        // above), as a list chain and as a map chain, and a validation
+        // context's inline datum at the bound.
+        PALLAS => {
+            use crate::plutus::execute_tx_scripts::get_utxo_list_from_tx;
+            let datum_depth = MAX_PALLAS_NESTING_DEPTH - 3;
+            for datum in [nested_arrays_hex(datum_depth), nested_maps_hex(datum_depth)] {
+                let tx_hex = format!("84a3008001800200a10481{datum}f5f6");
+                get_utxo_list_from_tx(&tx_hex)
+                    .unwrap_or_else(|e| panic!("a transaction at the pallas bound: {}", e));
+            }
+            let mut utxo: crate::common::UTxO = serde_json::from_str(
+                crate::validators::tests::fixtures::PREVIEW_SIMPLE_INPUT_UTXO,
+            )
+            .expect("the fixture UTxO reads");
+            for datum in [
+                nested_arrays_hex(MAX_PALLAS_NESTING_DEPTH),
+                nested_maps_hex(MAX_PALLAS_NESTING_DEPTH),
+            ] {
+                utxo.output.plutus_data = Some(datum);
+                crate::plutus::data_mapper::to_pallas_utxos(std::slice::from_ref(&utxo))
+                    .unwrap_or_else(|e| panic!("a context datum at the pallas bound: {}", e));
+            }
+        }
+
+        // Native scripts are exempt from the typed, CSL and pallas bounds:
+        // every entry point reads them without recursion. The deepest a
+        // transaction's script reference admits under the walkers' bound
+        // (the payload's `[0, script]` sits five levels down; a script
+        // level is two CBOR levels), through every entry point.
+        NATIVE_SCRIPTS => {
+            let levels = (MAX_CBOR_NESTING_DEPTH - 8) / 2;
+            crate::validators::tests::deep_native_script_tests::every_entry_point(levels);
+        }
+        NATIVE_SCRIPTS_LEAF => {
+            crate::validators::tests::deep_native_script_tests::every_entry_point(1);
+        }
+        NATIVE_SCRIPTS_DEEP => {
+            crate::validators::tests::deep_native_script_tests::every_entry_point(3000);
         }
 
         other => panic!("no walk named {}", other),
@@ -813,11 +869,49 @@ fn the_decoder_fits_its_stack_budget_at_its_bound() {
     fits(DECODER, STACK_BUDGET);
 }
 
-/// The typed decoders are recursive, so their bound is the one that is
-/// held to a stack rather than shown to cost none.
+/// The typed decoders (and the serialization library at its own bound)
+/// are recursive, so their bounds are held to a stack rather than shown
+/// to cost none. The bounds themselves are set by what a WebKit worker's
+/// stack holds (see `limits`); this checks the native build stays inside
+/// the budget at them.
 #[test]
 fn the_typed_decoders_fit_their_stack_budget_at_their_bound() {
     fits(TYPED_DECODER, STACK_BUDGET);
+}
+
+/// pallas' decoders recurse like the typed decoders: at their bound they
+/// fit the same budget.
+#[test]
+fn the_pallas_decoders_fit_their_stack_budget_at_their_bound() {
+    fits(PALLAS, STACK_BUDGET);
+}
+
+/// Every entry point takes a native script nested to the walkers' bound
+/// within the budget.
+#[test]
+fn native_scripts_at_the_walkers_bound_fit_the_stack_budget() {
+    fits(NATIVE_SCRIPTS, STACK_BUDGET);
+}
+
+/// A transaction whose native scripts nest 3,000 levels deep goes through
+/// every entry point on about the stack one nested a single level needs:
+/// native-script nesting costs none of them stack.
+#[test]
+fn nesting_costs_the_native_script_readers_no_stack() {
+    let floor = 16 * 1024;
+    let leaf = smallest_surviving_stack_above(NATIVE_SCRIPTS_LEAF, floor)
+        .expect("a one-level script goes through on some stack");
+    let deep = smallest_surviving_stack_above(NATIVE_SCRIPTS_DEEP, floor);
+    assert!(
+        deep.is_some_and(|deep| deep <= 2 * leaf),
+        "the entry points return on {} bytes for a one-level native script but need {} for \
+         3,000 levels: native-script nesting is costing them stack again",
+        leaf,
+        deep.map_or_else(
+            || format!("more than {}", floor.saturating_mul(64)),
+            |n| n.to_string()
+        ),
+    );
 }
 
 /// Deepest decode must fit on ~the same stack as a leaf (no frame/level).

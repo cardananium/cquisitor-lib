@@ -6,7 +6,7 @@
 //! * Execution units ≤ maxTxExUnits
 //! * Reference scripts ≤ 200 KiB
 //! * Inputs non-empty
-//! * current_slot ∈ [validityStart, ttl]
+//! * validityStart ≤ current_slot < ttl
 //! * All inputs unspent
 //! * Reference inputs don't overlap with spending inputs
 
@@ -399,4 +399,46 @@ fn unsorted_inputs_warning_fires_for_out_of_order_inputs() {
         "expected InputsAreNotSorted warning, got: {:?}",
         result.warnings
     );
+}
+
+fn interval_errors(start: Option<u64>, ttl: Option<u64>, slot: u64) -> bool {
+    let mut inputs = csl::TransactionInputs::new();
+    inputs.add(&csl::TransactionInput::new(
+        &csl::TransactionHash::from_bytes(vec![0x03; 32]).unwrap(),
+        0,
+    ));
+    let mut body = csl::TransactionBody::new_tx_body(
+        &inputs,
+        &csl::TransactionOutputs::new(),
+        &csl::BigNum::from(0u64),
+    );
+    if let Some(s) = start {
+        body.set_validity_start_interval_bignum(&csl::BigNum::from(s));
+    }
+    if let Some(t) = ttl {
+        body.set_ttl(&csl::BigNum::from(t));
+    }
+    let witness_set = csl::TransactionWitnessSet::new();
+    let mut ctx = preview_simple_context();
+    ctx.slot = slot;
+    let validator = TransactionLimitsValidator::new(10, &body, &witness_set, &ctx).unwrap();
+    validator
+        .validate()
+        .errors
+        .iter()
+        .any(|e| matches!(e.error, Phase1Error::OutsideValidityIntervalUTxO { .. }))
+}
+
+#[test]
+fn validity_interval_is_half_open_at_the_ttl() {
+    // The ttl slot itself is already outside the interval.
+    assert!(!interval_errors(None, Some(500), 499), "slot 499 < ttl 500");
+    assert!(interval_errors(None, Some(500), 500), "slot == ttl is outside");
+    assert!(interval_errors(None, Some(500), 501), "slot > ttl");
+    // The start bound is inclusive.
+    assert!(!interval_errors(Some(100), Some(500), 100), "slot == start is inside");
+    assert!(interval_errors(Some(100), Some(500), 99), "slot < start");
+    assert!(interval_errors(Some(100), Some(500), 500), "slot == ttl with a start");
+    assert!(!interval_errors(Some(100), None, 1_000_000), "no ttl");
+    assert!(!interval_errors(None, None, 0), "no bounds");
 }

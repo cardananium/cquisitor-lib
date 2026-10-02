@@ -1,3 +1,4 @@
+use crate::js_error::JsError;
 use crate::validators::common::Value;
 use crate::validators::helpers::credential_to_bech32_reward_address;
 use crate::validators::input_contexts::ValidationInputContext;
@@ -111,8 +112,9 @@ impl<'a> BalanceValidator<'a> {
     pub fn new(
         tx_body: &csl::TransactionBody,
         validation_input_context: &'a ValidationInputContext,
-    ) -> Self {
-        let total_inputs = calculate_total_inputs(tx_body, validation_input_context);
+    ) -> Result<Self, JsError> {
+        let total_inputs = calculate_total_inputs(tx_body, validation_input_context)
+            .map_err(|e| JsError::new(&format!("Invalid UTxO in the validation context: {}", e)))?;
         let (refunds, cert_deposits) =
             calculate_deposits_and_refunds(tx_body, validation_input_context);
 
@@ -148,14 +150,14 @@ impl<'a> BalanceValidator<'a> {
         let total_full_input = inputs.get_total_sum();
         let total_full_output = outputs.get_total_sum();
 
-        Self {
+        Ok(Self {
             inputs,
             outputs,
             total_full_input,
             total_full_output,
             validation_input_context,
             treasury_value,
-        }
+        })
     }
 
     pub fn validate(&self) -> ValidationResult {
@@ -414,20 +416,16 @@ impl<'a> BalanceValidator<'a> {
 fn calculate_total_inputs(
     tx_body: &csl::TransactionBody,
     validation_input_context: &ValidationInputContext,
-) -> Value {
-    tx_body
-        .inputs()
-        .into_iter()
-        .map(|input| {
-            let utxo =
-                validation_input_context.find_utxo(input.transaction_id().to_hex(), input.index());
-            if let Some(utxo) = utxo {
-                Value::new_from_common_assets(&utxo.utxo.output.amount)
-            } else {
-                Value::new_from_coins(0)
-            }
-        })
-        .fold(Value::new_from_coins(0), |acc, value| acc + value)
+) -> Result<Value, String> {
+    let mut total = Value::new_from_coins(0);
+    for input in tx_body.inputs().into_iter() {
+        let utxo =
+            validation_input_context.find_utxo(input.transaction_id().to_hex(), input.index());
+        if let Some(utxo) = utxo {
+            total = total + Value::new_from_common_assets(&utxo.utxo.output.amount)?;
+        }
+    }
+    Ok(total)
 }
 
 fn calculate_deposits_and_refunds(
@@ -600,10 +598,52 @@ fn get_withdrawals(tx_body: &csl::TransactionBody) -> Vec<Withdrawal> {
 
 fn calculate_mints(tx_body: &csl::TransactionBody) -> MultiAsset {
     if let Some(mint) = tx_body.mint() {
-        MultiAsset::new_from_csl_multiasset(&mint.as_positive_multiasset(), true)
+        match mint.as_positive_multiasset() {
+            Ok(minted) => MultiAsset::new_from_csl_multiasset(&minted, true),
+            Err(_) => mint_side(&mint, true),
+        }
     } else {
         MultiAsset::new()
     }
+}
+
+/// The minted (`positive`) or burnt entries of `mint` as absolute
+/// quantities, read entry by entry in `i128`. The serialization library's
+/// own split refuses an amount of `-2^64`, whose magnitude does not fit its
+/// `u64` values; the CBOR reader accepts it, so it is counted here.
+fn mint_side(mint: &csl::Mint, positive: bool) -> MultiAsset {
+    let mut side = MultiAsset::new();
+    let policies = mint.keys();
+    let mut seen = std::collections::HashSet::new();
+    for i in 0..policies.len() {
+        let policy = policies.get(i);
+        if !seen.insert(policy.to_hex()) {
+            continue;
+        }
+        let Some(entries) = mint.get(&policy) else {
+            continue;
+        };
+        for j in 0..entries.len() {
+            let Some(assets) = entries.get(j) else {
+                continue;
+            };
+            let names = assets.keys();
+            for k in 0..names.len() {
+                let name = names.get(k);
+                let Some(amount) = assets.get(&name) else {
+                    continue;
+                };
+                let Ok(quantity) = amount.to_str().parse::<i128>() else {
+                    continue;
+                };
+                if (quantity > 0) == positive && quantity != 0 {
+                    let unit = format!("{}{}", policy.to_hex(), hex::encode(name.name()));
+                    side.add_asset(unit, quantity.abs());
+                }
+            }
+        }
+    }
+    side
 }
 
 fn calculate_total_output(tx_body: &csl::TransactionBody) -> Value {
@@ -617,7 +657,10 @@ fn calculate_total_output(tx_body: &csl::TransactionBody) -> Value {
 fn calculate_burn(tx_body: &csl::TransactionBody) -> MultiAsset {
     let mint = tx_body.mint();
     if let Some(mint) = mint {
-        MultiAsset::new_from_csl_multiasset(&mint.as_negative_multiasset(), true)
+        match mint.as_negative_multiasset() {
+            Ok(burnt) => MultiAsset::new_from_csl_multiasset(&burnt, true),
+            Err(_) => mint_side(&mint, false),
+        }
     } else {
         MultiAsset::new()
     }
@@ -649,7 +692,7 @@ fn calculate_voting_proposals_deposits(tx_body: &csl::TransactionBody) -> Vec<De
 }
 
 fn is_key_hash_reward_address(reward_address: &str) -> bool {
-    let Ok(address) = csl::Address::from_bech32(reward_address) else {
+    let Ok(address) = crate::csl_preflight::address_from_bech32(reward_address) else {
         return false;
     };
     let Some(reward) = csl::RewardAddress::from_address(&address) else {

@@ -34,6 +34,8 @@ pub struct TransactionLimitsValidator<'a> {
 }
 
 impl<'a> TransactionLimitsValidator<'a> {
+    /// `tx_size` is the transaction's size as the ledger measures it
+    /// (`crate::csl_preflight::ledger_tx_size`: no `is_valid` flag).
     pub fn new(
         tx_size: usize,
         tx_body: &csl::TransactionBody,
@@ -179,10 +181,12 @@ impl<'a> TransactionLimitsValidator<'a> {
             ));
         }
 
+        // The interval is half-open: valid iff `start <= slot < ttl`; the
+        // transaction is no longer valid in the ttl slot itself.
         let is_outside_validity = match self.validity_interval {
-            (Some(start), Some(end)) => self.current_slot < start || self.current_slot > end,
+            (Some(start), Some(end)) => self.current_slot < start || self.current_slot >= end,
             (Some(start), None) => self.current_slot < start,
-            (None, Some(end)) => self.current_slot > end,
+            (None, Some(end)) => self.current_slot >= end,
             (None, None) => false,
         };
 

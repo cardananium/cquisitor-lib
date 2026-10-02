@@ -1,11 +1,20 @@
 {
+  // Dev-time config: editors, ts-node (generator.ts) and the bun test runner.
+  // The library in ts/ is built with tsconfig.lib.json and type-checked with
+  // tsconfig.lib.typecheck.json; this file is used by neither.
   "compilerOptions": {
-    "target": "ES2020",
+    "target": "ES2022",
     "module": "ESNext",
-    "moduleResolution": "node",
+    "moduleResolution": "bundler",
     "esModuleInterop": true,
     "allowJs": true,
-    "strict": true
+    "strict": true,
+    // bun honours `paths` at runtime: `bun test ts` resolves the library's own
+    // `./wasm` subpath (the one value self-import, in ts/wasm/load.ts) to the
+    // freshly built node wasm in pkg/. For editors, the .d.cts next to it types it.
+    "paths": {
+      "@cardananium/cquisitor-lib/wasm": ["./pkg/wasm/node/cquisitor_lib.cjs"]
+    }
   },
   "ts-node": {
     "esm": true,

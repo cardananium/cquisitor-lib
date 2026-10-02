@@ -1,0 +1,37 @@
+{
+  // Build config for the library (ts/ -> pkg/lib). post-build.sh assembles the
+  // package around it; see README "Package layout".
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2022"],
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "strict": true,
+    "noUncheckedIndexedAccess": false,
+    "exactOptionalPropertyTypes": false,
+    "isolatedModules": true,
+    "verbatimModuleSyntax": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "declaration": true,
+    "declarationMap": true,
+    "sourceMap": true,
+    // The maps reference ../../ts/*.ts, which is not shipped; embedding the
+    // sources keeps the .js.map usable for consumers (devtools) instead of dead.
+    "inlineSources": true,
+    "rootDir": "ts",
+    "outDir": "pkg/lib",
+    "types": ["node"],
+    // The library imports its own `./wasm` subpath: as `import type` for the
+    // generated declarations everywhere, and as one dynamic `import()` in
+    // ts/wasm/load.ts. At build time both resolve to types/cquisitor_lib.d.ts;
+    // the emitted .js/.d.ts keep the bare specifier, which Node, bundlers and
+    // TypeScript resolve through pkg/package.json `exports["./wasm"]` (package
+    // self-reference inside pkg/, node_modules lookup once installed).
+    "paths": {
+      "@cardananium/cquisitor-lib/wasm": ["./types/cquisitor_lib.d.ts"]
+    }
+  },
+  "include": ["ts/**/*.ts"],
+  "exclude": ["ts/**/*.test.ts", "ts/testSupport/**", "pkg", "node_modules"]
+}

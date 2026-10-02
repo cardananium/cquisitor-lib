@@ -60,7 +60,7 @@ fn stake_registration_with_wrong_explicit_deposit_errors() {
     let mut ctx = preview_simple_context();
     ctx.utxo_set.clear();
 
-    let validator = BalanceValidator::new(&body, &ctx);
+    let validator = BalanceValidator::new(&body, &ctx).expect("validator context is well-formed");
     let result = validator.validate();
 
     assert!(
@@ -89,7 +89,7 @@ fn stake_registration_with_matching_explicit_deposit_is_silent() {
     let mut ctx = preview_simple_context();
     ctx.utxo_set.clear();
 
-    let validator = BalanceValidator::new(&body, &ctx);
+    let validator = BalanceValidator::new(&body, &ctx).expect("validator context is well-formed");
     let result = validator.validate();
 
     assert!(
@@ -128,7 +128,7 @@ fn stake_deregistration_with_wrong_refund_errors() {
         balance: Some(0),
     });
 
-    let validator = BalanceValidator::new(&body, &ctx);
+    let validator = BalanceValidator::new(&body, &ctx).expect("validator context is well-formed");
     let result = validator.validate();
 
     assert!(
@@ -155,7 +155,7 @@ fn drep_registration_with_wrong_deposit_errors() {
     let mut ctx = preview_simple_context();
     ctx.utxo_set.clear();
 
-    let validator = BalanceValidator::new(&body, &ctx);
+    let validator = BalanceValidator::new(&body, &ctx).expect("validator context is well-formed");
     let result = validator.validate();
 
     assert!(
@@ -190,7 +190,7 @@ fn drep_deregistration_with_wrong_refund_errors() {
         payed_deposit: Some(500_000_000),
     });
 
-    let validator = BalanceValidator::new(&body, &ctx);
+    let validator = BalanceValidator::new(&body, &ctx).expect("validator context is well-formed");
     let result = validator.validate();
 
     assert!(
@@ -247,7 +247,7 @@ fn pool_registration_with_wrong_deposit_treats_cost_differently() {
     let mut ctx = preview_simple_context();
     ctx.utxo_set.clear();
 
-    let validator = BalanceValidator::new(&body, &ctx);
+    let validator = BalanceValidator::new(&body, &ctx).expect("validator context is well-formed");
     let result = validator.validate();
 
     assert!(
@@ -290,7 +290,7 @@ fn voting_proposal_with_wrong_deposit_errors() {
     let mut ctx = preview_simple_context();
     ctx.utxo_set.clear();
 
-    let validator = BalanceValidator::new(&body, &ctx);
+    let validator = BalanceValidator::new(&body, &ctx).expect("validator context is well-formed");
     let result = validator.validate();
 
     assert!(
@@ -331,7 +331,7 @@ fn refund_without_known_payed_deposit_warns_instead_of_errors() {
         balance: Some(0),
     });
 
-    let validator = BalanceValidator::new(&body, &ctx);
+    let validator = BalanceValidator::new(&body, &ctx).expect("validator context is well-formed");
     let result = validator.validate();
 
     assert!(

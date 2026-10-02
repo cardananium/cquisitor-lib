@@ -1,0 +1,4 @@
+# `bun test` from the repo root only looks at the TypeScript layer (ts/**/*.test.ts),
+# not at target/, pkg/ or node_modules/.
+[test]
+root = "ts"

@@ -923,6 +923,16 @@ pub enum Phase1Warning {
         committee_credential: Credential,
         cert_index: u32,
     },
+    /// A required native script is provided by a script reference of the
+    /// validation context that nests deeper than the library reads (past
+    /// 32768 CBOR levels with the reference's own wrapping; native scripts
+    /// are otherwise read at any depth): it is counted as provided (its
+    /// hash is read from the bytes) but not evaluated. An implementation
+    /// limit, not a finding about the script.
+    NativeScriptNotExamined {
+        script_hash: String,
+        reason: String,
+    },
 }
 
 impl Phase1Warning {
@@ -976,6 +986,9 @@ impl Phase1Warning {
             },
             Self::DuplicateCommitteeHotRegistrationInTx { committee_credential, cert_index } => {
                 format!("Duplicate committee hot registration in the same transaction. Committee credential: {}, Certificate index: {}", committee_credential, cert_index)
+            },
+            Self::NativeScriptNotExamined { script_hash, reason } => {
+                format!("Native script {} was not evaluated (implementation limit, not a finding): {}", script_hash, reason)
             },
         }
     }

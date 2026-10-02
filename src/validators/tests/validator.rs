@@ -1,9 +1,8 @@
 use crate::common::{CostModels, ExUnitPrices, ExUnits, SubCoin, UTxO};
-use crate::validators::common::{NetworkType, ScriptDataHashDecomposition};
+use crate::validators::common::NetworkType;
 use crate::validators::input_contexts::{UtxoInputContext, ValidationInputContext};
 use crate::validators::validator::validate_transaction;
 use crate::validators::protocol_params::ProtocolParameters;
-use crate::validators::phase_1::errors::Phase1Error;
 
 #[test]
 fn test_validate_transaction() {

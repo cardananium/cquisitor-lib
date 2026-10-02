@@ -19,6 +19,7 @@ use serde_json::{json, Map, Value};
 
 use crate::cbor::cddl_tools;
 use crate::cbor::decoder;
+use crate::cbor::diagnostic;
 use crate::cbor::document_cache::{self, SchemaError, SchemaErrorKind};
 use crate::cbor::limits;
 use crate::cbor::schema_mapper;
@@ -152,23 +153,14 @@ pub fn validate_cbor_bytes_against_cddl(cbor: &[u8], cddl: &str, rule_name: &str
             return failure_result(error);
         }
 
-        match root_rule_kind(parsed, rule_name) {
-            None => {
-                return failure_result(simple_error(
-                    "missing_rule",
-                    &schema_mapper::missing_rule_message(rule_name),
-                ))
-            }
-            // Group rules are not data items; refuse rather than wrap (wrapper accepts
-            // wrong arity). Matches mapper refusals.
-            Some(RootRuleKind::Group) => {
-                return failure_result(simple_error(
-                    "group_rule_root",
-                    &schema_mapper::group_rule_root_message(rule_name),
-                ))
-            }
-            Some(RootRuleKind::Type) => {}
-        }
+        // Group rules are not data items; refuse rather than wrap (wrapper accepts
+        // wrong arity). The same resolution decides the root of every export.
+        let root = match resolve_root_rule(parsed, rule_name) {
+            Ok(root) => root,
+            Err(refusal) => return failure_result(simple_error(refusal.kind, &refusal.message)),
+        };
+        // The root as written (`$m` for a socket, however it was named).
+        let root_name = RuleKey::of(root).to_string();
 
         // Pre-decode with our decoder for `input_parse` spans/path before the
         // upstream validator sees the bytes.
@@ -185,12 +177,12 @@ pub fn validate_cbor_bytes_against_cddl(cbor: &[u8], cddl: &str, rule_name: &str
             ));
         }
 
-        if let Some(rooted) = with_root_first(parsed, rule_name) {
+        if let Some(rooted) = with_root_first(parsed, root) {
             return run_validator(
                 &rooted,
                 cbor,
                 ValidationCtx {
-                    root_rule: rule_name,
+                    root_rule: &root_name,
                     cddl,
                     cddl_offset_correction: 0,
                     utf16: Utf16Index::new(cddl),
@@ -202,7 +194,7 @@ pub fn validate_cbor_bytes_against_cddl(cbor: &[u8], cddl: &str, rule_name: &str
         let wrapped = format!(
             "{root} = {rule}\n\n{body}",
             root = synthetic_root_name(cddl),
-            rule = rule_name,
+            rule = root_name,
             body = cddl,
         );
         // Wrapper prefix length — subtract from AST spans back to original CDDL.
@@ -213,7 +205,7 @@ pub fn validate_cbor_bytes_against_cddl(cbor: &[u8], cddl: &str, rule_name: &str
                 cbor,
                 // Walk from the user rule, not `__cquisitor_root` (wrapper span is in the prefix).
                 ValidationCtx {
-                    root_rule: rule_name,
+                    root_rule: &root_name,
                     cddl,
                     cddl_offset_correction: prefix_len,
                     utf16: Utf16Index::new(cddl),
@@ -445,16 +437,21 @@ fn synthetic_root_name(cddl: &str) -> String {
     format!("{}cquisitor_root", "_".repeat(longest_run + 1))
 }
 
-/// AST with `rule_name` rotated to the front for upstream's first-type-rule root.
+/// AST with the type rule named `root` rotated to the front for upstream's
+/// first-type-rule root.
 ///
 /// `None` for group rules or generic type rules. Cheap vs re-parse; spans stay
 /// on the original source.
-fn with_root_first<'a>(ast: &cddl::ast::CDDL<'a>, rule_name: &str) -> Option<cddl::ast::CDDL<'a>> {
+fn with_root_first<'a>(
+    ast: &cddl::ast::CDDL<'a>,
+    root: &cddl::ast::Identifier<'_>,
+) -> Option<cddl::ast::CDDL<'a>> {
+    let root = RuleKey::of(root);
     let at = ast.rules.iter().position(|r| {
         matches!(
             r,
             cddl::ast::Rule::Type { rule, .. }
-                if rule.name.ident == rule_name && rule.generic_params.is_none()
+                if RuleKey::of(&rule.name) == root && rule.generic_params.is_none()
         )
     })?;
     let mut rules = ast.rules.clone();
@@ -509,12 +506,35 @@ fn run_validator(ast: &cddl::ast::CDDL<'_>, cbor: &[u8], ctx: ValidationCtx<'_>)
     cv.set_max_embedded_depth(limits::MAX_EMBEDDED_DEPTH);
     // Set work bound; choice alternatives can be exponential in nesting.
     cv.set_max_validation_work(limits::MAX_CBOR_VALIDATION_WORK);
+    // RFC 8610 sizes a string as a whole, and so does every Cardano decoder
+    // but one: Plutus data byte strings (`bounded_bytes = bytes .size (0..64)`)
+    // are bounded one chunk at a time, so a longer value is written as an
+    // indefinite-length string of chunks of at most 64 bytes. Only a string
+    // matched against a rule named in `PER_CHUNK_SIZE_RULES` takes that
+    // reading, and there only the upper bound of a `.size` range applies
+    // per chunk; an exact size and a lower bound hold the whole string.
+    // Every other string, metadata strings (bounded as a whole, chunked or
+    // not) and text strings included, is sized as a whole.
+    cv.set_size_control_per_chunk(true);
+    cv.set_size_control_per_chunk_rules(Some(
+        PER_CHUNK_SIZE_RULES
+            .iter()
+            .map(|rule| rule.to_string())
+            .collect(),
+    ));
 
     match cv.validate() {
         Ok(()) => success_result(),
         Err(err) => failure_result(map_cbor_error(&err, cbor, ast, &ctx)),
     }
 }
+
+/// The type rules whose strings are held to a `.size` range's upper bound
+/// one chunk at a time when written in indefinite length: the Plutus data
+/// byte string, which the ledger bounds per chunk. Every other string is
+/// sized as a whole (RFC 8610). The schema mapper applies the same reading
+/// when it chooses between alternatives.
+pub(crate) const PER_CHUNK_SIZE_RULES: &[&str] = &["bounded_bytes"];
 
 /// Hex-decode helper for the wasm wrapper.
 pub fn decode_hex(cbor_hex: &str) -> Result<Vec<u8>, crate::js_error::JsError> {
@@ -596,27 +616,75 @@ pub(crate) fn input_parse_error(
     Value::Object(obj)
 }
 
-/// Rule kind for `name`, or `None` if undefined.
+/// The rule `name` names as the root, with its kind; `None` if undefined.
 ///
-/// Type+group same name → `Type` (usable as root).
-fn root_rule_kind(cddl_ast: &cddl::ast::CDDL, name: &str) -> Option<RootRuleKind> {
-    let mut found = None;
-    for rule in &cddl_ast.rules {
-        match rule {
-            cddl::ast::Rule::Type { rule, .. } if rule.name.ident == name => {
-                return Some(RootRuleKind::Type)
+/// `name` is the rule's name as written and as `cddl_outline` reports it:
+/// a socket with its prefix (`$m`, `$$g`), so `m` and `$m` are two rules. A
+/// socket may also be named by its identifier alone (`m` for `$m`) when no
+/// rule is written `m`. A type rule wins over a group rule of the same
+/// name (usable as root).
+pub(crate) fn find_root_rule<'a>(
+    cddl_ast: &'a cddl::ast::CDDL<'a>,
+    name: &str,
+) -> Option<(&'a cddl::ast::Identifier<'a>, RootRuleKind)> {
+    let named = |matches: &dyn Fn(RuleKey<'a>) -> bool| {
+        let mut found = None;
+        for rule in &cddl_ast.rules {
+            match rule {
+                cddl::ast::Rule::Type { rule, .. } if matches(RuleKey::of(&rule.name)) => {
+                    return Some((&rule.name, RootRuleKind::Type))
+                }
+                cddl::ast::Rule::Group { rule, .. }
+                    if found.is_none() && matches(RuleKey::of(&rule.name)) =>
+                {
+                    found = Some((&rule.name, RootRuleKind::Group))
+                }
+                _ => {}
             }
-            cddl::ast::Rule::Group { rule, .. } if rule.name.ident == name => {
-                found = Some(RootRuleKind::Group)
-            }
-            _ => {}
         }
+        found
+    };
+    named(&|key| key.is_written(name)).or_else(|| {
+        if name.starts_with('$') {
+            return None;
+        }
+        named(&|key| key.is_socket() && key.ident == name)
+    })
+}
+
+/// Why a name cannot be the root of a walk: `kind` is `missing_rule` or
+/// `group_rule_root`.
+#[derive(Clone, Debug)]
+pub(crate) struct RootRefusal {
+    pub(crate) kind: &'static str,
+    pub(crate) message: String,
+}
+
+/// The type rule the name `name` roots a walk at, as every export resolves
+/// it (validate, decode and map alike): the rule [`find_root_rule`] finds,
+/// refused when it is undefined or a group rule. A group rule describes
+/// entries, never a data item, so a group socket is never a root; the
+/// identifier of a socket written without its prefix (`m`) stands for its
+/// type socket (`$m`) whenever there is one.
+pub(crate) fn resolve_root_rule<'a>(
+    cddl_ast: &'a cddl::ast::CDDL<'a>,
+    name: &str,
+) -> Result<&'a cddl::ast::Identifier<'a>, RootRefusal> {
+    match find_root_rule(cddl_ast, name) {
+        None => Err(RootRefusal {
+            kind: "missing_rule",
+            message: schema_mapper::missing_rule_message(name),
+        }),
+        Some((_, RootRuleKind::Group)) => Err(RootRefusal {
+            kind: "group_rule_root",
+            message: schema_mapper::group_rule_root_message(name),
+        }),
+        Some((root, RootRuleKind::Type)) => Ok(root),
     }
-    found
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum RootRuleKind {
+pub(crate) enum RootRuleKind {
     Type,
     Group,
 }
@@ -638,7 +706,7 @@ fn map_cbor_error(
             // Decode once for the whole error set.
             let tree = decoder::decode_cbor_to_value(cbor).ok();
             // Index rules once for typename hops.
-            let rules = RuleIndex::new(ast);
+            let rules = RuleIndex::new(ast, ctx.root_rule);
             // One budget for every span walked in the report.
             let spans = SpanWalkBudget::new();
             // Map errors head-first until location-segment budget is spent; count the rest
@@ -802,11 +870,11 @@ fn fold_errors(mapped: Vec<Value>, unmapped: usize) -> Value {
     head
 }
 
-fn cbor_validation_error(
+fn cbor_validation_error<'t>(
     e: &cddl::validator::cbor::ValidationError,
     cbor: &[u8],
-    tree: Option<&Value>,
-    located: &mut LocatedNodes,
+    tree: Option<&'t Value>,
+    located: &mut LocatedNodes<'t>,
     rules: &RuleIndex<'_>,
     spans: &SpanWalkBudget,
     ctx: &ValidationCtx<'_>,
@@ -818,7 +886,10 @@ fn cbor_validation_error(
     let mut obj = Map::new();
     obj.insert("kind".into(), Value::String(kind.into()));
 
-    let path = cbor_location_to_json_path(&e.cbor_location);
+    let path = match tree {
+        Some(tree) => json_path_in_tree(tree, &e.cbor_location, &mut located.keys),
+        None => cbor_location_to_json_path(&e.cbor_location),
+    };
     obj.insert("path".into(), Value::String(path));
     if e.is_multi_type_choice {
         obj.insert("from_type_choice".into(), Value::Bool(true));
@@ -827,31 +898,47 @@ fn cbor_validation_error(
     // CBOR spans from decoded tree via `cbor_location`. For tagged paths, report
     // the item the reason renders (wrapper vs content).
     let names_tag = reason_names_tagged_item(reason);
+    // An unexpected key is about the whole entry: its spans are the key's,
+    // then the value's, so a consumer can point at the key and shade the
+    // entry.
+    let about_entry = reason_is_about_map_entry(reason);
     let mut preview: Option<String> = None;
     let mut cddl_source: Option<String> = None;
     if let Some(tree) = tree {
         if let Some(located) = located.resolve(tree, &e.cbor_location, cbor.len()) {
-            let view = located.view(names_tag);
-            let mut has_span = false;
-            if let Some(pos) = view.span.clone() {
-                obj.insert("byte_spans".into(), Value::Array(vec![pos]));
-                has_span = true;
+            let views: Vec<&NodeView> = match (&located.key, about_entry) {
+                // The entry is the key and the whole value, tag heads included.
+                (Some(key), true) => vec![key, &located.tagged],
+                _ => vec![located.view(names_tag)],
+            };
+            let spans: Vec<Value> = views.iter().filter_map(|v| v.span.clone()).collect();
+            let anchors: Vec<Value> = views.iter().filter_map(|v| v.anchor.clone()).collect();
+            let has_span = !spans.is_empty() || !anchors.is_empty();
+            if !spans.is_empty() {
+                obj.insert("byte_spans".into(), Value::Array(spans));
             }
             // Containers use `struct_position_info` for anchors; scalars fall back to
             // `position_info`.
-            if let Some(pos) = view.anchor.clone() {
-                obj.insert("anchor_spans".into(), Value::Array(vec![pos]));
-                has_span = true;
+            if !anchors.is_empty() {
+                obj.insert("anchor_spans".into(), Value::Array(anchors));
             }
             if located.embedded && has_span {
                 // Spans address an embedded payload, not the outer document.
                 obj.insert("embedded_span".into(), Value::Bool(true));
             }
-            preview = Some(view.preview.clone());
+            preview = Some(views[0].preview.clone());
         }
 
-        // CDDL span: AST walk on the same location.
-        if let Some(span) = cddl_byte_span_for(rules, ctx, &e.cbor_location, spans) {
+        // CDDL span: AST walk on the same location. An unexpected key names
+        // no member of the schema, so its span is the map type's: the walk
+        // goes to the map, not on through the key, and on through the rule
+        // naming the map to the map written out.
+        let (schema_location, end) = if about_entry {
+            (parent_location(&e.cbor_location), SpanEnd::MapHolding)
+        } else {
+            (e.cbor_location.clone(), SpanEnd::Item)
+        };
+        if let Some(span) = cddl_byte_span_for(rules, ctx, &schema_location, end, spans) {
             // `span` is `(start, end)` in user CDDL.
             cddl_source = ctx.cddl.get(span.0..span.1).map(str::to_string);
             obj.insert(
@@ -970,6 +1057,25 @@ fn reason_names_tagged_item(reason: &str) -> bool {
         Some(pos) => reason[pos + ", got ".len()..].starts_with(TAG_RENDERING_PREFIX),
         None => false,
     }
+}
+
+/// True when the reason is about a map entry as a whole rather than about
+/// the item at the location: the validator's `unexpected key <k>`, located
+/// at the entry.
+fn reason_is_about_map_entry(reason: &str) -> bool {
+    reason.starts_with("unexpected key ")
+}
+
+/// The location of the item enclosing the one `loc` names (the map, for a
+/// map entry); the root's parent is the root.
+fn parent_location(loc: &str) -> String {
+    let trimmed = loc.trim_start_matches('/');
+    let mut segments = split_location_segments(trimmed);
+    segments.pop();
+    if segments.is_empty() {
+        return String::new();
+    }
+    format!("/{}", segments.join("/"))
 }
 
 /// True when a `, got` tail only names a kind ([`ELIDED_BODY`]), not a value.
@@ -1416,54 +1522,161 @@ fn node_preview_at(node: &Value, depth: usize) -> String {
     }
 }
 
+/// A rule's name as written: its socket prefix (`$`, `$$` or none) and its
+/// identifier. `m`, `$m` and `$$m` are three rules.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub(crate) struct RuleKey<'a> {
+    prefix: &'static str,
+    ident: &'a str,
+}
+
+impl<'a> RuleKey<'a> {
+    /// The name `id` denotes. An identifier whose text already carries the
+    /// socket prefix denotes the same rule as one written with it.
+    pub(crate) fn of(id: &cddl::ast::Identifier<'a>) -> Self {
+        use cddl::token::SocketPlug;
+        match id.socket {
+            Some(SocketPlug::TYPE) => RuleKey {
+                prefix: "$",
+                ident: id.ident,
+            },
+            Some(SocketPlug::GROUP) => RuleKey {
+                prefix: "$$",
+                ident: id.ident,
+            },
+            None => Self::parse(id.ident),
+        }
+    }
+
+    /// The name `written` spells: a leading `$$` or `$` is its socket prefix.
+    pub(crate) fn parse(written: &'a str) -> Self {
+        if let Some(ident) = written.strip_prefix("$$") {
+            RuleKey {
+                prefix: "$$",
+                ident,
+            }
+        } else if let Some(ident) = written.strip_prefix('$') {
+            RuleKey { prefix: "$", ident }
+        } else {
+            RuleKey {
+                prefix: "",
+                ident: written,
+            }
+        }
+    }
+
+    /// Whether this is the name `written` spells.
+    pub(crate) fn is_written(&self, written: &str) -> bool {
+        written.len() == self.prefix.len() + self.ident.len()
+            && written.starts_with(self.prefix)
+            && &written[self.prefix.len()..] == self.ident
+    }
+
+    /// Whether the name is a socket's (written with `$` or `$$`).
+    pub(crate) fn is_socket(&self) -> bool {
+        !self.prefix.is_empty()
+    }
+
+    /// The identifier, without the socket prefix.
+    pub(crate) fn ident(&self) -> &'a str {
+        self.ident
+    }
+
+    /// The socket prefix: `$`, `$$`, or empty.
+    pub(crate) fn prefix(&self) -> &'static str {
+        self.prefix
+    }
+}
+
+impl std::fmt::Display for RuleKey<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}{}", self.prefix, self.ident)
+    }
+}
+
 /// Parsed rules indexed by name.
 ///
 /// Span walkers hop typenames per path segment; linear scan dominates large sets.
 struct RuleIndex<'a> {
-    types: std::collections::HashMap<&'a str, &'a cddl::ast::Type<'a>>,
-    groups: std::collections::HashMap<&'a str, &'a cddl::ast::GroupEntry<'a>>,
-    params: std::collections::HashMap<&'a str, &'a cddl::ast::GenericParams<'a>>,
+    /// Every body of each type rule, in document order: one, or several
+    /// for a rule extended with `/=` (a socket).
+    types: std::collections::HashMap<RuleKey<'a>, Vec<&'a cddl::ast::Type<'a>>>,
+    groups: std::collections::HashMap<RuleKey<'a>, &'a cddl::ast::GroupEntry<'a>>,
+    params: std::collections::HashMap<RuleKey<'a>, &'a cddl::ast::GenericParams<'a>>,
+    /// The root type rule, and where it is first named.
+    root: Option<(RuleKey<'a>, cddl::ast::Span)>,
 }
 
 impl<'a> RuleIndex<'a> {
-    fn new(ast: &'a cddl::ast::CDDL<'a>) -> Self {
-        let mut types = std::collections::HashMap::new();
+    /// The rules of `ast`, rooted at the type rule written `root` (`$m`
+    /// for a socket).
+    fn new(ast: &'a cddl::ast::CDDL<'a>, root: &str) -> Self {
+        let mut types = std::collections::HashMap::<_, Vec<_>>::new();
+        // Where each type rule is first named.
+        let mut type_names = std::collections::HashMap::new();
         let mut groups = std::collections::HashMap::new();
         let mut params = std::collections::HashMap::new();
         for rule in &ast.rules {
-            // First occurrence is the definition (`a /=` may redefine).
             match rule {
+                // A type rule's bodies are its definition and each `/=`
+                // extension, which the validator reads as one choice.
                 cddl::ast::Rule::Type { rule, .. } => {
-                    types.entry(rule.name.ident).or_insert(&rule.value);
+                    let name = RuleKey::of(&rule.name);
+                    types.entry(name).or_default().push(&rule.value);
+                    type_names.entry(name).or_insert(rule.name.span);
                     if let Some(p) = rule.generic_params.as_ref() {
-                        params.entry(rule.name.ident).or_insert(p);
+                        params.entry(name).or_insert(p);
                     }
                 }
                 cddl::ast::Rule::Group { rule, .. } => {
-                    groups.entry(rule.name.ident).or_insert(&rule.entry);
+                    let name = RuleKey::of(&rule.name);
+                    groups.entry(name).or_insert(&rule.entry);
                     if let Some(p) = rule.generic_params.as_ref() {
-                        params.entry(rule.name.ident).or_insert(p);
+                        params.entry(name).or_insert(p);
                     }
                 }
             }
         }
+        let root = type_names
+            .iter()
+            .find(|(name, _)| name.is_written(root))
+            .map(|(name, span)| (*name, *span));
         RuleIndex {
             types,
             groups,
             params,
+            root,
         }
     }
 
-    fn type_rule(&self, name: &str) -> Option<&'a cddl::ast::Type<'a>> {
-        self.types.get(name).copied()
+    /// The alternatives of the type rule `name`, named at `reference`: its
+    /// body, or, for a rule extended with `/=`, all its bodies as one
+    /// choice written at `reference`.
+    fn type_alts(&self, name: RuleKey<'a>, reference: cddl::ast::Span) -> Option<Alts<'a>> {
+        let bodies = self.types.get(&name)?;
+        Some(match bodies.as_slice() {
+            [only] => Alts::One(only),
+            _ => Alts::Socket(name, reference),
+        })
     }
 
-    fn group_rule(&self, name: &str) -> Option<&'a cddl::ast::GroupEntry<'a>> {
-        self.groups.get(name).copied()
+    /// [`Self::type_alts`] of the root rule, which no reference names: a
+    /// socket's choice is written where the rule is first named.
+    fn root_alts(&self) -> Option<Alts<'a>> {
+        let (name, span) = self.root?;
+        self.type_alts(name, span)
     }
 
-    fn generic_params(&self, name: &str) -> Option<&'a cddl::ast::GenericParams<'a>> {
-        self.params.get(name).copied()
+    fn type_bodies(&self, name: RuleKey<'a>) -> impl Iterator<Item = &'a cddl::ast::Type<'a>> + '_ {
+        self.types.get(&name).into_iter().flatten().copied()
+    }
+
+    fn group_rule(&self, name: RuleKey<'a>) -> Option<&'a cddl::ast::GroupEntry<'a>> {
+        self.groups.get(&name).copied()
+    }
+
+    fn generic_params(&self, name: RuleKey<'a>) -> Option<&'a cddl::ast::GenericParams<'a>> {
+        self.params.get(&name).copied()
     }
 }
 
@@ -1474,9 +1687,10 @@ fn cddl_byte_span_for(
     rules: &RuleIndex<'_>,
     ctx: &ValidationCtx<'_>,
     cbor_location: &str,
+    end: SpanEnd,
     work: &SpanWalkBudget,
 ) -> Option<(usize, usize)> {
-    let root_type = rules.type_rule(ctx.root_rule)?;
+    let root_type = rules.root_alts()?;
     let trimmed = cbor_location.trim_start_matches('/');
     let segments: Vec<Segment> = if trimmed.is_empty() {
         Vec::new()
@@ -1487,7 +1701,7 @@ fn cddl_byte_span_for(
             .collect()
     };
 
-    let span = walk_span(rules, root_type, &segments, work)?;
+    let span = walk_span(rules, root_type, &segments, end, work)?;
     let prefix = ctx.cddl_offset_correction;
     if span.0 < prefix {
         return None;
@@ -1610,11 +1824,45 @@ fn type2_span(t2: &cddl::ast::Type2<'_>) -> cddl::ast::Span {
 /// Span-walk cursor: type alternatives still to try, or container about to
 /// consume the next path segment.
 enum SpanCursor<'a> {
-    /// A type, the scope its body is read in, and how many references
-    /// were resolved at this position to reach it.
-    Type(&'a cddl::ast::Type<'a>, Rc<Scope<'a>>, usize),
+    /// A type's alternatives, the scope they are read in, and how many
+    /// references were resolved at this position to reach them.
+    Type(Alts<'a>, Rc<Scope<'a>>, usize),
     /// A map or array type, and the scope its group is read in.
     Container(&'a cddl::ast::Type2<'a>, Rc<Scope<'a>>),
+}
+
+/// The alternatives one position of the schema offers.
+#[derive(Clone, Copy)]
+enum Alts<'a> {
+    /// A type as written.
+    One(&'a cddl::ast::Type<'a>),
+    /// Every body of the type rule named here, extended with `/=` (a
+    /// socket), read as one choice; the span is where the choice is written
+    /// (the reference naming the rule).
+    Socket(RuleKey<'a>, cddl::ast::Span),
+}
+
+impl<'a> Alts<'a> {
+    fn span(self) -> cddl::ast::Span {
+        match self {
+            Alts::One(ty) => ty.span,
+            Alts::Socket(_, reference) => reference,
+        }
+    }
+
+    /// Each alternative, a socket's bodies in document order.
+    fn choices<'r>(
+        self,
+        rules: &'r RuleIndex<'a>,
+    ) -> impl Iterator<Item = &'a cddl::ast::TypeChoice<'a>> + 'r {
+        let (one, socket) = match self {
+            Alts::One(ty) => (Some(ty), None),
+            Alts::Socket(name, _) => (None, Some(name)),
+        };
+        one.into_iter()
+            .chain(socket.into_iter().flat_map(move |name| rules.type_bodies(name)))
+            .flat_map(|ty| ty.type_choices.iter())
+    }
 }
 
 /// What resolving one alternative at a position comes to, once the rule
@@ -1693,11 +1941,11 @@ fn resolve_type2<'a>(
                         continue;
                     }
                 }
-                return match rules.type_rule(ident.ident) {
+                return match rules.type_alts(RuleKey::of(ident), type2_span(t2)) {
                     Some(inner) => {
                         let inner_scope = enter_rule_scope(
                             &scope,
-                            rules.generic_params(ident.ident),
+                            rules.generic_params(RuleKey::of(ident)),
                             generic_args.as_ref(),
                         );
                         Resolved::Into(SpanCursor::Type(inner, inner_scope, hops + 1))
@@ -1707,10 +1955,10 @@ fn resolve_type2<'a>(
                 };
             }
             Type2::ParenthesizedType { pt, .. } => {
-                return Resolved::Into(SpanCursor::Type(pt, scope, hops));
+                return Resolved::Into(SpanCursor::Type(Alts::One(pt), scope, hops));
             }
             Type2::TaggedData { t, .. } => {
-                return Resolved::Into(SpanCursor::Type(t, scope, hops));
+                return Resolved::Into(SpanCursor::Type(Alts::One(t), scope, hops));
             }
             Type2::Map { .. } | Type2::Array { .. } => {
                 return Resolved::Into(SpanCursor::Container(t2, scope));
@@ -1726,8 +1974,9 @@ fn resolve_type2<'a>(
 /// [`MAX_SPAN_READINGS_OPEN`] for multi-entry array indices.
 fn walk_span<'a>(
     rules: &RuleIndex<'a>,
-    ty: &'a cddl::ast::Type<'a>,
+    ty: Alts<'a>,
     segs: &[Segment],
+    end: SpanEnd,
     work: &SpanWalkBudget,
 ) -> Option<cddl::ast::Span> {
     walk_span_from(
@@ -1736,8 +1985,21 @@ fn walk_span<'a>(
         segs,
         0,
         0,
+        end,
         work,
     )
+}
+
+/// What the span at the end of a path is of.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SpanEnd {
+    /// The type the path's last segment reaches, as written there (a rule
+    /// reference stays a reference).
+    Item,
+    /// The map the path reaches, as written out: an error about one of the
+    /// map's entries (an unexpected key) is about the map the entry sits
+    /// in, which a rule reference only names. See [`map_holding_span`].
+    MapHolding,
 }
 
 /// [`walk_span`] from `cursor`, with `segs[..at]` already consumed and
@@ -1748,6 +2010,7 @@ fn walk_span_from<'a>(
     segs: &[Segment],
     mut at: usize,
     open: usize,
+    end: SpanEnd,
     work: &SpanWalkBudget,
 ) -> Option<cddl::ast::Span> {
     use cddl::ast::Type2;
@@ -1761,32 +2024,55 @@ fn walk_span_from<'a>(
         match cursor {
             SpanCursor::Type(ty, scope, hops) => {
                 if at == segs.len() {
-                    return Some(ty.span);
+                    return Some(match end {
+                        SpanEnd::Item => ty.span(),
+                        SpanEnd::MapHolding => {
+                            map_holding_span(rules, ty, scope, hops, work).unwrap_or(ty.span())
+                        }
+                    });
                 }
-                // First descending alternative wins; else this type's span.
-                let mut next = None;
-                for choice in &ty.type_choices {
+                // The path goes on through the alternative whose container
+                // holds its next segment: the first that holds it, else the
+                // first that may, else the first that descends at all; with
+                // none, this type's span.
+                let mut descending = Vec::new();
+                for choice in ty.choices(rules) {
                     if !work.spend() {
                         return None;
                     }
                     if let Resolved::Into(into) =
                         resolve_type2(rules, &choice.type1.type2, Rc::clone(&scope), hops)
                     {
-                        next = Some(into);
-                        break;
+                        descending.push(into);
                     }
                 }
-                match next {
-                    Some(into) => cursor = into,
-                    None => return Some(ty.span),
+                if descending.is_empty() {
+                    return Some(ty.span());
                 }
+                let mut chosen = 0;
+                if descending.len() > 1 {
+                    let mut best = Fit::No;
+                    for (i, into) in descending.iter().enumerate() {
+                        let fit = cursor_fit(rules, into, &segs[at], work, 0)?;
+                        if fit > best {
+                            best = fit;
+                            chosen = i;
+                            if fit == Fit::Holds {
+                                break;
+                            }
+                        }
+                    }
+                }
+                cursor = descending.swap_remove(chosen);
             }
             SpanCursor::Container(t2, scope) => {
                 let span = type2_span(t2);
                 let Some(head) = segs.get(at) else {
                     return Some(span);
                 };
-                let tail_empty = at + 1 == segs.len();
+                // A name in the last slot settles on its own span, unless
+                // the walk goes on to the map it names.
+                let tail_empty = at + 1 == segs.len() && end == SpanEnd::Item;
                 match t2 {
                     Type2::Map { group, .. } => {
                         match map_entry_target(
@@ -1798,7 +2084,7 @@ fn walk_span_from<'a>(
                         ) {
                             // Entry consumed a segment — reset hop count for the next position.
                             Some((entry_type, entry_scope)) => {
-                                cursor = SpanCursor::Type(entry_type, entry_scope, 0);
+                                cursor = SpanCursor::Type(Alts::One(entry_type), entry_scope, 0);
                                 at += 1;
                             }
                             None => return Some(span),
@@ -1858,6 +2144,7 @@ fn walk_span_from<'a>(
                                         segs,
                                         at + 1,
                                         open + 1,
+                                        end,
                                         work,
                                     )
                                 }
@@ -1869,6 +2156,7 @@ fn walk_span_from<'a>(
                                             segs,
                                             at + 1,
                                             open + 1,
+                                            end,
                                             work,
                                         ),
                                         Resolved::Dead => None,
@@ -1891,6 +2179,85 @@ fn walk_span_from<'a>(
     }
 }
 
+/// The span of the map `ty` stands for, written out: the rule references,
+/// parentheses and tags `ty` reaches through one alternative at a time are
+/// followed to the map; where they reach a choice, its one alternative
+/// that is a map, or the choice itself when several are (a socket's choice
+/// is written at the reference naming it). `None` when `ty` stands for no
+/// map (the caller keeps `ty`'s own span).
+fn map_holding_span<'a>(
+    rules: &RuleIndex<'a>,
+    ty: Alts<'a>,
+    scope: Rc<Scope<'a>>,
+    hops: usize,
+    work: &SpanWalkBudget,
+) -> Option<cddl::ast::Span> {
+    let (choice, scope, hops) = match single_path_to_map(rules, ty, scope, hops, work)? {
+        SinglePath::Map(span) => return Some(span),
+        SinglePath::Choice(choice, scope, hops) => (choice, scope, hops),
+    };
+    let mut maps = choice.choices(rules).filter_map(|alternative| {
+        match resolve_type2(rules, &alternative.type1.type2, Rc::clone(&scope), hops) {
+            Resolved::Into(SpanCursor::Container(t2, _)) => {
+                matches!(t2, cddl::ast::Type2::Map { .. }).then(|| type2_span(t2))
+            }
+            Resolved::Into(SpanCursor::Type(inner, inner_scope, inner_hops)) => {
+                match single_path_to_map(rules, inner, inner_scope, inner_hops, work)? {
+                    SinglePath::Map(span) => Some(span),
+                    SinglePath::Choice(..) => None,
+                }
+            }
+            Resolved::Dead => None,
+        }
+    });
+    match (maps.next(), maps.next()) {
+        (Some(only), None) => Some(only),
+        _ => Some(choice.span()),
+    }
+}
+
+/// Where following `ty` one alternative at a time ends.
+enum SinglePath<'a> {
+    /// At a map, with its span.
+    Map(cddl::ast::Span),
+    /// At a type with several alternatives, read in this scope.
+    Choice(Alts<'a>, Rc<Scope<'a>>, usize),
+}
+
+/// Follow `ty` while it has one alternative that is a rule reference, a
+/// parenthesised type or a tag. `None` when the path ends anywhere but at
+/// a map or a choice (an array, a scalar, an unresolved name), or the
+/// walk's budget runs out.
+fn single_path_to_map<'a>(
+    rules: &RuleIndex<'a>,
+    mut ty: Alts<'a>,
+    mut scope: Rc<Scope<'a>>,
+    mut hops: usize,
+    work: &SpanWalkBudget,
+) -> Option<SinglePath<'a>> {
+    loop {
+        if !work.spend() {
+            return None;
+        }
+        let mut choices = ty.choices(rules);
+        let (Some(only), None) = (choices.next(), choices.next()) else {
+            return Some(SinglePath::Choice(ty, scope, hops));
+        };
+        match resolve_type2(rules, &only.type1.type2, Rc::clone(&scope), hops) {
+            Resolved::Into(SpanCursor::Container(t2, _)) => {
+                return matches!(t2, cddl::ast::Type2::Map { .. })
+                    .then(|| SinglePath::Map(type2_span(t2)));
+            }
+            Resolved::Into(SpanCursor::Type(inner, inner_scope, inner_hops)) => {
+                ty = inner;
+                scope = inner_scope;
+                hops = inner_hops;
+            }
+            Resolved::Dead => return None,
+        }
+    }
+}
+
 /// Type held by the first entry matching `seg`, with its read scope.
 ///
 /// Recurses on schema groups (once per spliced group rule), not data.
@@ -1899,7 +2266,7 @@ fn map_entry_target<'a>(
     choices: &'a [cddl::ast::GroupChoice<'a>],
     seg: &Segment,
     scope: &Rc<Scope<'a>>,
-    visited: &mut Vec<&'a str>,
+    visited: &mut Vec<RuleKey<'a>>,
 ) -> Option<(&'a cddl::ast::Type<'a>, Rc<Scope<'a>>)> {
     for choice in choices {
         for (entry, _) in &choice.group_entries {
@@ -1916,7 +2283,7 @@ fn map_one_entry<'a>(
     entry: &'a cddl::ast::GroupEntry<'a>,
     seg: &Segment,
     scope: &Rc<Scope<'a>>,
-    visited: &mut Vec<&'a str>,
+    visited: &mut Vec<RuleKey<'a>>,
 ) -> Option<(&'a cddl::ast::Type<'a>, Rc<Scope<'a>>)> {
     use cddl::ast::GroupEntry;
     match entry {
@@ -1933,21 +2300,191 @@ fn map_one_entry<'a>(
             map_entry_target(rules, &group.group_choices, seg, scope, visited)
         }
         GroupEntry::TypeGroupname { ge, .. } => {
-            let spliced = rules.group_rule(ge.name.ident)?;
+            let name = RuleKey::of(&ge.name);
+            let spliced = rules.group_rule(name)?;
             // Schema recursion once per spliced group rule; hop-bounded.
-            if visited.contains(&ge.name.ident) || visited.len() >= MAX_SPAN_RULE_HOPS {
+            if visited.contains(&name) || visited.len() >= MAX_SPAN_RULE_HOPS {
                 return None;
             }
-            let inner_scope = enter_rule_scope(
-                scope,
-                rules.generic_params(ge.name.ident),
-                ge.generic_args.as_ref(),
-            );
-            visited.push(ge.name.ident);
+            let inner_scope =
+                enter_rule_scope(scope, rules.generic_params(name), ge.generic_args.as_ref());
+            visited.push(name);
             let found = map_one_entry(rules, spliced, seg, &inner_scope, visited);
             visited.pop();
             found
         }
+    }
+}
+
+/// How far an alternative of a choice can hold the next segment of a path.
+/// Ordered: a walk through a choice takes the first alternative of the
+/// greatest fit.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
+enum Fit {
+    /// No container, or one that cannot hold the segment: a map whose
+    /// members all have other keys, an array too short for the index.
+    No,
+    /// A container that may hold it, which is not settled here: a map
+    /// whose keys are types or literals of another kind, an array whose
+    /// slots repeat a group.
+    Maybe,
+    /// A map with a member of that key, an array with a slot at that index.
+    Holds,
+}
+
+/// Deepest chain of choices [`cursor_fit`] follows to a container; past
+/// it an alternative may hold the segment.
+const MAX_FIT_DEPTH: usize = MAX_SPAN_RULE_HOPS;
+
+/// How far the type `cursor` resolved to can hold the path segment `seg`:
+/// a container by its members or slots, a type by its best alternative.
+/// `None` once the walk's budget is spent.
+fn cursor_fit<'a>(
+    rules: &RuleIndex<'a>,
+    cursor: &SpanCursor<'a>,
+    seg: &Segment,
+    work: &SpanWalkBudget,
+    depth: usize,
+) -> Option<Fit> {
+    use cddl::ast::Type2;
+    if !work.spend() {
+        return None;
+    }
+    match cursor {
+        SpanCursor::Container(Type2::Map { group, .. }, _) => Some(map_group_fit(
+            rules,
+            &group.group_choices,
+            seg,
+            &mut Vec::new(),
+        )),
+        SpanCursor::Container(Type2::Array { group, .. }, scope) => {
+            let Segment::Index(idx) = seg else {
+                return Some(Fit::No);
+            };
+            let mut fit = Fit::No;
+            for choice in &group.group_choices {
+                let mut slots = ArrayCursor::new(rules, *idx, false);
+                let start = slots.start_positions();
+                slots.walk_entries(&choice.group_entries, &start, scope);
+                if slots.bail {
+                    fit = fit.max(Fit::Maybe);
+                } else if !slots.candidates.is_empty() {
+                    return Some(Fit::Holds);
+                }
+            }
+            Some(fit)
+        }
+        SpanCursor::Container(..) => Some(Fit::No),
+        SpanCursor::Type(alts, scope, hops) => {
+            if depth >= MAX_FIT_DEPTH {
+                return Some(Fit::Maybe);
+            }
+            let mut fit = Fit::No;
+            for choice in alts.choices(rules) {
+                if let Resolved::Into(into) =
+                    resolve_type2(rules, &choice.type1.type2, Rc::clone(scope), *hops)
+                {
+                    fit = fit.max(cursor_fit(rules, &into, seg, work, depth + 1)?);
+                    if fit == Fit::Holds {
+                        break;
+                    }
+                }
+            }
+            Some(fit)
+        }
+    }
+}
+
+/// How far a map group (its choices, spliced groups included) can hold the
+/// entry the path segment `seg` names.
+fn map_group_fit<'a>(
+    rules: &RuleIndex<'a>,
+    choices: &'a [cddl::ast::GroupChoice<'a>],
+    seg: &Segment,
+    visited: &mut Vec<RuleKey<'a>>,
+) -> Fit {
+    let mut fit = Fit::No;
+    for choice in choices {
+        for (entry, _) in &choice.group_entries {
+            fit = fit.max(map_entry_fit(rules, entry, seg, visited));
+            if fit == Fit::Holds {
+                return fit;
+            }
+        }
+    }
+    fit
+}
+
+/// [`map_group_fit`] for one entry of a map group.
+fn map_entry_fit<'a>(
+    rules: &RuleIndex<'a>,
+    entry: &'a cddl::ast::GroupEntry<'a>,
+    seg: &Segment,
+    visited: &mut Vec<RuleKey<'a>>,
+) -> Fit {
+    use cddl::ast::GroupEntry;
+    match entry {
+        GroupEntry::ValueMemberKey { ge, .. } => match ge.member_key.as_ref() {
+            Some(mk) => member_key_fit(mk, seg),
+            None => Fit::Maybe,
+        },
+        GroupEntry::InlineGroup { group, .. } => {
+            map_group_fit(rules, &group.group_choices, seg, visited)
+        }
+        GroupEntry::TypeGroupname { ge, .. } => {
+            let name = RuleKey::of(&ge.name);
+            let Some(spliced) = rules.group_rule(name) else {
+                return Fit::Maybe;
+            };
+            if visited.contains(&name) || visited.len() >= MAX_SPAN_RULE_HOPS {
+                return Fit::Maybe;
+            }
+            visited.push(name);
+            let fit = map_entry_fit(rules, spliced, seg, visited);
+            visited.pop();
+            fit
+        }
+    }
+}
+
+/// How far a map member written with the key `mk` can be the entry `seg`
+/// names: a text or integer key value holds a segment naming that key or
+/// not; a key type, or a key value of another kind, may. An entry the
+/// validator names by its position or by nothing has a key rendering past
+/// its bound, which only a text key that long can be.
+fn member_key_fit(mk: &cddl::ast::MemberKey<'_>, seg: &Segment) -> Fit {
+    use cddl::ast::MemberKey;
+    use cddl::token::Value as V;
+    if member_key_matches(mk, seg) {
+        return Fit::Holds;
+    }
+    let text_key = match mk {
+        MemberKey::Bareword { ident, .. } => Some(ident.ident),
+        MemberKey::Value {
+            value: V::TEXT(t), ..
+        } => Some(t.as_ref()),
+        _ => None,
+    };
+    let int_key = matches!(
+        mk,
+        MemberKey::Value {
+            value: V::UINT(_) | V::INT(_),
+            ..
+        }
+    );
+    match (text_key, seg) {
+        (Some(text), Segment::Index(_) | Segment::Unnamed) => {
+            if format!("{:?}", text).len() > cddl::validator::MAX_RENDERED_DATA_LENGTH {
+                Fit::Maybe
+            } else {
+                Fit::No
+            }
+        }
+        (Some(_), Segment::Opaque) => Fit::Maybe,
+        (Some(_), _) => Fit::No,
+        (None, Segment::Opaque) if int_key => Fit::Maybe,
+        (None, _) if int_key => Fit::No,
+        _ => Fit::Maybe,
     }
 }
 
@@ -2004,7 +2541,7 @@ fn occurrence_bounds(occur: Option<&cddl::ast::Occurrence<'_>>) -> (usize, Optio
 enum SpanCandidate<'a> {
     /// The entry's type, the scope it is read in, and the references
     /// resolved at the next position to reach it.
-    Type(&'a cddl::ast::Type<'a>, Rc<Scope<'a>>, usize),
+    Type(Alts<'a>, Rc<Scope<'a>>, usize),
     /// A name bound to a generic argument: the argument, read in the
     /// scope it was written in.
     Type2(&'a cddl::ast::Type2<'a>, Rc<Scope<'a>>, usize),
@@ -2024,7 +2561,7 @@ struct ArrayCursor<'a, 'b> {
     /// Unsettable shape (repeated group / refused recursion) → discard for the
     /// enclosing container span.
     bail: bool,
-    visited: Vec<&'a str>,
+    visited: Vec<RuleKey<'a>>,
 }
 
 impl<'a, 'b> ArrayCursor<'a, 'b> {
@@ -2125,7 +2662,7 @@ impl<'a, 'b> ArrayCursor<'a, 'b> {
                 if self.covers(positions, max) {
                     // Entry consumed a segment — reset hop count.
                     self.candidates
-                        .push(SpanCandidate::Type(&ge.entry_type, Rc::clone(scope), 0));
+                        .push(SpanCandidate::Type(Alts::One(&ge.entry_type), Rc::clone(scope), 0));
                 }
                 self.advance(positions, min, max)
             }
@@ -2138,34 +2675,37 @@ impl<'a, 'b> ArrayCursor<'a, 'b> {
                 self.walk_choices(&group.group_choices, positions, scope)
             }
             // Array name splices if it is a group rule; else one slot.
-            GroupEntry::TypeGroupname { ge, .. } => match self.rules.group_rule(ge.name.ident) {
-                Some(spliced) => {
-                    if ge.occur.is_some()
-                        || self.visited.contains(&ge.name.ident)
-                        || self.visited.len() >= MAX_SPAN_RULE_HOPS
-                    {
-                        self.bail = true;
-                        return positions.to_vec();
+            GroupEntry::TypeGroupname { ge, .. } => {
+                let name = RuleKey::of(&ge.name);
+                match self.rules.group_rule(name) {
+                    Some(spliced) => {
+                        if ge.occur.is_some()
+                            || self.visited.contains(&name)
+                            || self.visited.len() >= MAX_SPAN_RULE_HOPS
+                        {
+                            self.bail = true;
+                            return positions.to_vec();
+                        }
+                        let inner_scope = enter_rule_scope(
+                            scope,
+                            self.rules.generic_params(name),
+                            ge.generic_args.as_ref(),
+                        );
+                        self.visited.push(name);
+                        let after = self.walk_entry(spliced, positions, &inner_scope);
+                        self.visited.pop();
+                        after
                     }
-                    let inner_scope = enter_rule_scope(
-                        scope,
-                        self.rules.generic_params(ge.name.ident),
-                        ge.generic_args.as_ref(),
-                    );
-                    self.visited.push(ge.name.ident);
-                    let after = self.walk_entry(spliced, positions, &inner_scope);
-                    self.visited.pop();
-                    after
-                }
-                None => {
-                    let (min, max) = occurrence_bounds(ge.occur.as_ref());
-                    if self.covers(positions, max) {
-                        let candidate = self.groupname_candidate(ge, scope);
-                        self.candidates.push(candidate);
+                    None => {
+                        let (min, max) = occurrence_bounds(ge.occur.as_ref());
+                        if self.covers(positions, max) {
+                            let candidate = self.groupname_candidate(ge, scope);
+                            self.candidates.push(candidate);
+                        }
+                        self.advance(positions, min, max)
                     }
-                    self.advance(positions, min, max)
                 }
-            },
+            }
         }
     }
 
@@ -2200,10 +2740,10 @@ impl<'a, 'b> ArrayCursor<'a, 'b> {
         if self.tail_empty {
             return SpanCandidate::Span(ge.name.span);
         }
-        if let Some(inner) = self.rules.type_rule(ge.name.ident) {
+        if let Some(inner) = self.rules.type_alts(RuleKey::of(&ge.name), ge.name.span) {
             let inner_scope = enter_rule_scope(
                 scope,
-                self.rules.generic_params(ge.name.ident),
+                self.rules.generic_params(RuleKey::of(&ge.name)),
                 ge.generic_args.as_ref(),
             );
             return SpanCandidate::Type(inner, inner_scope, 1);
@@ -2214,6 +2754,35 @@ impl<'a, 'b> ArrayCursor<'a, 'b> {
 
 /// Pull `expected X` from a free-form reason; strip leading `type `.
 fn extract_expected(reason: &str) -> Option<String> {
+    // A map that lacks an entry the group names: the key is what was
+    // expected. `map missing key: <key>`, `map requires entry key of type
+    // <T>`, `map requires entry with key of type <T>` / `in range <R>`, and
+    // the occurrence forms (`map requires at least one entry with key …`,
+    // `map must contain no more than N entries with key …`). Only the
+    // validator's own map reasons are read this way: another reason may
+    // quote data holding the same words.
+    if let Some(rest) = reason
+        .strip_prefix("map ")
+        .or_else(|| reason.strip_prefix("object "))
+    {
+        for marker in [
+            "missing key: ",
+            "requires entry key of type ",
+            " with key of type ",
+            " with key in range ",
+            " with key ",
+        ] {
+            let at = if marker.starts_with(' ') {
+                rest.find(marker)
+            } else {
+                rest.starts_with(marker).then_some(0)
+            };
+            if let Some(idx) = at {
+                let key = rest[idx + marker.len()..].trim();
+                return (!key.is_empty()).then(|| key.to_string());
+            }
+        }
+    }
     let lower = reason.to_ascii_lowercase();
     // `unexpected key` names the data item, not an expected type.
     let idx = lower
@@ -2241,12 +2810,17 @@ fn extract_expected(reason: &str) -> Option<String> {
 }
 
 /// End of the expected type in text after `expected `: first ` but `, `, got`,
+/// ` got ` (a text literal mismatch reads `expected value "foo" got "…"`),
 /// or newline outside brackets/quotes. Unclosed brackets read as plain text.
 fn expected_end(tail: &str) -> usize {
     let mut i = 0;
     while i < tail.len() {
         let rest = &tail[i..];
-        if rest.starts_with('\n') || rest.starts_with(" but ") || rest.starts_with(", got") {
+        if rest.starts_with('\n')
+            || rest.starts_with(" but ")
+            || rest.starts_with(", got")
+            || rest.starts_with(" got ")
+        {
             return i;
         }
         let c = rest.chars().next().expect("a char boundary");
@@ -2277,10 +2851,16 @@ fn quoted_end(s: &str) -> Option<usize> {
     None
 }
 
-/// anweiss `cbor_location` → decoder path (`$`, `$.key`, `$[n]`).
+/// anweiss `cbor_location` → decoder path (`$`, `$.key`, `$[n]`), in the
+/// grammar of `ts/cddl/cborPath.ts`.
 ///
-/// Text keys `"…"`, integer keys `Integer(…)`, indices bare; other keys keep
-/// CDDL literal form (`1.5`, `h'…'`, `true`, `null`).
+/// A text key is `.key` when it is an identifier (ASCII
+/// `[A-Za-z_][A-Za-z0-9_-]*`) and `["key"]` otherwise, with `\` written
+/// `\\` and `"` written `\"` and nothing else escaped. Integer keys and
+/// indices are `[n]`, composite keys `[<diagnostic notation>]`, float keys
+/// `[1.5]` and a component naming no entry (`...`) `[...]`; byte string,
+/// boolean and null keys keep their CDDL literal form (`.h'…'`, `.true`,
+/// `.null`).
 fn cbor_location_to_json_path(loc: &str) -> String {
     let trimmed = loc.trim_start_matches('/');
     if trimmed.is_empty() {
@@ -2288,32 +2868,193 @@ fn cbor_location_to_json_path(loc: &str) -> String {
     }
     let mut out = String::from("$");
     for seg in split_location_segments(trimmed) {
-        match classify_segment(&seg) {
-            Segment::Index(i) => {
-                out.push('[');
-                out.push_str(&i.to_string());
-                out.push(']');
-            }
-            Segment::TextKey(s) => {
-                out.push('.');
-                out.push_str(&s);
-            }
-            Segment::IntKey(n) => {
-                out.push('[');
-                out.push_str(&n.to_string());
-                out.push(']');
-            }
-            Segment::FloatKey(_)
-            | Segment::BytesKey(_)
-            | Segment::BoolKey(_)
-            | Segment::NullKey
-            | Segment::Opaque => {
-                out.push('.');
-                out.push_str(&seg);
-            }
-        }
+        push_path_segment(&mut out, &seg, &classify_segment(&seg));
     }
     out
+}
+
+/// Longest key rendering [`json_path_in_tree`] writes out for an entry the
+/// validator named by its position or by nothing (a key past the
+/// validator's own rendering bound); past it the validator's component is
+/// kept.
+const MAX_PATH_KEY_LEN: usize = 1024;
+
+/// How the validator names an entry whose key renders past its bound when
+/// the entry's position would read as an integer key of the same map.
+const UNNAMED_ENTRY: &str = "...";
+
+/// [`cbor_location_to_json_path`], with the components that name a map
+/// entry by its position or by nothing resolved against the decoded `tree`.
+///
+/// The validator names an entry whose key renders past its bound by the
+/// entry's position (a bare index, when the map holds no integer key of
+/// that value) or by nothing (`...`, when it does). A path reader takes a
+/// bare index for an integer key, or for the text key of the same digits,
+/// and `[...]` for the text key `...`; so where the entry is known (its
+/// position; for `...`, the one entry of the map whose key can be the
+/// unnamed one) and its key is a text or byte string, the path writes that
+/// key out (up to [`MAX_PATH_KEY_LEN`]). Any other such entry keeps the
+/// validator's component, which its byte spans tell apart.
+///
+/// Only those components are looked up: the tree is walked no further than
+/// the last of them, and not at all when the location has none, so a report
+/// on many entries of one large map costs no second walk per error.
+fn json_path_in_tree<'t>(tree: &'t Value, loc: &str, keys: &mut MapKeyIndex<'t>) -> String {
+    let trimmed = loc.trim_start_matches('/');
+    let mut out = String::from("$");
+    if trimmed.is_empty() {
+        return out;
+    }
+    let segments: Vec<(String, Segment)> = split_location_segments(trimmed)
+        .into_iter()
+        .map(|seg| {
+            let classified = classify_segment(&seg);
+            (seg, classified)
+        })
+        .collect();
+    let last_resolved = segments
+        .iter()
+        .rposition(|(_, classified)| matches!(classified, Segment::Unnamed | Segment::Index(_)));
+    let mut node: Option<&Value> = last_resolved.map(|_| tree);
+    for (at, (seg, classified)) in segments.iter().enumerate() {
+        let item = node.map(unwrap_tags);
+        let step = item.and_then(|item| keys.step_into(item, classified));
+        let unnamed_or_positional = match (classified, item) {
+            (Segment::Unnamed | Segment::Index(_), Some(item)) => node_type(item) == "Map",
+            _ => false,
+        };
+        let written = step
+            .as_ref()
+            .and_then(|step| step.key)
+            .filter(|key| unnamed_or_positional && !is_integer_node(key))
+            .and_then(written_key_segment);
+        match written {
+            Some(written) => out.push_str(&written),
+            None => push_path_segment(&mut out, seg, classified),
+        }
+        node = match last_resolved {
+            Some(last) if at < last => step.map(|step| step.value),
+            _ => None,
+        };
+    }
+    out
+}
+
+/// Whether a decoded node is an integer.
+fn is_integer_node(node: &Value) -> bool {
+    matches!(
+        node_type(node),
+        "U8" | "U16" | "U32" | "U64" | "I8" | "I16" | "I32" | "I64" | "Int"
+    )
+}
+
+/// The path component naming the entry under the decoded map key `key`,
+/// when it is a text or byte string whose rendering fits
+/// [`MAX_PATH_KEY_LEN`].
+fn written_key_segment(key: &Value) -> Option<String> {
+    if let Some(text) = diagnostic::string_payload(key, "String", "IndefiniteLengthString") {
+        let mut out = String::new();
+        push_text_key(&mut out, &text);
+        return (out.len() <= MAX_PATH_KEY_LEN).then_some(out);
+    }
+    let hex = diagnostic::string_payload(key, "Bytes", "IndefiniteLengthBytes")?;
+    let out = format!(".h'{}'", hex);
+    (out.len() <= MAX_PATH_KEY_LEN).then_some(out)
+}
+
+/// The entry of a decoded map the validator names by nothing
+/// ([`UNNAMED_ENTRY`]): the one entry whose key renders past the
+/// validator's bound. `None` when that is not one entry for certain: no
+/// text or byte string key renders past it, several do, or a composite key
+/// (whose rendering is not measured here) may.
+fn unnamed_entry(map: &Value) -> Option<&Value> {
+    let bound = cddl::validator::MAX_RENDERED_DATA_LENGTH;
+    let mut found = None;
+    for entry in map.get("values")?.as_array()? {
+        let Some(key) = entry.get("key") else {
+            continue;
+        };
+        let rendered_past_bound =
+            if let Some(text) = diagnostic::string_payload(key, "String", "IndefiniteLengthString") {
+                format!("{:?}", text).len() > bound
+            } else if let Some(hex) =
+                diagnostic::string_payload(key, "Bytes", "IndefiniteLengthBytes")
+            {
+                hex.len() + 3 > bound
+            } else if is_integer_node(key)
+                || matches!(
+                    node_type(key),
+                    "F16" | "F32" | "F64" | "Bool" | "Null" | "Undefined"
+                )
+            {
+                false
+            } else {
+                return None;
+            };
+        if rendered_past_bound {
+            if found.is_some() {
+                return None;
+            }
+            found = Some(entry);
+        }
+    }
+    found
+}
+
+/// Append the path component for the location component `seg`.
+fn push_path_segment(out: &mut String, seg: &str, classified: &Segment) {
+    match classified {
+        Segment::Index(i) => {
+            out.push('[');
+            out.push_str(&i.to_string());
+            out.push(']');
+        }
+        Segment::TextKey(s) => push_text_key(out, s),
+        Segment::IntKey(n) => {
+            out.push('[');
+            out.push_str(&n.to_string());
+            out.push(']');
+        }
+        // A composite key is written in the bracket form, as its
+        // diagnostic notation reads: `$[[2, h'0102']]`, `$[{1: 2}]`.
+        Segment::CompositeKey(_) => {
+            out.push('[');
+            out.push_str(seg);
+            out.push(']');
+        }
+        // A float literal holds a `.`, and a component naming no entry
+        // may hold anything: both in the bracket form.
+        Segment::FloatKey(_) | Segment::Unnamed | Segment::Opaque => {
+            out.push('[');
+            out.push_str(seg);
+            out.push(']');
+        }
+        Segment::BytesKey(_) | Segment::BoolKey(_) | Segment::NullKey => {
+            out.push('.');
+            out.push_str(seg);
+        }
+    }
+}
+
+/// Append the path segment of the text key `key`: `.key` for an identifier,
+/// `["key"]` (`\` and `"` escaped) for any other text.
+fn push_text_key(out: &mut String, key: &str) {
+    let mut chars = key.chars();
+    let identifier = matches!(chars.next(), Some(c) if c.is_ascii_alphabetic() || c == '_')
+        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-');
+    if identifier {
+        out.push('.');
+        out.push_str(key);
+        return;
+    }
+    out.push_str("[\"");
+    for c in key.chars() {
+        if c == '\\' || c == '"' {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    out.push_str("\"]");
 }
 
 enum Segment {
@@ -2328,6 +3069,13 @@ enum Segment {
     BoolKey(bool),
     /// A key written as `null`.
     NullKey,
+    /// An array, map, tagged or simple-value key, written in CBOR
+    /// diagnostic notation (`[2, h'0102']`, `{1: 2}`, `24(0)`, `simple(32)`).
+    CompositeKey(diagnostic::Item),
+    /// The validator's name for an entry whose key renders past its bound
+    /// when the entry's position would read as an integer key
+    /// ([`UNNAMED_ENTRY`]).
+    Unnamed,
     /// A component in no form this recognises. Its text still names the
     /// item in the path, but nothing can be looked up by it.
     Opaque,
@@ -2340,70 +3088,66 @@ fn location_depth(loc: &str) -> usize {
         return 0;
     }
     let mut segments = 1;
-    let mut in_quotes = false;
-    let mut paren_depth = 0i32;
-    let mut escaped = false;
-    for c in s.chars() {
-        if escaped {
-            escaped = false;
-            continue;
-        }
-        match c {
-            '\\' if in_quotes => escaped = true,
-            '"' => in_quotes = !in_quotes,
-            '(' if !in_quotes => paren_depth += 1,
-            ')' if !in_quotes && paren_depth > 0 => paren_depth -= 1,
-            '/' if !in_quotes && paren_depth == 0 => segments += 1,
-            _ => {}
-        }
-    }
+    location_separators(s, |_| segments += 1);
     segments
 }
 
-/// Split on `/` but keep escaped text inside `"…"` or balanced `(…)` intact,
-/// so segments like `"a/b"` or `Integer(-1)` aren't torn apart.
+/// Split on the `/` between components (see [`location_separators`]), so
+/// segments like `"a/b"`, `Integer(-1)` or a composite key `[2, h'0102']`
+/// aren't torn apart.
 fn split_location_segments(s: &str) -> Vec<String> {
     let mut out = Vec::new();
-    let mut buf = String::new();
-    let mut in_quotes = false;
-    let mut paren_depth = 0i32;
-    let mut escaped = false;
-    for c in s.chars() {
-        if escaped {
-            buf.push(c);
-            escaped = false;
-            continue;
-        }
-        match c {
-            '\\' if in_quotes => {
-                buf.push(c);
-                escaped = true;
-            }
-            '"' => {
-                in_quotes = !in_quotes;
-                buf.push(c);
-            }
-            '(' if !in_quotes => {
-                paren_depth += 1;
-                buf.push(c);
-            }
-            ')' if !in_quotes && paren_depth > 0 => {
-                paren_depth -= 1;
-                buf.push(c);
-            }
-            '/' if !in_quotes && paren_depth == 0 => {
-                out.push(std::mem::take(&mut buf));
-            }
-            _ => buf.push(c),
-        }
-    }
-    if !buf.is_empty() {
-        out.push(buf);
+    let mut from = 0;
+    location_separators(s, |at| {
+        out.push(s[from..at].to_string());
+        from = at + 1;
+    });
+    if from < s.len() {
+        out.push(s[from..].to_string());
     }
     out
 }
 
+/// Calls `at` with the byte index of every `/` that separates two
+/// components of the location `s` (leading `/` removed).
+///
+/// A text is quoted with its `"` and `\` escaped, both a text key
+/// component (`"a\"/b"`) and a text inside a composite key, so no `/`
+/// between its quotes separates anything. A composite key keeps its
+/// brackets (`(…)`, `[…]`, `{…}`) balanced. Any other component runs to the
+/// next `/`.
+fn location_separators(s: &str, mut at: impl FnMut(usize)) {
+    let bytes = s.as_bytes();
+    let mut i = 0;
+    let mut depth = 0usize;
+    let mut in_text = false;
+    let mut escaped = false;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if in_text {
+            match b {
+                _ if escaped => escaped = false,
+                b'\\' => escaped = true,
+                b'"' => in_text = false,
+                _ => {}
+            }
+        } else {
+            match b {
+                b'"' => in_text = true,
+                b'(' | b'[' | b'{' => depth += 1,
+                b')' | b']' | b'}' if depth > 0 => depth -= 1,
+                b'/' if depth == 0 => at(i),
+                _ => {}
+            }
+        }
+        i += 1;
+    }
+}
+
 fn classify_segment(seg: &str) -> Segment {
+    if seg == UNNAMED_ENTRY {
+        return Segment::Unnamed;
+    }
     if let Ok(i) = seg.parse::<usize>() {
         return Segment::Index(i);
     }
@@ -2426,6 +3170,9 @@ fn classify_segment(seg: &str) -> Segment {
     if let Some(f) = parse_float_segment(seg) {
         return Segment::FloatKey(f);
     }
+    if let Some(item) = diagnostic::parse_composite(seg) {
+        return Segment::CompositeKey(item);
+    }
     Segment::Opaque
 }
 
@@ -2445,36 +3192,11 @@ fn parse_float_segment(seg: &str) -> Option<f64> {
     seg.parse::<f64>().ok()
 }
 
-/// Strip the surrounding `"` produced by `format!("{:?}", &str)`. Returns
-/// `None` if the segment isn't in that form.
+/// The text of a text-key component: the validator quotes the key with its
+/// quotes, backslashes and control characters escaped, as text inside a
+/// composite key. `None` if the segment isn't in that form.
 fn strip_debug_quotes(seg: &str) -> Option<String> {
-    let bytes = seg.as_bytes();
-    if bytes.len() < 2 || bytes.first() != Some(&b'"') || bytes.last() != Some(&b'"') {
-        return None;
-    }
-    let inner = &seg[1..seg.len() - 1];
-    // Undo Debug `&str` escapes we need: `\\`, `\"`.
-    let mut out = String::with_capacity(inner.len());
-    let mut it = inner.chars();
-    while let Some(c) = it.next() {
-        if c == '\\' {
-            match it.next() {
-                Some('"') => out.push('"'),
-                Some('\\') => out.push('\\'),
-                Some('n') => out.push('\n'),
-                Some('t') => out.push('\t'),
-                Some('r') => out.push('\r'),
-                Some(other) => {
-                    out.push('\\');
-                    out.push(other);
-                }
-                None => out.push('\\'),
-            }
-        } else {
-            out.push(c);
-        }
-    }
-    Some(out)
+    diagnostic::parse_text(seg)
 }
 
 /// Innermost signed int from `Integer(Integer(…))` key segments.
@@ -2508,25 +3230,115 @@ struct NodeView {
     preview: String,
 }
 
-/// Per-report location → node cache (resolve each location once).
-struct LocatedNodes {
+/// Per-report location → node cache (resolve each location once), with
+/// the text keys of the large maps the locations go through.
+struct LocatedNodes<'t> {
     by_location: std::collections::HashMap<String, Option<LocatedNode>>,
+    keys: MapKeyIndex<'t>,
 }
 
-impl LocatedNodes {
+impl<'t> LocatedNodes<'t> {
     fn new() -> Self {
         LocatedNodes {
             by_location: std::collections::HashMap::new(),
+            keys: MapKeyIndex::default(),
         }
     }
 
     /// Node for `loc` in `tree`, memoised including failed lookups.
-    fn resolve(&mut self, tree: &Value, loc: &str, cbor_len: usize) -> Option<&LocatedNode> {
+    fn resolve(&mut self, tree: &'t Value, loc: &str, cbor_len: usize) -> Option<&LocatedNode> {
         if !self.by_location.contains_key(loc) {
-            let node = locate_cbor_node(tree, loc, cbor_len);
+            let node = locate_cbor_node(tree, loc, cbor_len, Some(&mut self.keys));
             self.by_location.insert(loc.to_string(), node);
         }
         self.by_location.get(loc).and_then(Option::as_ref)
+    }
+}
+
+/// Fewest entries a decoded map has for [`MapKeyIndex`] to index its keys;
+/// a smaller map is searched entry by entry.
+const INDEXED_MAP_ENTRIES: usize = 16;
+
+/// The keys of the large decoded maps one report looks entries up in, each
+/// map indexed on its first lookup. A report on many entries of one map
+/// (every value of a large map of the wrong type) then costs one pass over
+/// the map, not one per entry.
+#[derive(Default)]
+struct MapKeyIndex<'t> {
+    maps: std::collections::HashMap<*const Value, MapKeys<'t>>,
+}
+
+/// The first entry of each key of one decoded map, by kind of key.
+struct MapKeys<'t> {
+    /// Definite text keys; `None` when a key is a text of indefinite length
+    /// (the map's text keys are then searched entry by entry, as such a key
+    /// is not held as one text).
+    text: Option<std::collections::HashMap<&'t str, usize>>,
+    /// Integer keys, by value.
+    ints: std::collections::HashMap<i64, usize>,
+}
+
+impl<'t> MapKeys<'t> {
+    fn of(entries: &'t [Value]) -> Self {
+        let mut text = Some(std::collections::HashMap::with_capacity(entries.len()));
+        let mut ints = std::collections::HashMap::new();
+        for (at, entry) in entries.iter().enumerate() {
+            let Some(key) = entry.get("key") else {
+                continue;
+            };
+            match node_type(key) {
+                "String" => {
+                    if let (Some(index), Some(t)) =
+                        (text.as_mut(), key.get("value").and_then(Value::as_str))
+                    {
+                        index.entry(t).or_insert(at);
+                    }
+                }
+                "IndefiniteLengthString" => text = None,
+                _ if is_integer_node(key) => {
+                    if let Some(n) = key.get("value").and_then(Value::as_i64) {
+                        ints.entry(n).or_insert(at);
+                    }
+                }
+                _ => {}
+            }
+        }
+        MapKeys { text, ints }
+    }
+}
+
+impl<'t> MapKeyIndex<'t> {
+    /// [`step_into`], through the index for a text key or a bare integer
+    /// of a large map.
+    fn step_into(&mut self, node: &'t Value, seg: &Segment) -> Option<Step<'t>> {
+        if matches!(seg, Segment::TextKey(_) | Segment::Index(_)) && node_type(node) == "Map" {
+            if let Some(entries) = node.get("values").and_then(Value::as_array) {
+                if entries.len() >= INDEXED_MAP_ENTRIES {
+                    let keys = self
+                        .maps
+                        .entry(node as *const Value)
+                        .or_insert_with(|| MapKeys::of(entries));
+                    match (seg, &keys.text) {
+                        (Segment::TextKey(key), Some(text)) => {
+                            return text
+                                .get(key.as_str())
+                                .and_then(|&at| Step::entry(&entries[at]));
+                        }
+                        // A bare integer is an integer key when the map has
+                        // one of that value, else the entry at that position.
+                        (Segment::Index(i), _) => {
+                            let at = std::convert::TryFrom::try_from(*i)
+                                .ok()
+                                .and_then(|n: i64| keys.ints.get(&n).copied())
+                                .unwrap_or(*i);
+                            return entries.get(at).and_then(Step::entry);
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+        step_into(node, seg)
     }
 }
 
@@ -2538,6 +3350,10 @@ struct LocatedNode {
     ///
     /// Paths are tag-transparent; [`reason_names_tagged_item`] picks wrapper vs content.
     untagged: Option<NodeView>,
+    /// The key of the map entry the path's last segment selected, when the
+    /// item is a map entry's value: an error about the entry itself (an
+    /// unexpected key) is anchored on it.
+    key: Option<NodeView>,
     /// True when the node lives inside an embedded CBOR payload, so the
     /// spans address bytes the outer schema describes only as a byte
     /// string.
@@ -2566,7 +3382,12 @@ const MAX_SEQUENCE_ITEMS: usize = 4096;
 /// Unwrap `Tag` chains before each segment (anweiss omits tag segments); return
 /// wrapped and unwrapped forms. Leftover segments into a bstr → decode `.cbor` /
 /// `.cborseq` and continue (offsets rebased to the outer document).
-fn locate_cbor_node(tree: &Value, loc: &str, cbor_len: usize) -> Option<LocatedNode> {
+fn locate_cbor_node<'t>(
+    tree: &'t Value,
+    loc: &str,
+    cbor_len: usize,
+    keys: Option<&mut MapKeyIndex<'t>>,
+) -> Option<LocatedNode> {
     let trimmed = loc.trim_start_matches('/');
     let segments: Vec<Segment> = if trimmed.is_empty() {
         Vec::new()
@@ -2576,22 +3397,44 @@ fn locate_cbor_node(tree: &Value, loc: &str, cbor_len: usize) -> Option<LocatedN
             .map(|s| classify_segment(&s))
             .collect()
     };
-    locate_in(tree, &segments, 0, 0, cbor_len)
+    locate_in(tree, &segments, 0, 0, cbor_len, keys)
 }
 
-fn locate_in(
-    tree: &Value,
+/// [`locate_cbor_node`] from `tree`, with `keys` indexing its large maps
+/// (none inside an embedded payload, which is decoded per lookup).
+fn locate_in<'t>(
+    tree: &'t Value,
     segs: &[Segment],
     rebase: usize,
     depth: usize,
     cbor_len: usize,
+    mut keys: Option<&mut MapKeyIndex<'t>>,
 ) -> Option<LocatedNode> {
     // Only stepping in unwraps tags; the terminal item keeps them.
     let mut node = tree;
+    let mut key: Option<&Value> = None;
     for (i, seg) in segs.iter().enumerate() {
         let item = unwrap_tags(node);
-        match step_into(item, seg) {
-            Some(next) => node = next,
+        let step = match keys.as_deref_mut() {
+            Some(keys) => keys.step_into(item, seg),
+            None => step_into(item, seg),
+        };
+        match step {
+            Some(step) => {
+                node = step.value;
+                key = step.key;
+            }
+            // An entry the location names but this lookup cannot find (a
+            // key too long for the validator to write out, say): the map
+            // holding it is the nearest item the error is about.
+            None if node_type(item) == "Map" => {
+                return Some(LocatedNode {
+                    tagged: node_view(item, rebase, cbor_len),
+                    untagged: None,
+                    key: None,
+                    embedded: rebase > 0,
+                });
+            }
             None => return locate_embedded(item, &segs[i..], rebase, depth, cbor_len),
         }
     }
@@ -2599,6 +3442,7 @@ fn locate_in(
     Some(LocatedNode {
         tagged: node_view(node, rebase, cbor_len),
         untagged: (!std::ptr::eq(untagged, node)).then(|| node_view(untagged, rebase, cbor_len)),
+        key: key.map(|k| node_view(k, rebase, cbor_len)),
         embedded: rebase > 0,
     })
 }
@@ -2644,7 +3488,7 @@ fn locate_embedded(
     }
 
     if let Ok(inner) = decoder::decode_cbor_to_value(&payload) {
-        return locate_in(&inner, segs, content_start, depth + 1, cbor_len);
+        return locate_in(&inner, segs, content_start, depth + 1, cbor_len, None);
     }
     // `.cborseq` presented as an array; next segment indexes it.
     let Segment::Index(i) = segs[0] else {
@@ -2658,6 +3502,7 @@ fn locate_embedded(
         content_start + item_start,
         depth + 1,
         cbor_len,
+        None,
     )
 }
 
@@ -2722,87 +3567,89 @@ fn node_type(node: &Value) -> &str {
     node.get("type").and_then(Value::as_str).unwrap_or("")
 }
 
-/// The value of the first entry of a decoded map whose key satisfies
-/// `is_key`.
-fn map_entry_value<'a>(node: &'a Value, is_key: impl Fn(&Value) -> bool) -> Option<&'a Value> {
+/// One step along a location: the node it reaches, and the key of the map
+/// entry it went through when it stepped into a map.
+struct Step<'a> {
+    value: &'a Value,
+    key: Option<&'a Value>,
+}
+
+impl<'a> Step<'a> {
+    fn item(value: &'a Value) -> Step<'a> {
+        Step { value, key: None }
+    }
+
+    /// The step into a decoded map entry `{key, value}`.
+    fn entry(entry: &'a Value) -> Option<Step<'a>> {
+        Some(Step {
+            value: entry.get("value")?,
+            key: entry.get("key"),
+        })
+    }
+}
+
+/// The first entry of a decoded map whose key satisfies `is_key`.
+fn map_entry<'a>(node: &'a Value, is_key: impl Fn(&Value) -> bool) -> Option<Step<'a>> {
     node.get("values")?
         .as_array()?
         .iter()
         .find(|entry| entry.get("key").map(&is_key).unwrap_or(false))
-        .and_then(|entry| entry.get("value"))
+        .and_then(Step::entry)
 }
 
-fn step_into<'a>(node: &'a Value, seg: &Segment) -> Option<&'a Value> {
+fn step_into<'a>(node: &'a Value, seg: &Segment) -> Option<Step<'a>> {
     let type_name = node_type(node);
     match (type_name, seg) {
-        ("Array", Segment::Index(i)) => node.get("values")?.get(*i),
+        ("Array", Segment::Index(i)) => node.get("values")?.get(*i).map(Step::item),
         ("Map", Segment::Index(i)) => {
             // Bare int segments are entry indices or integer map keys; try key first.
             let entries = node.get("values")?.as_array()?;
             for entry in entries {
-                let k = entry.get("key")?;
+                // An indefinite-length map ends in its break, which is no entry.
+                let Some(k) = entry.get("key") else {
+                    continue;
+                };
                 let kt = k.get("type").and_then(Value::as_str).unwrap_or("");
                 if matches!(
                     kt,
                     "U8" | "U16" | "U32" | "U64" | "I8" | "I16" | "I32" | "I64" | "Int"
                 ) {
                     if k.get("value").and_then(Value::as_i64) == Some(*i as i64) {
-                        return entry.get("value");
+                        return Step::entry(entry);
                     }
                 }
             }
-            entries.get(*i).and_then(|e| e.get("value"))
+            entries.get(*i).and_then(Step::entry)
         }
-        ("Map", Segment::TextKey(key)) => {
-            let entries = node.get("values")?.as_array()?;
-            for entry in entries {
-                let k = entry.get("key")?;
-                if k.get("type").and_then(Value::as_str) == Some("String")
-                    && k.get("value").and_then(Value::as_str) == Some(key)
-                {
-                    return entry.get("value");
-                }
-            }
-            None
-        }
-        ("Map", Segment::FloatKey(f)) => map_entry_value(node, |k| {
+        // A string key of indefinite length is the text its chunks spell.
+        ("Map", Segment::TextKey(key)) => map_entry(node, |k| {
+            diagnostic::string_payload_is(k, "String", "IndefiniteLengthString", key)
+        }),
+        ("Map", Segment::FloatKey(f)) => map_entry(node, |k| {
             matches!(node_type(k), "F16" | "F32" | "F64")
                 && k.get("value").and_then(Value::as_f64) == Some(*f)
         }),
         ("Map", Segment::BytesKey(b)) => {
             // Decoder shows bstr content as lowercase hex (literal form).
             let want = hex::encode(b);
-            map_entry_value(node, |k| {
-                node_type(k) == "Bytes"
-                    && k.get("value").and_then(Value::as_str) == Some(want.as_str())
+            map_entry(node, |k| {
+                diagnostic::string_payload_is(k, "Bytes", "IndefiniteLengthBytes", &want)
             })
         }
-        ("Map", Segment::BoolKey(b)) => map_entry_value(node, |k| {
+        ("Map", Segment::BoolKey(b)) => map_entry(node, |k| {
             node_type(k) == "Bool" && k.get("value").and_then(Value::as_bool) == Some(*b)
         }),
-        ("Map", Segment::NullKey) => map_entry_value(node, |k| node_type(k) == "Null"),
-        ("Map", Segment::IntKey(n)) => {
-            let entries = node.get("values")?.as_array()?;
-            for entry in entries {
-                let k = entry.get("key")?;
-                let kt = k.get("type").and_then(Value::as_str).unwrap_or("");
-                if !matches!(
-                    kt,
-                    "U8" | "U16" | "U32" | "U64" | "I8" | "I16" | "I32" | "I64" | "Int"
-                ) {
-                    continue;
-                }
-                if k.get("value").and_then(|v| match v {
-                    Value::Number(num) => Some(num.to_string()),
-                    _ => None,
-                }) == Some(n.to_string())
-                {
-                    return entry.get("value");
-                }
-            }
-            None
+        // The validator reads `undefined` as `null`, and names it so.
+        ("Map", Segment::NullKey) => {
+            map_entry(node, |k| matches!(node_type(k), "Null" | "Undefined"))
         }
-        ("Tag", _) => node.get("value"),
+        ("Map", Segment::IntKey(n)) => map_entry(node, |k| diagnostic::int_node_is(k, *n)),
+        ("Map", Segment::CompositeKey(item)) => {
+            map_entry(node, |k| diagnostic::node_matches(k, item))
+        }
+        // An entry the validator names by nothing, when it can only be one.
+        ("Map", Segment::Unnamed) => unnamed_entry(node).and_then(Step::entry),
+        ("Tag", _) => node.get("value").map(Step::item),
         _ => None,
     }
 }
@@ -3140,6 +3987,59 @@ mod tests {
         );
     }
 
+    /// A root rule is asked for by its name as written, which is how
+    /// `cddl_outline` reports it: `$m` for a socket (its identifier alone
+    /// still names it when no rule is written so). `m` and `$m` are two
+    /// rules, on every export that takes a root.
+    #[test]
+    fn a_root_socket_is_named_as_the_outline_names_it() {
+        use crate::cbor::{cbor_cddl_map, cddl_tools, schema_mapper};
+        let valid = |hex: &str, cddl: &str, rule: &str| {
+            validate_cbor_bytes_against_cddl(&hex::decode(hex).unwrap(), cddl, rule)["valid"]
+                == json!(true)
+        };
+        let kind = |hex: &str, cddl: &str, rule: &str| {
+            validate_cbor_bytes_against_cddl(&hex::decode(hex).unwrap(), cddl, rule)["error"]
+                ["kind"]
+                .clone()
+        };
+        let socket = "$m /= {1: uint}\n$m /= {3: tstr}";
+        let outline = cddl_tools::outline(socket).ok().unwrap();
+        assert_eq!(outline[0]["name"], json!("$m"));
+        for rule in ["$m", "m"] {
+            // {3: "x"} is the second body's; {3: 1} is neither's.
+            assert!(valid("a1036178", socket, rule), "{}", rule);
+            assert!(!valid("a10301", socket, rule), "{}", rule);
+            let bytes = hex::decode("a1036178").unwrap();
+            assert!(
+                schema_mapper::decode_cbor_against_cddl(&bytes, socket, rule).is_ok(),
+                "{}",
+                rule
+            );
+            assert!(
+                cbor_cddl_map::map_cbor_to_cddl(&bytes, socket, rule).is_ok(),
+                "{}",
+                rule
+            );
+        }
+        // Both written: each name is its own rule.
+        let both = "m = uint\n$m /= {1: uint}";
+        assert!(valid("05", both, "m"));
+        assert!(!valid("05", both, "$m"));
+        assert!(valid("a10102", both, "$m"));
+        assert!(!valid("a10102", both, "m"));
+        // A socket named nowhere, and a group socket, are refused as any
+        // other name is.
+        assert_eq!(kind("05", socket, "$x"), json!("missing_rule"));
+        assert_eq!(kind("05", socket, "$$m"), json!("missing_rule"));
+        let group = "t = [$$g]\n$$g //= (1, uint)";
+        assert_eq!(kind("820101", group, "$$g"), json!("group_rule_root"));
+        assert!(
+            schema_mapper::decode_cbor_against_cddl(&hex::decode("05").unwrap(), socket, "$x")
+                .is_err()
+        );
+    }
+
     #[test]
     fn validate_cbor_against_the_ledger_schema_missing_rule() {
         let cddl = load_ledger_cddl();
@@ -3351,15 +4251,16 @@ mod tests {
         assert_eq!(spans[0]["length"], json!(1));
     }
 
-    /// Non-text/int map keys keep CDDL literal form in the path; value spans locate.
+    /// Non-text/int map keys keep CDDL literal form in the path (a float in the
+    /// bracket form, as its `.` would read as a separator); value spans locate.
     #[test]
     fn non_text_map_key_is_located_in_the_document() {
         // (member key, document, path, failing value offset/length)
         let cases: [(&str, &str, &str, u64, u64); 5] = [
             // a1 f93e00 6178 = {1.5: "x"}
-            ("1.5", "a1f93e006178", "$.1.5", 4, 2),
+            ("1.5", "a1f93e006178", "$[1.5]", 4, 2),
             // a1 f93c00 6178 = {1.0: "x"}
-            ("1.0", "a1f93c006178", "$.1.0", 4, 2),
+            ("1.0", "a1f93c006178", "$[1.0]", 4, 2),
             // a1 420102 6178 = {h'0102': "x"}
             ("h'0102'", "a14201026178", "$.h'0102'", 4, 2),
             // a1 f5 6178 = {true: "x"}
@@ -4613,7 +5514,7 @@ mod tests {
 
     #[test]
     fn error_mapping_decodes_the_input_once() {
-        // 1600 failing elems / 3.2 KB: one decode stays under budget (was quadratic).
+        // 1600 failing elems / 3.2 KB: the input is decoded once, so this stays under budget.
         let bytes = hex::decode(uint_array_hex(1600)).unwrap();
         let started = std::time::Instant::now();
         let result = validate_cbor_bytes_against_cddl(&bytes, "root = [* tstr]", "root");
@@ -4638,8 +5539,8 @@ mod tests {
 
     #[test]
     fn error_mapping_resolves_each_location_once() {
-        // Recursive tagged choice fails at every level, all at root path; resolve each
-        // location once (was depth²).
+        // Recursive tagged choice fails at every level, all at root path; each
+        // location is resolved once, not once per level.
         const LEVELS: usize = limits::MAX_CBOR_NESTING_DEPTH;
         let hex = format!("{}6161", "d863".repeat(LEVELS));
         let bytes = hex::decode(hex).unwrap();
@@ -4728,17 +5629,866 @@ mod tests {
         );
     }
 
+    /// A size mismatch names the lengths, not the data: the data is not what
+    /// was expected there, and a long byte string would only swamp the report.
     #[test]
-    fn expected_field_is_length_capped() {
+    fn size_mismatch_names_lengths_not_data() {
         let cbor_hex = format!("581f{}", "ab".repeat(31));
         let bytes = hex::decode(&cbor_hex).unwrap();
         let result = validate_cbor_bytes_against_cddl(&bytes, "x = bstr .size 32", "x");
         let err = error_obj(&result);
-        let expected = err["expected"].as_str().unwrap();
-        assert!(expected.len() < 120, "expected is {} chars", expected.len());
-        assert!(!expected.contains("[171, 171,"), "{}", expected);
-        // The constraint that failed is still identifiable.
-        assert!(expected.contains(".size 32"), "{}", expected);
+        assert_eq!(err["kind"], json!("mismatch"), "{}", err);
+        assert_eq!(
+            err["message"],
+            json!("expected byte string of size 32 bytes, got 31 bytes"),
+            "{}",
+            err
+        );
+        assert_eq!(err["expected"], json!("byte string of size 32 bytes"), "{}", err);
+        assert!(!err.to_string().contains("abab"), "{}", err);
+
+        // Text strings are sized in bytes of UTF-8, as RFC 8610 sizes them.
+        let text = hex::decode("63c2a261").unwrap();
+        let err = error_obj(&validate_cbor_bytes_against_cddl(&text, "x = tstr .size 2", "x")).clone();
+        assert_eq!(
+            err["message"],
+            json!("expected text string of size 2 bytes, got 3 bytes"),
+            "{}",
+            err
+        );
+        // Ranges name the range and the length.
+        let err = error_obj(&validate_cbor_bytes_against_cddl(&bytes, "x = bstr .size (0..4)", "x")).clone();
+        assert_eq!(
+            err["message"],
+            json!("expected byte string length to be in the range 0 <= value <= 4, got 31"),
+            "{}",
+            err
+        );
+    }
+
+    /// Cardano bounds Plutus data byte strings per chunk: a chunked string
+    /// whose chunks each fit passes, a definite-length one past the bound
+    /// fails, and a chunk past the bound is named with its index. Only the
+    /// upper bound reads per chunk: an exact size and a lower bound hold
+    /// the whole string, and an indefinite-length string with no chunks is
+    /// the empty string.
+    #[test]
+    fn size_control_holds_indefinite_strings_per_chunk() {
+        let cddl = crate::cbor::test_fixtures::ledger_cddl();
+        // 100 bytes as one definite-length string, then as 64 + 36 chunks.
+        let payload = "ab".repeat(100);
+        let definite = hex::decode(format!("5864{}", payload)).unwrap();
+        let chunked = hex::decode(format!("5f5840{}5824{}ff", "ab".repeat(64), "ab".repeat(36))).unwrap();
+        let wide = hex::decode(format!("5f5846{}581e{}ff", "ab".repeat(70), "ab".repeat(30))).unwrap();
+
+        assert_eq!(
+            validate_cbor_bytes_against_cddl(&chunked, cddl, "bounded_bytes"),
+            json!({ "valid": true })
+        );
+        let err = error_obj(&validate_cbor_bytes_against_cddl(&definite, cddl, "bounded_bytes")).clone();
+        assert_eq!(
+            err["message"],
+            json!("expected byte string length to be in the range 0 <= value <= 64, got 100"),
+            "{}",
+            err
+        );
+        let err = error_obj(&validate_cbor_bytes_against_cddl(&wide, cddl, "bounded_bytes")).clone();
+        assert_eq!(
+            err["message"],
+            json!("expected each chunk of the indefinite-length byte string to be at most 64 bytes, got 70 bytes in chunk 0"),
+            "{}",
+            err
+        );
+        assert_eq!(err["kind"], json!("mismatch"), "{}", err);
+        // The same string inside Plutus data, where the schema reaches it
+        // through a choice.
+        let datum = [&[0x81u8][..], &chunked[..]].concat();
+        assert_eq!(
+            validate_cbor_bytes_against_cddl(&datum, cddl, "datum"),
+            json!({ "valid": true })
+        );
+        let datum = [&[0x81u8][..], &definite[..]].concat();
+        assert_eq!(
+            validate_cbor_bytes_against_cddl(&datum, cddl, "datum")["valid"],
+            json!(false)
+        );
+
+        // An exact size holds the whole string: two 32-byte chunks are not
+        // a 32-byte hash, and neither is an indefinite-length string with
+        // no chunks.
+        let two_hashes = hex::decode(format!("5f5820{}5820{}ff", "ab".repeat(32), "cd".repeat(32))).unwrap();
+        let err = error_obj(&validate_cbor_bytes_against_cddl(&two_hashes, "hash32 = bytes .size 32", "hash32")).clone();
+        assert_eq!(
+            err["message"],
+            json!("expected byte string of size 32 bytes, got 64 bytes"),
+            "{}",
+            err
+        );
+        let no_chunks = hex::decode("5fff").unwrap();
+        let err = error_obj(&validate_cbor_bytes_against_cddl(&no_chunks, "hash32 = bytes .size 32", "hash32")).clone();
+        assert_eq!(
+            err["message"],
+            json!("expected byte string of size 32 bytes, got 0 bytes"),
+            "{}",
+            err
+        );
+        // A lower bound holds the whole string too.
+        let err = error_obj(&validate_cbor_bytes_against_cddl(&no_chunks, "min8 = bytes .size (8..64)", "min8")).clone();
+        assert_eq!(
+            err["message"],
+            json!("expected byte string length to be in the range 8 <= value <= 64, got 0"),
+            "{}",
+            err
+        );
+        assert_eq!(
+            validate_cbor_bytes_against_cddl(&no_chunks, cddl, "bounded_bytes"),
+            json!({ "valid": true })
+        );
+        // 4 + 4 bytes: within (8..64) as a whole, past (0..4) as a whole
+        // but not per chunk. Per chunk only under `bounded_bytes`.
+        let quarters = hex::decode("5f44010203044401020304ff").unwrap();
+        assert_eq!(
+            validate_cbor_bytes_against_cddl(&quarters, "min8 = bytes .size (8..64)", "min8"),
+            json!({ "valid": true })
+        );
+        assert_eq!(
+            validate_cbor_bytes_against_cddl(&quarters, "bounded_bytes = bytes .size (0..4)", "bounded_bytes"),
+            json!({ "valid": true })
+        );
+        assert_eq!(
+            validate_cbor_bytes_against_cddl(&quarters, "small = bytes .size (0..4)", "small")["valid"],
+            json!(false)
+        );
+        // Text strings: two 2-byte chunks are not `text .size 2`.
+        let text = hex::decode("7f6261626263 64ff".replace(' ', "")).unwrap();
+        let err = error_obj(&validate_cbor_bytes_against_cddl(&text, "txt = text .size 2", "txt")).clone();
+        assert_eq!(
+            err["message"],
+            json!("expected text string of size 2 bytes, got 4 bytes"),
+            "{}",
+            err
+        );
+    }
+
+    /// Only `bounded_bytes` reads a `.size` range per chunk. The ledger
+    /// bounds a metadatum string as a whole whether or not it is chunked,
+    /// and RFC 8610 sizes every other string as a whole: a 100-byte string
+    /// in 64 + 36 byte chunks is not transaction metadata, bytes or text,
+    /// nor does it fit a user rule's range, but it is a Plutus byte string.
+    #[test]
+    fn only_bounded_bytes_reads_size_per_chunk() {
+        const SCHEMA: &str = "
+            metadata = {* metadatum_label => metadatum}
+            metadatum_label = uint .size 8
+            metadatum = {* metadatum => metadatum} / [* metadatum] / int
+                      / bytes .size (0 .. 64) / text .size (0 .. 64)
+            plutus_data = [* plutus_data] / int / bounded_bytes
+            bounded_bytes = bytes .size (0 .. 64)
+            name = tstr .size (1 .. 10)
+        ";
+        let chunked_bytes = format!("5f5840{}5824{}ff", "ab".repeat(64), "cd".repeat(36));
+        let chunked_text = format!("7f7840{}7824{}ff", "61".repeat(64), "62".repeat(36));
+        for chunked in [&chunked_bytes, &chunked_text] {
+            let metadata = hex::decode(format!("a101{chunked}")).unwrap();
+            let result = validate_cbor_bytes_against_cddl(&metadata, SCHEMA, "metadata");
+            assert_eq!(result["valid"], json!(false), "{}: {}", chunked, result);
+        }
+        // Each chunk within the bound is still a whole string past it.
+        let metadata = hex::decode(format!("a101{chunked_bytes}")).unwrap();
+        let err = error_obj(&validate_cbor_bytes_against_cddl(&metadata, SCHEMA, "metadata")).clone();
+        assert!(
+            err["message"].as_str().unwrap().contains("metadatum"),
+            "{}",
+            err
+        );
+
+        let bytes = hex::decode(&chunked_bytes).unwrap();
+        assert_eq!(
+            validate_cbor_bytes_against_cddl(&bytes, SCHEMA, "bounded_bytes"),
+            json!({ "valid": true })
+        );
+        let datum = hex::decode(format!("81{chunked_bytes}")).unwrap();
+        assert_eq!(
+            validate_cbor_bytes_against_cddl(&datum, SCHEMA, "plutus_data"),
+            json!({ "valid": true })
+        );
+
+        // A 30-character text in 10-byte chunks is not `tstr .size (1..10)`.
+        let name = hex::decode(format!("7f6a{0}6a{0}6a{0}ff", "61".repeat(10))).unwrap();
+        assert_eq!(
+            validate_cbor_bytes_against_cddl(&name, SCHEMA, "name")["valid"],
+            json!(false)
+        );
+    }
+
+    /// The error for an entry the map type does not name is anchored on the
+    /// entry: the key first, the value second, so a consumer points at the
+    /// key and shades the entry.
+    #[test]
+    fn unexpected_key_is_anchored_on_the_entry() {
+        // {1: 0, 2: 5} against a map naming only key 1.
+        let bytes = hex::decode("a201000205").unwrap();
+        let err = error_obj(&validate_cbor_bytes_against_cddl(&bytes, "root = { 1: uint }", "root")).clone();
+        assert_eq!(err["message"], json!("unexpected key 2"), "{}", err);
+        assert_eq!(err["path"], json!("$[2]"), "{}", err);
+        assert_eq!(
+            err["byte_spans"],
+            json!([{ "offset": 3, "length": 1 }, { "offset": 4, "length": 1 }]),
+            "{}",
+            err
+        );
+        assert_eq!(err["anchor_spans"], err["byte_spans"], "{}", err);
+        assert!(err.get("expected").is_none(), "{}", err);
+
+        // A text key, with a structured value: the value's anchor is the
+        // whole structure.
+        let bytes = hex::decode("a26161006162820102").unwrap();
+        let err = error_obj(&validate_cbor_bytes_against_cddl(&bytes, "root = { a: uint }", "root")).clone();
+        assert_eq!(err["path"], json!("$.b"), "{}", err);
+        assert_eq!(
+            err["byte_spans"],
+            json!([{ "offset": 4, "length": 2 }, { "offset": 6, "length": 1 }]),
+            "{}",
+            err
+        );
+        assert_eq!(
+            err["anchor_spans"],
+            json!([{ "offset": 4, "length": 2 }, { "offset": 6, "length": 3 }]),
+            "{}",
+            err
+        );
+    }
+
+    /// An unexpected key's value is spanned from its tag head: the entry is
+    /// the key and the whole value.
+    #[test]
+    fn unexpected_key_spans_a_tagged_value_from_its_tag_head() {
+        // {1: 1, 2: 24(h'00')}
+        let bytes = hex::decode("a2010102d8184100").unwrap();
+        let err = error_obj(&validate_cbor_bytes_against_cddl(&bytes, "root = { 1: uint }", "root")).clone();
+        assert_eq!(err["message"], json!("unexpected key 2"), "{}", err);
+        assert_eq!(
+            err["byte_spans"],
+            json!([{ "offset": 3, "length": 1 }, { "offset": 4, "length": 2 }]),
+            "{}",
+            err
+        );
+        assert_eq!(
+            err["anchor_spans"],
+            json!([{ "offset": 3, "length": 1 }, { "offset": 4, "length": 4 }]),
+            "{}",
+            err
+        );
+        // {1: 1, 2: 258([1])}
+        let bytes = hex::decode("a2010102d901028101").unwrap();
+        let err = error_obj(&validate_cbor_bytes_against_cddl(&bytes, "root = { 1: uint }", "root")).clone();
+        assert_eq!(
+            err["anchor_spans"],
+            json!([{ "offset": 3, "length": 1 }, { "offset": 4, "length": 5 }]),
+            "{}",
+            err
+        );
+    }
+
+    /// A type rule extended with `/=` (a socket) is one choice of all its
+    /// bodies, as the validator reads it: an unexpected key lands on the one
+    /// map among them, or on the reference naming the socket when several
+    /// could hold it (the choice, as `a / b` is for a written choice), and a
+    /// path descends through whichever body holds it.
+    #[test]
+    fn a_socket_is_one_choice_of_its_bodies_in_cddl_spans() {
+        let errors = |cddl: &str, rule: &str, hex: &str| -> Vec<Value> {
+            let bytes = hex::decode(hex).unwrap();
+            let result = validate_cbor_bytes_against_cddl(&bytes, cddl, rule);
+            let head = error_obj(&result).clone();
+            let mut all = vec![head.clone()];
+            all.extend(head["additional"].as_array().cloned().unwrap_or_default());
+            all
+        };
+        let unexpected_key_spans = |cddl: &str, rule: &str, hex: &str| -> Vec<(usize, String)> {
+            errors(cddl, rule, hex)
+                .iter()
+                .filter(|e| e["message"].as_str().unwrap().starts_with("unexpected key"))
+                .map(|e| {
+                    let span = &e["cddl_byte_span"];
+                    let at = span["offset"].as_u64().unwrap() as usize;
+                    (at, span_substr(cddl, span).to_string())
+                })
+                .collect()
+        };
+        // {1: 1, 2: 2} against two map bodies: `unexpected key 2` from the
+        // first and `unexpected key 1` from the second both land on `$m`.
+        let two_maps = "start = $m\n$m /= {1: uint}\n$m /= {3: uint}";
+        let spans = unexpected_key_spans(two_maps, "start", "a201010202");
+        assert_eq!(spans.len(), 2, "{:?}", spans);
+        for (at, text) in &spans {
+            assert_eq!((*at, text.as_str()), (8, "$m"), "{:?}", spans);
+        }
+        // Referenced from an array slot: the reference there.
+        let in_array = "start = [$m]\n$m /= {1: uint}\n$m /= {3: uint}";
+        for (at, text) in unexpected_key_spans(in_array, "start", "81a201010202") {
+            assert_eq!((at, text.as_str()), (9, "$m"));
+        }
+        // One map among the bodies: that map.
+        let one_map = "start = $m\n$m /= [* uint]\n$m /= {1: uint}";
+        let spans = unexpected_key_spans(one_map, "start", "a201010202");
+        assert!(!spans.is_empty());
+        for (_, text) in &spans {
+            assert_eq!(text, "{1: uint}", "{:?}", spans);
+        }
+        // One body: the map it writes out.
+        let spans = unexpected_key_spans("start = $m\n$m /= {1: uint}", "start", "a201010202");
+        assert_eq!(spans, vec![(17, "{1: uint}".to_string())]);
+        // A socket at the root: written where it is first named, whether
+        // the root is asked for as `cddl_outline` names it (`$m`) or by
+        // its identifier alone.
+        let root = "$m /= {1: uint}\n$m /= {3: uint}";
+        for rule in ["$m", "m"] {
+            let spans = unexpected_key_spans(root, rule, "a201010202");
+            assert_eq!(spans.len(), 2, "{}: {:?}", rule, spans);
+            for (at, text) in spans {
+                assert_eq!((at, text.as_str()), (0, "$m"), "{}", rule);
+            }
+        }
+        // {1: ["x"]}: the path descends through the second body, whose
+        // array holds the text where a uint belongs.
+        let descends = "start = $m\n$m /= uint\n$m /= {1: [uint]}";
+        let mismatch = errors(descends, "start", "a1018161 78".replace(' ', "").as_str())
+            .into_iter()
+            .find(|e| e["path"] == json!("$[1][0]"))
+            .expect("an error at $[1][0]");
+        let span = &mismatch["cddl_byte_span"];
+        assert_eq!(span_substr(descends, span), "uint");
+        assert_eq!(span["offset"].as_u64(), Some(descends.rfind("uint").unwrap() as u64));
+    }
+
+    /// A path through a choice (`/`, a socket's bodies, an inline choice)
+    /// goes on through the alternative whose container holds its next
+    /// segment, not through the first container among the alternatives.
+    #[test]
+    fn a_span_walks_through_the_alternative_holding_the_next_segment() {
+        let all_errors = |cddl: &str, hex: &str| -> Vec<Value> {
+            let bytes = hex::decode(hex).unwrap();
+            let result = validate_cbor_bytes_against_cddl(&bytes, cddl, "start");
+            let head = error_obj(&result).clone();
+            let mut all = vec![head.clone()];
+            all.extend(head["additional"].as_array().cloned().unwrap_or_default());
+            all
+        };
+        let span_at = |cddl: &str, hex: &str, path: &str, message: &str| -> (usize, String) {
+            let errors = all_errors(cddl, hex);
+            let e = errors
+                .iter()
+                .find(|e| {
+                    e["path"] == json!(path) && e["message"].as_str().unwrap().starts_with(message)
+                })
+                .unwrap_or_else(|| panic!("no `{}` at {} in {:?}", message, path, errors));
+            let span = &e["cddl_byte_span"];
+            (
+                span["offset"].as_u64().unwrap() as usize,
+                span_substr(cddl, span).to_string(),
+            )
+        };
+        // {3: {5: 1, 6: 2}} / {3: {5: "x"}}: the key 3 is b's, so both the
+        // unexpected key 6 and the mismatch at 5 are in b's inner map.
+        let extra_key = "a103a20501 0602".replace(' ', "");
+        let wrong_value = "a103a1056178";
+        for cddl in [
+            "start = a / b\na = {1: uint}\nb = {3: {5: uint}}",
+            "start = {1: uint} / {3: {5: uint}}",
+            "start = $m\n$m /= {1: uint}\n$m /= {3: {5: uint}}",
+            "start = $m\n$m /= {1: uint}\n$m /= [uint]\n$m /= {3: {5: uint}}",
+            "start = a\na = {1: uint} / b\nb = {3: {5: uint}}",
+        ] {
+            let inner = cddl.find("{5: uint}").unwrap();
+            assert_eq!(
+                span_at(cddl, &extra_key, "$[3][6]", "unexpected key"),
+                (inner, "{5: uint}".to_string()),
+                "{}",
+                cddl
+            );
+            assert_eq!(
+                span_at(cddl, wrong_value, "$[3][5]", "expected"),
+                (cddl.rfind("uint").unwrap(), "uint".to_string()),
+                "{}",
+                cddl
+            );
+        }
+        // An array too short for the index is passed over: [1, ["x"]].
+        let arrays = "start = [uint] / [uint, [uint]]";
+        assert_eq!(
+            span_at(arrays, "8201816178", "$[1][0]", "expected"),
+            (arrays.rfind("uint").unwrap(), "uint".to_string())
+        );
+        // A map whose keys are a type may hold a key the literal keys of
+        // another map do not: {"k": {5: "x"}} goes through the second.
+        let typed = "start = {1: uint} / {* tstr => {5: uint}}";
+        let (at, text) = span_at(typed, "a1616ba1056178", "$.k[5]", "expected");
+        assert!(at >= typed.find("{*").unwrap(), "{} at {}", text, at);
+    }
+
+    /// An unexpected key names no member of the schema: its CDDL span is the
+    /// map it sits in, written out (through the rules naming it), or the
+    /// choice between maps when several could hold it, never a member
+    /// reached through another alternative.
+    #[test]
+    fn unexpected_key_cddl_span_is_the_map_type() {
+        let cddl_text = |cddl: &str, hex: &str| {
+            let bytes = hex::decode(hex).unwrap();
+            let err = error_obj(&validate_cbor_bytes_against_cddl(&bytes, cddl, "start")).clone();
+            assert!(
+                err["message"].as_str().unwrap().starts_with("unexpected key"),
+                "{}",
+                err
+            );
+            let span = &err["cddl_byte_span"];
+            let at = span["offset"].as_u64().unwrap() as usize;
+            let len = span["length"].as_u64().unwrap() as usize;
+            cddl[at..at + len].to_string()
+        };
+        // {1: 1, 2: 2}: the one map among the alternatives.
+        assert_eq!(
+            cddl_text("start = [* uint] / {1: uint}", "a201010202"),
+            "{1: uint}"
+        );
+        // Two maps could hold it: the choice.
+        assert_eq!(
+            cddl_text("start = {1: uint} / {3: uint}", "a201010202"),
+            "{1: uint} / {3: uint}"
+        );
+        // A map named by a rule: the map as the rule writes it out.
+        assert_eq!(cddl_text("start = x\nx = {1: uint}", "a201010202"), "{1: uint}");
+        assert_eq!(
+            cddl_text("start = [x]\nx = {1: uint}", "81a201010202"),
+            "{1: uint}"
+        );
+        assert_eq!(
+            cddl_text("start = [x]\nx = y\ny = (#6.30({1: uint}))", "81d81ea201010202"),
+            "{1: uint}"
+        );
+        assert_eq!(
+            cddl_text("start = [x]\nx = {1: uint} / {3: uint}", "81a201010202"),
+            "{1: uint} / {3: uint}"
+        );
+        // Nested choices, written out or named.
+        assert_eq!(
+            cddl_text("start = [inner]\ninner = [* uint] / {1: uint}", "81a201010202"),
+            "{1: uint}"
+        );
+        assert_eq!(
+            cddl_text("start = [inner]\ninner = [* uint] / m\nm = {1: uint}", "81a201010202"),
+            "{1: uint}"
+        );
+        assert_eq!(
+            cddl_text("start = [[* uint] / {1: uint}]", "81a201010202"),
+            "{1: uint}"
+        );
+        // The map form of Conway redeemers: an entry under a key no redeemer
+        // key matches lands on the map form, not on the array form.
+        const WITNESSES: &str = "
+            start = { ? 5 : redeemers }
+            redeemers = [ + redeemer ]
+                      / { + [ tag : redeemer_tag, index : uint .size 4 ]
+                          => [ data : int, ex_units : ex_units ] }
+            redeemer = [ tag : redeemer_tag, index : uint .size 4, data : int, ex_units : ex_units ]
+            redeemer_tag = 0 / 1 / 2 / 3 / 4 / 5
+            ex_units = [mem : uint, steps : uint]
+        ";
+        // {5: {[0, 0]: [0, [1, 1]], [9, 0]: [0, [1, 1]]}}
+        let doc = "a105a282000082008201018209008200820101";
+        let bytes = hex::decode(doc).unwrap();
+        let result = validate_cbor_bytes_against_cddl(&bytes, WITNESSES, "start");
+        let err = error_obj(&result).clone();
+        assert_eq!(err["message"], json!("unexpected key [9, 0]"), "{}", err);
+        assert_eq!(
+            cddl_text(WITNESSES, doc),
+            "{ + [ tag : redeemer_tag, index : uint .size 4 ]
+                          => [ data : int, ex_units : ex_units ] }"
+        );
+        // The ledger's shape: a transaction array naming its body and
+        // witness set maps by rule. An unexpected key in each lands on the
+        // map the rule writes out, not on the reference in `transaction`.
+        const LEDGER_SHAPE: &str = "
+            transaction = [transaction_body, transaction_witness_set, bool, any]
+            transaction_body = { 0 : set<uint>, ? 2 : uint }
+            transaction_witness_set = { ? 0 : [* uint], ? 5 : redeemers }
+            set<a> = #6.258([* a]) / [* a]
+            redeemers = [* uint] / { * uint => uint }
+        ";
+        // [{0: [1], 30: 0}, {9: 0}, true, null]
+        let bytes = hex::decode("84a200810118 1e00a10900f5f6".replace(' ', "")).unwrap();
+        let result = validate_cbor_bytes_against_cddl(&bytes, LEDGER_SHAPE, "transaction");
+        let head = error_obj(&result);
+        let errors: Vec<&Value> = std::iter::once(head)
+            .chain(head["additional"].as_array().into_iter().flatten())
+            .collect();
+        for (path, map) in [
+            ("$[0][30]", "{ 0 : set<uint>, ? 2 : uint }"),
+            ("$[1][9]", "{ ? 0 : [* uint], ? 5 : redeemers }"),
+        ] {
+            let err = errors
+                .iter()
+                .find(|e| e["path"] == json!(path))
+                .unwrap_or_else(|| panic!("no error at {}: {}", path, result));
+            assert!(err["message"].as_str().unwrap().starts_with("unexpected key"), "{}", err);
+            let span = &err["cddl_byte_span"];
+            let at = span["offset"].as_u64().unwrap() as usize;
+            let len = span["length"].as_u64().unwrap() as usize;
+            assert_eq!(&LEDGER_SHAPE[at..at + len], map, "{}", err);
+        }
+        // An error at the value, not the key, still lands on the value type.
+        let bytes = hex::decode("a1016178").unwrap();
+        let err = error_obj(&validate_cbor_bytes_against_cddl(&bytes, "start = {1: uint}", "start")).clone();
+        let span = &err["cddl_byte_span"];
+        let at = span["offset"].as_u64().unwrap() as usize;
+        assert_eq!(&"start = {1: uint}"[at..at + 4], "uint", "{}", err);
+    }
+
+    /// A member key written out as an array, map or tag type answers for
+    /// every entry whose key it matches, up to its occurrence, as a named key
+    /// type does.
+    #[test]
+    fn an_inline_composite_member_key_answers_for_every_entry() {
+        let run = |cddl: &str, hex: &str| {
+            validate_cbor_bytes_against_cddl(&hex::decode(hex).unwrap(), cddl, "start")
+        };
+        let valid = |cddl: &str, hex: &str| {
+            let result = run(cddl, hex);
+            assert_eq!(result["valid"], json!(true), "{} against {}: {}", hex, cddl, result);
+        };
+        // The head error and the ones after it, as `(path, message)`.
+        let reported = |result: &Value| -> Vec<(String, String)> {
+            let head = error_obj(result);
+            std::iter::once(head)
+                .chain(head["additional"].as_array().into_iter().flatten())
+                .map(|e| {
+                    (
+                        e["path"].as_str().unwrap_or_default().to_string(),
+                        e["message"].as_str().unwrap_or_default().to_string(),
+                    )
+                })
+                .collect()
+        };
+        // The map form of Conway redeemers.
+        const WITNESSES: &str = "
+            start = { ? 5 : redeemers }
+            redeemers = [ + redeemer ]
+                      / { + [ tag : redeemer_tag, index : uint .size 4 ]
+                          => [ data : int, ex_units : ex_units ] }
+            redeemer = [ tag : redeemer_tag, index : uint .size 4, data : int, ex_units : ex_units ]
+            redeemer_tag = 0 / 1 / 2 / 3 / 4 / 5
+            ex_units = [mem : uint, steps : uint]
+        ";
+        // {5: {[0, 0]: [0, [1, 1]], [1, 0]: [0, [1, 1]]}}
+        valid(WITNESSES, "a105a282000082008201018201008200820101");
+        // {5: {[0, 0]: …, [1, 0]: …, [3, 2]: …}}
+        valid(
+            WITNESSES,
+            "a105a3820000820082010182010082008201018203028200820101",
+        );
+        // {[0, 1]: 1, [0, 2]: 2}
+        valid("start = {+ [uint, uint] => uint}", "a28200010182000202");
+        valid(
+            "start = {+ [tag: uint, index: uint] => [uint, uint]}",
+            "a2820000820102820100820304",
+        );
+        // {24(1): 1, 24(2): 2}
+        valid("start = {* #6.24(uint) => uint}", "a2d8180101d8180202");
+        // {{1: 2}: 1, {3: 4}: 2}
+        valid("start = {* {* uint => uint} => uint}", "a2a1010201a1030402");
+        // {0: 1, [0, 1]: 1, [0, 2]: 2}
+        valid(
+            "start = {0: uint, * [uint, uint] => uint}",
+            "a300018200010182000202",
+        );
+
+        // A bad value under a later entry is reported at that value, and no
+        // key is refused. {5: {[0, 0]: [0, [1, 1]], [1, 0]: [0, [1, "x"]]}}
+        let errors = reported(&run(
+            WITNESSES,
+            "a105a28200008200820101820100820082016178",
+        ));
+        assert!(
+            errors.iter().any(|(path, message)| path == "$[5][[1, 0]][1][1]"
+                && message.starts_with("expected type uint")),
+            "{:?}",
+            errors
+        );
+        assert!(
+            errors.iter().all(|(_, message)| !message.starts_with("unexpected key")),
+            "{:?}",
+            errors
+        );
+        // The occurrence still bounds the entries: `?` admits one, `1*2` two.
+        let errors = reported(&run("start = {? [uint, uint] => uint}", "a28200010182000202"));
+        assert_eq!(errors, vec![("$[[0, 2]]".to_string(), "unexpected key [0, 2]".to_string())]);
+        let errors = reported(&run(
+            "start = {1*2 [uint, uint] => uint}",
+            "a3820001018200020282000303",
+        ));
+        assert!(
+            errors.iter().any(|(_, message)| message.contains("no more than 2 entries")),
+            "{:?}",
+            errors
+        );
+    }
+
+    /// Keys that are hard to locate (indefinite-length strings, arrays
+    /// and maps, `undefined`, text holding `"`) are located like any other,
+    /// and an entry that cannot be found at all falls back to its map.
+    #[test]
+    fn entries_under_every_key_encoding_are_located() {
+        let spans = |cddl: &str, hex: &str| {
+            let bytes = hex::decode(hex).unwrap();
+            let err = error_obj(&validate_cbor_bytes_against_cddl(&bytes, cddl, "start")).clone();
+            (err["path"].clone(), err["byte_spans"].clone(), err["anchor_spans"].clone())
+        };
+        let map = "start = { 1: uint }";
+        // (_ "a"): 1
+        let (path, bs, anchors) = spans(map, "a17f6161ff01");
+        assert_eq!(path, json!("$.a"));
+        assert_eq!(bs, json!([{ "offset": 1, "length": 1 }, { "offset": 5, "length": 1 }]));
+        assert_eq!(anchors, json!([{ "offset": 1, "length": 4 }, { "offset": 5, "length": 1 }]));
+        // (_ h'01'): 1
+        let (_, bs, _) = spans(map, "a15f4101ff01");
+        assert_eq!(bs, json!([{ "offset": 1, "length": 1 }, { "offset": 5, "length": 1 }]));
+        // undefined: 1
+        let (path, bs, _) = spans(map, "a1f701");
+        assert_eq!(path, json!("$.null"));
+        assert_eq!(bs, json!([{ "offset": 1, "length": 1 }, { "offset": 2, "length": 1 }]));
+        // [_ 1, 2]: 1 and {_ 1: 2}: 1
+        let (path, bs, _) = spans(map, "a19f0102ff01");
+        assert_eq!(path, json!("$[[1, 2]]"));
+        assert_eq!(bs, json!([{ "offset": 1, "length": 1 }, { "offset": 5, "length": 1 }]));
+        let (_, bs, _) = spans(map, "a1bf0102ff01");
+        assert_eq!(bs, json!([{ "offset": 1, "length": 1 }, { "offset": 5, "length": 1 }]));
+        // 121([_ 1]): 1, the usual Plutus constructor encoding.
+        let (path, bs, _) = spans(map, "a1d8799f01ff01");
+        assert_eq!(path, json!("$[121([1])]"));
+        assert_eq!(bs, json!([{ "offset": 1, "length": 2 }, { "offset": 6, "length": 1 }]));
+        // A bad value under such a key is located too.
+        let (path, bs, _) = spans("start = { * [* uint] => uint }", "a19f01ff6178");
+        assert_eq!(path, json!("$[[1]]"));
+        assert_eq!(bs, json!([{ "offset": 4, "length": 2 }]));
+        // {"a\"b": {1: 1, 2: 2}}: the text key holds a quote.
+        let (path, bs, _) = spans("start = { * tstr => { 1: uint } }", "a163612262a201010202");
+        assert_eq!(path, json!("$[\"a\\\"b\"][2]"));
+        assert_eq!(bs, json!([{ "offset": 8, "length": 1 }, { "offset": 9, "length": 1 }]));
+        // {"a/b": 1}: a `/` inside a text key separates nothing.
+        let (path, _, _) = spans(map, "a163612f6201");
+        assert_eq!(path, json!("$[\"a/b\"]"));
+        // A key holding `"` then `/`, which the validator escapes: the path
+        // names the key, and the entry is spanned (key, then value).
+        for (key, path) in [
+            ("x\"/", "$[\"x\\\"/\"]"),
+            ("a\"/b", "$[\"a\\\"/b\"]"),
+            ("\"a\"/", "$[\"\\\"a\\\"/\"]"),
+            ("\"/", "$[\"\\\"/\"]"),
+            ("a\nb", "$[\"a\nb\"]"),
+        ] {
+            let text = format!("{:02x}{}", 0x60 + key.len(), hex::encode(key));
+            let value_at = 1 + text.len() / 2;
+            // {key: "x"} against `{* tstr => uint}`: the value is wrong.
+            let (p, bs, _) = spans("start = { * tstr => uint }", &format!("a1{text}6178"));
+            assert_eq!(p, json!(path), "{:?}", key);
+            assert_eq!(bs, json!([{ "offset": value_at, "length": 2 }]), "{:?}", key);
+            // {key: {1: 1, 2: 2}}: an unexpected key under it.
+            let (p, bs, _) = spans(
+                "start = { * tstr => { 1: uint } }",
+                &format!("a1{text}a201010202"),
+            );
+            assert_eq!(p, json!(format!("{path}[2]")), "{:?}", key);
+            assert_eq!(
+                bs,
+                json!([{ "offset": value_at + 3, "length": 1 }, { "offset": value_at + 4, "length": 1 }]),
+                "{:?}",
+                key
+            );
+        }
+
+        // {1: 1, <300-byte text>: 2}: the validator names the long key by
+        // nothing (`...`, the integer key 1 holds position 1); it is the one
+        // key that renders past the validator's bound, so the path writes it
+        // out and the entry is spanned.
+        let long_text = "a".repeat(300);
+        let long = format!("79012c{}", "61".repeat(300));
+        let (path, bs, _) = spans(map, &format!("a20101{long}02"));
+        assert_eq!(path, json!(format!("$.{long_text}")));
+        assert_eq!(bs, json!([{ "offset": 3, "length": 303 }, { "offset": 306, "length": 1 }]));
+        // With a sibling text key `...` the path names the long key, not
+        // that sibling. {1: 1, <300-byte text>: "x", "...": 5}
+        let (path, bs, _) = spans(
+            "start = { 1: uint, * tstr => uint }",
+            &format!("a30101{long}6178632e2e2e05"),
+        );
+        assert_eq!(path, json!(format!("$.{long_text}")));
+        assert_eq!(bs, json!([{ "offset": 306, "length": 2 }]));
+        // Two keys past the bound: which one the validator left unnamed is
+        // not known, so the component and the spans stay the map's.
+        let other = format!("79012c{}", "62".repeat(300));
+        let (path, bs, _) = spans(map, &format!("a30101{long}02{other}03"));
+        assert_eq!(path, json!("$[...]"));
+        assert_eq!(bs, json!([{ "offset": 0, "length": 1 }]));
+        // {0: 1, <300-byte text>: 2}: by its position, 1, which the path
+        // writes as the key itself, not as `[1]` (an integer key, or the
+        // text key "1").
+        let (path, bs, _) = spans("start = { 0: uint }", &format!("a20001{long}02"));
+        assert_eq!(path, json!(format!("$.{long_text}")));
+        assert_eq!(bs, json!([{ "offset": 3, "length": 303 }, { "offset": 306, "length": 1 }]));
+        // {"1": 0, <300-byte text>: "x"}: the text key "1" is not named.
+        let (path, bs, _) = spans(
+            "start = { * tstr => uint }",
+            &format!("a2613100{long}6178"),
+        );
+        assert_eq!(path, json!(format!("$.{long_text}")));
+        assert_eq!(bs, json!([{ "offset": 307, "length": 2 }]));
+        // A long byte string key the same way; one past the path's own bound
+        // keeps the validator's positional component, the spans the entry.
+        let long_bytes = format!("59012c{}", "ab".repeat(300));
+        let (path, _, _) = spans("start = { 0: uint }", &format!("a20001{long_bytes}02"));
+        assert_eq!(path, json!(format!("$.h'{}'", "ab".repeat(300))));
+        let huge = format!("790800{}", "61".repeat(2048));
+        let (path, bs, _) = spans("start = { 0: uint }", &format!("a20001{huge}02"));
+        assert_eq!(path, json!("$[1]"));
+        assert_eq!(bs, json!([{ "offset": 3, "length": 2051 }, { "offset": 2054, "length": 1 }]));
+        // A composite key past the bound keeps its positional component.
+        // {0: 1, [0, 1, …, 199]: 2}
+        let composite: String = (0..200u32)
+            .map(|i| if i < 24 { format!("{:02x}", i) } else { format!("18{:02x}", i) })
+            .collect();
+        let (path, _, _) = spans("start = { 0: uint }", &format!("a2000198c8{composite}02"));
+        assert_eq!(path, json!("$[1]"));
+    }
+
+    /// Text keys that are not identifiers are written `["…"]`, `\` and `"`
+    /// escaped, so a path reader cannot take them for nested keys, an index
+    /// or an integer key.
+    #[test]
+    fn text_keys_that_are_not_identifiers_are_written_in_the_bracket_form() {
+        let path_of = |key: &str| {
+            // {key: "x"} against `{* tstr => uint}`: the value is wrong.
+            let mut bytes = vec![0xa1, 0x60 + key.len() as u8];
+            bytes.extend_from_slice(key.as_bytes());
+            bytes.extend_from_slice(&[0x61, b'x']);
+            let err = error_obj(&validate_cbor_bytes_against_cddl(&bytes, "start = { * tstr => uint }", "start")).clone();
+            err["path"].as_str().unwrap().to_string()
+        };
+        assert_eq!(path_of("name"), "$.name");
+        assert_eq!(path_of("_a-b9"), "$._a-b9");
+        assert_eq!(path_of("a.b"), "$[\"a.b\"]");
+        assert_eq!(path_of("v1.0"), "$[\"v1.0\"]");
+        assert_eq!(path_of("[1]"), "$[\"[1]\"]");
+        assert_eq!(path_of("1"), "$[\"1\"]");
+        assert_eq!(path_of("a b"), "$[\"a b\"]");
+        assert_eq!(path_of("a\"b"), "$[\"a\\\"b\"]");
+        assert_eq!(path_of("a\\b"), "$[\"a\\\\b\"]");
+        assert_eq!(path_of("é"), "$[\"é\"]");
+        assert_eq!(path_of(""), "$[\"\"]");
+        // A float key is written in the bracket form too.
+        let bytes = hex::decode("a1f93e006178").unwrap();
+        let err = error_obj(&validate_cbor_bytes_against_cddl(&bytes, "start = { * float => uint }", "start")).clone();
+        assert_eq!(err["path"], json!("$[1.5]"), "{}", err);
+    }
+
+    /// The expected key of a missing entry is read only from the validator's
+    /// own map reasons: data quoted in another reason may hold the same words.
+    #[test]
+    fn expected_is_not_read_from_the_data_a_reason_quotes() {
+        let expected = |cddl: &str, text: &str| {
+            let mut bytes = vec![0x78, text.len() as u8];
+            bytes.extend_from_slice(text.as_bytes());
+            let err = error_obj(&validate_cbor_bytes_against_cddl(&bytes, cddl, "start")).clone();
+            err["expected"].clone()
+        };
+        assert_eq!(expected("start = uint", "user missing key: 42"), json!("uint"));
+        assert_eq!(expected("start = uint", "requires entry with key of type x"), json!("uint"));
+        assert_eq!(expected("start = uint", "map missing key: 7"), json!("uint"));
+        // A text literal mismatch has no comma before `got`; the data it
+        // quotes is not part of what was expected.
+        assert_eq!(expected("start = \"foo\"", "sign in with key abc"), json!("value \"foo\""));
+        assert_eq!(expected("start = \"a got b\"", "x got y"), json!("value \"a got b\""));
+    }
+
+    /// A missing entry has nothing in the document to point at, so the error
+    /// stays on the map, and names the key it expected.
+    #[test]
+    fn missing_key_names_the_expected_key() {
+        let bytes = hex::decode("a10200").unwrap();
+        let err = error_obj(&validate_cbor_bytes_against_cddl(&bytes, "root = { 1: uint, 2: uint }", "root")).clone();
+        assert_eq!(err["message"], json!("map missing key: 1"), "{}", err);
+        assert_eq!(err["expected"], json!("1"), "{}", err);
+        assert_eq!(err["path"], json!("$"), "{}", err);
+        assert_eq!(err["byte_spans"], json!([{ "offset": 0, "length": 1 }]), "{}", err);
+
+        let bytes = hex::decode("a0").unwrap();
+        let err = error_obj(&validate_cbor_bytes_against_cddl(&bytes, "root = { \"name\": tstr }", "root")).clone();
+        assert_eq!(err["expected"], json!("\"name\""), "{}", err);
+        let err = error_obj(&validate_cbor_bytes_against_cddl(&bytes, "root = { tstr => int }", "root")).clone();
+        assert_eq!(err["message"], json!("map requires entry with key of type tstr"), "{}", err);
+        assert_eq!(err["expected"], json!("tstr"), "{}", err);
+    }
+
+    /// A composite map key is written in diagnostic notation inside the
+    /// path's bracket form, and its entry gets spans like any other.
+    #[test]
+    fn composite_keys_are_located_and_written_in_diagnostic_notation() {
+        // {1: 0, [2, h'0102']: 5}
+        let bytes = hex::decode("a201008202420102 05".replace(' ', "")).unwrap();
+        let err = error_obj(&validate_cbor_bytes_against_cddl(&bytes, "root = { 1: uint }", "root")).clone();
+        assert_eq!(err["message"], json!("unexpected key [2, h'0102']"), "{}", err);
+        assert_eq!(err["path"], json!("$[[2, h'0102']]"), "{}", err);
+        assert_eq!(
+            err["byte_spans"],
+            json!([{ "offset": 3, "length": 1 }, { "offset": 8, "length": 1 }]),
+            "{}",
+            err
+        );
+        assert_eq!(
+            err["anchor_spans"],
+            json!([{ "offset": 3, "length": 5 }, { "offset": 8, "length": 1 }]),
+            "{}",
+            err
+        );
+        assert!(!err.to_string().contains("Integer("), "{}", err);
+
+        // A value under a composite key: the path steps through the key and
+        // the value is located.
+        let bytes = hex::decode("a1a1010263616263").unwrap(); // {{1: 2}: "abc"}
+        let err = error_obj(&validate_cbor_bytes_against_cddl(&bytes, "root = { {1: 2} => uint }", "root")).clone();
+        assert_eq!(err["path"], json!("$[{1: 2}]"), "{}", err);
+        assert_eq!(err["byte_spans"], json!([{ "offset": 4, "length": 4 }]), "{}", err);
+        assert_eq!(err["message"], json!("expected type uint, got text \"abc\""), "{}", err);
+    }
+
+    /// An empty array held to a map or tag rule is a mismatch naming the
+    /// rule's type, not a count of the array's items.
+    #[test]
+    fn empty_array_against_map_or_tag_is_a_mismatch() {
+        let bytes = hex::decode("80").unwrap();
+        for (schema, expected) in [
+            ("root = { 1: uint }", "map { 1: uint }"),
+            ("root = #6.24(bstr)", "tagged data #6.24(bstr)"),
+            ("root = uint", "type uint"),
+        ] {
+            let err = error_obj(&validate_cbor_bytes_against_cddl(&bytes, schema, "root")).clone();
+            assert_eq!(err["kind"], json!("mismatch"), "{}: {}", schema, err);
+            // `expected` drops the `type` noun, as it does for every mismatch.
+            assert_eq!(
+                err["expected"],
+                json!(expected.strip_prefix("type ").unwrap_or(expected)),
+                "{}: {}",
+                schema,
+                err
+            );
+            assert_eq!(
+                err["message"],
+                json!(format!("expected {}, got array(0 items)", expected)),
+                "{}: {}",
+                schema,
+                err
+            );
+            assert_eq!(err["byte_spans"], json!([{ "offset": 0, "length": 1 }]), "{}", err);
+        }
     }
 
     #[test]
@@ -6048,7 +7798,9 @@ mod tests {
         for schema in ["root = [* {name: tstr}]", "root = [+ {name: tstr}]"] {
             let err = error_obj(&validate_cbor_bytes_against_cddl(&bytes, schema, "root")).clone();
             assert_eq!(err["message"], json!("unexpected key \"age\""), "{}", err);
-            assert_eq!(err["path"], json!("$[0]"), "{}", err);
+            // Located at the entry, with the key's span first.
+            assert_eq!(err["path"], json!("$[0].age"), "{}", err);
+            assert_eq!(err["byte_spans"].as_array().map(Vec::len), Some(2), "{}", err);
         }
 
         // Array item is not the map (any occurrence / reach form).
@@ -6088,7 +7840,7 @@ mod tests {
         ))
         .clone();
         assert_eq!(err["message"], json!("unexpected key \"b\""), "{}", err);
-        assert_eq!(err["path"], json!("$[0]"), "{}", err);
+        assert_eq!(err["path"], json!("$[0].b"), "{}", err);
         let empty = hex::decode("81a0").unwrap();
         let err = error_obj(&validate_cbor_bytes_against_cddl(
             &empty,
@@ -6548,9 +8300,9 @@ mod tests {
             let within = validate_cbor_bytes_against_cddl(&nest(40), &cddl, "x");
             assert_eq!(within, json!({ "valid": true }), "{}", within);
 
-            let past = nest(1000);
+            let past = nest(2500);
             // Inside both counts — only descent hold can refuse.
-            assert!(1000 < crate::cbor::limits::MAX_CBOR_VALIDATION_NESTING_DEPTH);
+            assert!(2500 < crate::cbor::limits::MAX_CBOR_VALIDATION_NESTING_DEPTH);
             assert!(crate::cbor::limits::NestingBudget::for_document(&past).is_some());
 
             let err = error_obj(&validate_cbor_bytes_against_cddl(&past, &cddl, "x")).clone();
@@ -6653,7 +8405,8 @@ mod tests {
 
         document_cache::with_ast_checked(cddl, |parsed| {
             let ast = parsed.expect("schema parses");
-            let rooted = with_root_first(ast, rule_name).expect("rule can be a root");
+            let (root, _) = super::find_root_rule(ast, rule_name).expect("rule is defined");
+            let rooted = with_root_first(ast, root).expect("rule can be a root");
             let value = cddl::validator::cbor_value::decode_cbor(cbor).expect("document decodes");
 
             let mut cv = cddl::validator::cbor::CBORValidator::new(&rooted, value, None);
@@ -7011,5 +8764,152 @@ mod tests {
         let map_bytes = hex::decode("a1616b8144000102 03".replace(' ', "")).unwrap();
         let result = validate_cbor_bytes_against_cddl(&map_bytes, map_cddl, "t");
         assert_eq!(result["valid"], json!(true), "{}", result);
+    }
+}
+
+#[cfg(test)]
+mod lookup_tests {
+    use super::*;
+
+    /// A map of `n` entries under text keys `k0`, `k1`, … (all values 0),
+    /// then the entries `extra` (key and value hex).
+    fn map_hex(n: usize, extra: &[&str]) -> Vec<u8> {
+        let count = n + extra.len();
+        let mut hex = if count < 24 {
+            format!("{:02x}", 0xa0 + count)
+        } else {
+            format!("b9{:04x}", count)
+        };
+        for i in 0..n {
+            let key = format!("k{}", i);
+            hex.push_str(&format!("{:02x}{}00", 0x60 + key.len(), hex::encode(&key)));
+        }
+        for e in extra {
+            hex.push_str(e);
+        }
+        hex::decode(hex).unwrap()
+    }
+
+    fn tree_of(bytes: &[u8]) -> Value {
+        decoder::decode_cbor_to_value(bytes).unwrap().into_inner()
+    }
+
+    type Summary = (
+        Option<Value>,
+        Option<Value>,
+        String,
+        Option<Option<Value>>,
+        bool,
+    );
+
+    fn summary(node: Option<LocatedNode>) -> Option<Summary> {
+        node.map(|n| {
+            (
+                n.tagged.span,
+                n.tagged.anchor,
+                n.tagged.preview,
+                n.key.map(|k| k.span),
+                n.embedded,
+            )
+        })
+    }
+
+    /// Locating an entry through the key index finds what the search entry
+    /// by entry finds, for every kind of component, and indexes the map
+    /// once for all of them.
+    #[test]
+    fn the_key_index_finds_what_the_entry_search_finds() {
+        // 40 text keys, the integer keys 7 and -2, a byte string key and a
+        // text key of 300 bytes.
+        let long_key = format!("79012c{}", hex::encode("x".repeat(300)));
+        let bytes = map_hex(
+            40,
+            &["0701", "2102", "42abcd03", &format!("{}04", long_key)],
+        );
+        let tree = tree_of(&bytes);
+        let mut keys = MapKeyIndex::default();
+        for loc in [
+            "/\"k0\"",
+            "/\"k39\"",
+            "/\"k40\"",
+            "/7",
+            "/0",
+            "/41",
+            "/43",
+            "/44",
+            "/Integer(-2)",
+            "/h'abcd'",
+            "/...",
+            "/\"k1\"/0",
+            "",
+        ] {
+            let searched = summary(locate_cbor_node(&tree, loc, bytes.len(), None));
+            let indexed = summary(locate_cbor_node(&tree, loc, bytes.len(), Some(&mut keys)));
+            assert_eq!(searched, indexed, "{}", loc);
+        }
+        assert_eq!(keys.maps.len(), 1);
+        // An indefinite-length text key leaves the map's text keys to the
+        // search; its integer keys and positions are still indexed.
+        let chunked = map_hex(20, &["7f616b6178ff05", "0901"]);
+        let tree = tree_of(&chunked);
+        let mut keys = MapKeyIndex::default();
+        for loc in ["/\"kx\"", "/\"k3\"", "/9", "/2"] {
+            assert_eq!(
+                summary(locate_cbor_node(&tree, loc, chunked.len(), None)),
+                summary(locate_cbor_node(&tree, loc, chunked.len(), Some(&mut keys))),
+                "{}",
+                loc
+            );
+        }
+        assert!(keys.maps.values().all(|m| m.text.is_none()));
+    }
+
+    /// The path is resolved against the document only for the components
+    /// that name an entry by position or by nothing: a location without
+    /// one looks nothing up.
+    #[test]
+    fn a_path_resolves_only_positional_components() {
+        let long_key = format!("79012c{}", hex::encode("x".repeat(300)));
+        let bytes = map_hex(20, &[&format!("{}f6", long_key)]);
+        let tree = tree_of(&bytes);
+        let mut keys = MapKeyIndex::default();
+        assert_eq!(json_path_in_tree(&tree, "/\"k3\"", &mut keys), "$.k3");
+        assert_eq!(
+            json_path_in_tree(&Value::Null, "/\"k3\"/\"x\"", &mut keys),
+            "$.k3.x"
+        );
+        assert!(keys.maps.is_empty());
+        // The entry at position 20 is the long text key: written out.
+        let path = json_path_in_tree(&tree, "/20", &mut keys);
+        assert_eq!(path, format!("$.{}", "x".repeat(300)));
+        assert_eq!(keys.maps.len(), 1);
+    }
+
+    /// Integer and text comparisons of decoded keys, including a text of
+    /// indefinite length and an integer past 64 bits.
+    #[test]
+    fn decoded_keys_compare_without_copying() {
+        let text_is = |node: &Value, want: &str| {
+            diagnostic::string_payload_is(node, "String", "IndefiniteLengthString", want)
+        };
+        let chunked = tree_of(&hex::decode("7f61616162ff").unwrap());
+        assert!(text_is(&chunked, "ab"));
+        assert!(!text_is(&chunked, "a"));
+        assert!(!text_is(&chunked, "abc"));
+        let definite = tree_of(&hex::decode("626162").unwrap());
+        assert!(text_is(&definite, "ab"));
+        assert!(!diagnostic::string_payload_is(
+            &definite,
+            "Bytes",
+            "IndefiniteLengthBytes",
+            "ab"
+        ));
+        let big = tree_of(&hex::decode("3bffffffffffffffff").unwrap());
+        assert!(diagnostic::int_node_is(&big, -18446744073709551616));
+        assert!(!diagnostic::int_node_is(&big, -1));
+        let max = tree_of(&hex::decode("1bffffffffffffffff").unwrap());
+        assert!(diagnostic::int_node_is(&max, u64::MAX as i128));
+        assert!(diagnostic::int_node_is(&tree_of(&[0x20]), -1));
+        assert!(!diagnostic::int_node_is(&definite, 0));
     }
 }

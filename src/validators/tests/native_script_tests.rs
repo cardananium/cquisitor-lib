@@ -1,11 +1,13 @@
 //! Unit tests for
 //! [`crate::validators::phase_1::validation::NativeScriptExecutor`].
 //!
-//! Mirrors the ledger's `evalNativeScript` from `Cardano.Ledger.Allegra.Scripts`:
+//! Mirrors the ledger's `evalTimelock` from `Cardano.Ledger.Allegra.Scripts`:
 //! pubkey ✔ iff its hash is in the witness set; `all` = AND of children; `any`
-//! = OR; `n_of_k` ≥ n successes; `TimelockStart s` ✔ iff `slot > s` (i.e.
-//! invalid-before); `TimelockExpiry s` ✔ iff `slot ≤ s` (invalid-hereafter).
+//! = OR; `n_of_k` ≥ n successes; `TimelockStart s` ✔ iff the transaction
+//! has a validity start and `s ≤ start`; `TimelockExpiry s` ✔ iff it has a
+//! ttl and `ttl ≤ s`.
 
+use crate::validators::phase_1::validation::native_script_executor::ValidityInterval;
 use crate::validators::phase_1::validation::NativeScriptExecutor;
 use cardano_serialization_lib as csl;
 use std::collections::HashSet;
@@ -16,6 +18,10 @@ fn key_hash(byte: u8) -> csl::Ed25519KeyHash {
 
 fn sigs(hashes: &[csl::Ed25519KeyHash]) -> HashSet<csl::Ed25519KeyHash> {
     hashes.iter().cloned().collect()
+}
+
+fn none() -> ValidityInterval {
+    ValidityInterval::default()
 }
 
 fn pubkey_script(byte: u8) -> csl::NativeScript {
@@ -34,7 +40,7 @@ fn scripts_list(items: Vec<csl::NativeScript>) -> csl::NativeScripts {
 fn pubkey_ok_when_signature_present() {
     let script = pubkey_script(0x01);
     let signatures = sigs(&[key_hash(0x01)]);
-    let exec = NativeScriptExecutor::new(&script, &signatures, 0);
+    let exec = NativeScriptExecutor::new(&script, &signatures, none());
     assert_eq!(exec.execute().unwrap(), true);
 }
 
@@ -42,7 +48,7 @@ fn pubkey_ok_when_signature_present() {
 fn pubkey_fails_when_signature_missing() {
     let script = pubkey_script(0x01);
     let signatures = sigs(&[]);
-    let exec = NativeScriptExecutor::new(&script, &signatures, 0);
+    let exec = NativeScriptExecutor::new(&script, &signatures, none());
     assert_eq!(exec.execute().unwrap(), false);
 }
 
@@ -52,13 +58,13 @@ fn script_all_requires_every_child() {
         &scripts_list(vec![pubkey_script(0x01), pubkey_script(0x02)]),
     ));
     assert_eq!(
-        NativeScriptExecutor::new(&script, &sigs(&[key_hash(0x01), key_hash(0x02)]), 0)
+        NativeScriptExecutor::new(&script, &sigs(&[key_hash(0x01), key_hash(0x02)]), none())
             .execute()
             .unwrap(),
         true
     );
     assert_eq!(
-        NativeScriptExecutor::new(&script, &sigs(&[key_hash(0x01)]), 0)
+        NativeScriptExecutor::new(&script, &sigs(&[key_hash(0x01)]), none())
             .execute()
             .unwrap(),
         false
@@ -72,7 +78,7 @@ fn script_all_with_empty_children_is_true() {
         &scripts_list(vec![]),
     ));
     assert_eq!(
-        NativeScriptExecutor::new(&script, &sigs(&[]), 0)
+        NativeScriptExecutor::new(&script, &sigs(&[]), none())
             .execute()
             .unwrap(),
         true
@@ -85,13 +91,13 @@ fn script_any_requires_at_least_one_child() {
         &scripts_list(vec![pubkey_script(0x01), pubkey_script(0x02)]),
     ));
     assert_eq!(
-        NativeScriptExecutor::new(&script, &sigs(&[key_hash(0x02)]), 0)
+        NativeScriptExecutor::new(&script, &sigs(&[key_hash(0x02)]), none())
             .execute()
             .unwrap(),
         true
     );
     assert_eq!(
-        NativeScriptExecutor::new(&script, &sigs(&[]), 0)
+        NativeScriptExecutor::new(&script, &sigs(&[]), none())
             .execute()
             .unwrap(),
         false
@@ -105,7 +111,7 @@ fn script_any_with_empty_children_is_false() {
         &scripts_list(vec![]),
     ));
     assert_eq!(
-        NativeScriptExecutor::new(&script, &sigs(&[]), 0)
+        NativeScriptExecutor::new(&script, &sigs(&[]), none())
             .execute()
             .unwrap(),
         false
@@ -127,7 +133,7 @@ fn script_n_of_k_threshold_enforced() {
         NativeScriptExecutor::new(
             &script,
             &sigs(&[key_hash(0x01), key_hash(0x03)]),
-            0,
+            none(),
         )
         .execute()
         .unwrap(),
@@ -135,7 +141,7 @@ fn script_n_of_k_threshold_enforced() {
     );
     // Only 1 of 3 satisfied.
     assert_eq!(
-        NativeScriptExecutor::new(&script, &sigs(&[key_hash(0x02)]), 0)
+        NativeScriptExecutor::new(&script, &sigs(&[key_hash(0x02)]), none())
             .execute()
             .unwrap(),
         false
@@ -145,7 +151,7 @@ fn script_n_of_k_threshold_enforced() {
         NativeScriptExecutor::new(
             &script,
             &sigs(&[key_hash(0x01), key_hash(0x02), key_hash(0x03)]),
-            0,
+            none(),
         )
         .execute()
         .unwrap(),
@@ -160,70 +166,45 @@ fn script_n_of_k_threshold_zero_always_true() {
         &scripts_list(vec![pubkey_script(0x01)]),
     ));
     assert_eq!(
-        NativeScriptExecutor::new(&script, &sigs(&[]), 0)
+        NativeScriptExecutor::new(&script, &sigs(&[]), none())
             .execute()
             .unwrap(),
         true
     );
 }
 
-#[test]
-fn timelock_start_is_invalid_before_slot() {
-    // TimelockStart s == "invalid before slot s" → true iff current_slot > s.
-    let script = csl::NativeScript::new_timelock_start(
-        &csl::TimelockStart::new_timelockstart(&csl::BigNum::from(100u64)),
-    );
-    assert_eq!(
-        NativeScriptExecutor::new(&script, &sigs(&[]), 50)
-            .execute()
-            .unwrap(),
-        false,
-        "slot 50 < 100 → not yet valid"
-    );
-    assert_eq!(
-        NativeScriptExecutor::new(&script, &sigs(&[]), 100)
-            .execute()
-            .unwrap(),
-        false,
-        "slot 100 == 100 → strictly-greater-than rule rejects"
-    );
-    assert_eq!(
-        NativeScriptExecutor::new(&script, &sigs(&[]), 101)
-            .execute()
-            .unwrap(),
-        true,
-        "slot 101 > 100 → valid"
-    );
+fn interval(before: Option<u64>, hereafter: Option<u64>) -> ValidityInterval {
+    ValidityInterval::new(before, hereafter)
+}
+
+fn holds(script: &csl::NativeScript, signed: &[csl::Ed25519KeyHash], at: ValidityInterval) -> bool {
+    NativeScriptExecutor::new(script, &sigs(signed), at).execute().unwrap()
 }
 
 #[test]
-fn timelock_expiry_is_invalid_hereafter_slot() {
-    // TimelockExpiry s == "invalid at or after slot s" → true iff
-    // current_slot ≤ s.
+fn timelock_start_needs_a_validity_start_at_or_after_it() {
+    // RequireTimeStart s ✔ iff s <= invalid_before; absent start = -inf.
+    let script = csl::NativeScript::new_timelock_start(
+        &csl::TimelockStart::new_timelockstart(&csl::BigNum::from(100u64)),
+    );
+    assert!(!holds(&script, &[], interval(None, None)), "no start");
+    assert!(!holds(&script, &[], interval(None, Some(50))), "ttl only");
+    assert!(!holds(&script, &[], interval(Some(99), None)), "start 99 < 100");
+    assert!(holds(&script, &[], interval(Some(100), None)), "start 100 == 100");
+    assert!(holds(&script, &[], interval(Some(101), Some(200))), "start 101 > 100");
+}
+
+#[test]
+fn timelock_expiry_needs_a_ttl_at_or_before_it() {
+    // RequireTimeExpire s ✔ iff invalid_hereafter <= s; absent ttl = +inf.
     let script = csl::NativeScript::new_timelock_expiry(
         &csl::TimelockExpiry::new_timelockexpiry(&csl::BigNum::from(100u64)),
     );
-    assert_eq!(
-        NativeScriptExecutor::new(&script, &sigs(&[]), 99)
-            .execute()
-            .unwrap(),
-        true,
-        "slot 99 ≤ 100 → still valid"
-    );
-    assert_eq!(
-        NativeScriptExecutor::new(&script, &sigs(&[]), 100)
-            .execute()
-            .unwrap(),
-        true,
-        "slot 100 ≤ 100 → still valid"
-    );
-    assert_eq!(
-        NativeScriptExecutor::new(&script, &sigs(&[]), 101)
-            .execute()
-            .unwrap(),
-        false,
-        "slot 101 > 100 → expired"
-    );
+    assert!(!holds(&script, &[], interval(None, None)), "no ttl");
+    assert!(!holds(&script, &[], interval(Some(10), None)), "start only");
+    assert!(holds(&script, &[], interval(None, Some(99))), "ttl 99 < 100");
+    assert!(holds(&script, &[], interval(Some(0), Some(100))), "ttl 100 == 100");
+    assert!(!holds(&script, &[], interval(None, Some(101))), "ttl 101 > 100");
 }
 
 #[test]
@@ -239,35 +220,32 @@ fn nested_all_of_any_composes_correctly() {
         &scripts_list(vec![any_k1_k2, pubkey_script(0x03), expiry]),
     ));
 
-    // k2 + k3, slot 50 → pass.
-    assert_eq!(
-        NativeScriptExecutor::new(
-            &all,
-            &sigs(&[key_hash(0x02), key_hash(0x03)]),
-            50,
-        )
-        .execute()
-        .unwrap(),
-        true
-    );
+    // k2 + k3, ttl 50 → pass.
+    assert!(holds(&all, &[key_hash(0x02), key_hash(0x03)], interval(None, Some(50))));
     // k3 only → any-branch fails.
-    assert_eq!(
-        NativeScriptExecutor::new(&all, &sigs(&[key_hash(0x03)]), 50)
-            .execute()
-            .unwrap(),
-        false
+    assert!(!holds(&all, &[key_hash(0x03)], interval(None, Some(50))));
+    // k2 + k3 but ttl past the expiry → timelock fails.
+    assert!(!holds(&all, &[key_hash(0x02), key_hash(0x03)], interval(None, Some(500))));
+    // k2 + k3 but no ttl → timelock fails.
+    assert!(!holds(&all, &[key_hash(0x02), key_hash(0x03)], interval(Some(0), None)));
+}
+
+#[test]
+fn timelocks_inside_n_of_k_count_like_any_sub_script() {
+    let start = csl::NativeScript::new_timelock_start(
+        &csl::TimelockStart::new_timelockstart(&csl::BigNum::from(10u64)),
     );
-    // k2 + k3 but slot past expiry → timelock fails.
-    assert_eq!(
-        NativeScriptExecutor::new(
-            &all,
-            &sigs(&[key_hash(0x02), key_hash(0x03)]),
-            500,
-        )
-        .execute()
-        .unwrap(),
-        false
+    let expiry = csl::NativeScript::new_timelock_expiry(
+        &csl::TimelockExpiry::new_timelockexpiry(&csl::BigNum::from(20u64)),
     );
+    let script = csl::NativeScript::new_script_n_of_k(&csl::ScriptNOfK::new(
+        2,
+        &scripts_list(vec![pubkey_script(0x01), start, expiry]),
+    ));
+    assert!(holds(&script, &[], interval(Some(10), Some(20))));
+    assert!(holds(&script, &[key_hash(0x01)], interval(Some(10), None)));
+    assert!(!holds(&script, &[], interval(Some(10), Some(21))));
+    assert!(!holds(&script, &[key_hash(0x01)], interval(Some(9), Some(21))));
 }
 
 #[test]

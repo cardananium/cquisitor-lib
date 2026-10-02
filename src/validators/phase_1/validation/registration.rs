@@ -16,7 +16,6 @@ enum RegistrableEntity {
     Account(String),
     Pool(String),
     DRep(String),
-    ConstitutionCommitteeHotCredential(LocalCredential),
 }
 
 #[derive(Debug, Clone)]

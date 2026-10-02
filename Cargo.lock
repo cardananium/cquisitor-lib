@@ -30,7 +30,7 @@ dependencies = [
  "abnf",
  "indexmap 1.9.3",
  "itertools 0.10.5",
- "pretty",
+ "pretty 0.11.3",
 ]
 
 [[package]]
@@ -213,9 +213,9 @@ checksum = "bef38d45163c2f1dde094a7dfd33ccf595c92905c8f8f4fdc18d06fb1037718a"
 
 [[package]]
 name = "bitvec"
-version = "1.0.1"
+version = "1.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1bc2832c24239b0141d5674bb9174f9d68a8b5b3f2753311927c172ca46f7e9c"
+checksum = "ddcec3d12c579d40898fe0a9a358a803c23e9c52ca3c425707f81c9436211837"
 dependencies = [
  "funty",
  "radium",
@@ -243,9 +243,9 @@ dependencies = [
 
 [[package]]
 name = "blst"
-version = "0.3.16"
+version = "0.3.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dcdb4c7013139a150f9fc55d123186dbfaba0d912817466282c73ac49e71fb45"
+checksum = "c20659f9bbee16cbbd2f7393e40ab6309f5a98f76a2eb57a995ec508b72387fe"
 dependencies = [
  "cc",
  "glob",
@@ -270,14 +270,15 @@ checksum = "5d20789868f4b01b2f2caec9f5c4e0213b41e3e5702a50157d699ae31ced2fcb"
 
 [[package]]
 name = "cardano-serialization-lib"
-version = "16.0.0"
-source = "git+https://github.com/Emurgo/cardano-serialization-lib.git?branch=release%2F16.0.0#f009f6c40c0eb657750e950f501bff87b8efbdee"
+version = "18.0.0-beta.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "366900c9fdf4162048d133bba7e55f2a54a9feabd86731b069373ec71811cf12"
 dependencies = [
  "bech32 0.7.3",
  "cbor_event",
  "cfg-if",
  "clear_on_drop",
- "cryptoxide",
+ "cryptoxide 0.4.4",
  "digest 0.9.0",
  "ed25519-bip32",
  "getrandom",
@@ -326,7 +327,7 @@ dependencies = [
 [[package]]
 name = "cddl"
 version = "0.10.5"
-source = "git+https://github.com/lisicky/cddl.git?branch=fix%2Fcbor-validator-suite#cbe73ab3c626cb8357d3637a0ca059ecbdd31ed6"
+source = "git+https://github.com/lisicky/cddl.git?rev=f561392f774e12e56deebf2a62967774c3fd7728#f561392f774e12e56deebf2a62967774c3fd7728"
 dependencies = [
  "abnf_to_pest",
  "base16",
@@ -474,7 +475,7 @@ checksum = "af491d569909a7e4dee0ad7db7f5341fef5c614d5b8ec8cf765732aba3cff681"
 dependencies = [
  "serde",
  "termcolor",
- "unicode-width",
+ "unicode-width 0.2.2",
 ]
 
 [[package]]
@@ -516,7 +517,7 @@ dependencies = [
 
 [[package]]
 name = "cquisitor-lib"
-version = "0.1.0-beta.64"
+version = "0.1.0-beta.65"
 dependencies = [
  "anyhow",
  "base64",
@@ -529,7 +530,7 @@ dependencies = [
  "ciborium-io",
  "ciborium-ll",
  "console_error_panic_hook",
- "cryptoxide",
+ "cryptoxide 0.4.4",
  "hex",
  "itertools 0.14.0",
  "js-sys",
@@ -597,6 +598,12 @@ name = "cryptoxide"
 version = "0.4.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "382ce8820a5bb815055d3553a610e8cb542b2d767bbacea99038afda96cd760d"
+
+[[package]]
+name = "cryptoxide"
+version = "0.6.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b8bb2a43afb0fd8b53101f79f153795c449ba80762361d8b868f4a75c6d03057"
 
 [[package]]
 name = "data-encoding"
@@ -681,7 +688,7 @@ version = "0.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cb588f93c0d91b2f668849fd6d030cddb0b2e31f105963be189da5acdf492a21"
 dependencies = [
- "cryptoxide",
+ "cryptoxide 0.4.4",
 ]
 
 [[package]]
@@ -1035,21 +1042,20 @@ checksum = "f8ca58f447f06ed17d5fc4043ce1b10dd205e060fb3ce5b979b8ed8e59ff3f79"
 
 [[package]]
 name = "miette"
-version = "5.10.0"
+version = "7.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "59bb584eaeeab6bd0226ccf3509a69d7936d148cf3d036ad350abe35e8c6856e"
+checksum = "5f98efec8807c63c752b5bd61f862c165c115b0a35685bdcfd9238c7aeb592b7"
 dependencies = [
+ "cfg-if",
  "miette-derive",
- "once_cell",
- "thiserror 1.0.69",
- "unicode-width",
+ "unicode-width 0.1.14",
 ]
 
 [[package]]
 name = "miette-derive"
-version = "5.10.0"
+version = "7.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "49e7bc1560b95a3c4a25d03de42fe76ca718ab92d1a22a55b9b4cf67b3ae635c"
+checksum = "db5b29714e950dbb20d5e6f74f9dcec4edbcc1067bb7f8ed198c097b8c1a818b"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -1255,13 +1261,12 @@ checksum = "c08d65885ee38876c4f86fa503fb49d7b507c2b62552df7c70b2fce627e06381"
 [[package]]
 name = "pallas-addresses"
 version = "0.35.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b562be9b1f713ac8935bd61197c2d5f7b054574bb45081545866df99428d8176"
+source = "git+https://github.com/cardananium/pallas.git?rev=38a467936b7aad87bd5061a778e646ed14e36d00#38a467936b7aad87bd5061a778e646ed14e36d00"
 dependencies = [
  "base58",
  "bech32 0.9.1",
  "crc",
- "cryptoxide",
+ "cryptoxide 0.4.4",
  "hex",
  "pallas-codec",
  "pallas-crypto",
@@ -1271,8 +1276,7 @@ dependencies = [
 [[package]]
 name = "pallas-codec"
 version = "0.35.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "afff0c114bc5ff0e5bf95b6b151a664da57c259ab266bcff6587faad91a064d2"
+source = "git+https://github.com/cardananium/pallas.git?rev=38a467936b7aad87bd5061a778e646ed14e36d00#38a467936b7aad87bd5061a778e646ed14e36d00"
 dependencies = [
  "hex",
  "minicbor",
@@ -1284,10 +1288,9 @@ dependencies = [
 [[package]]
 name = "pallas-crypto"
 version = "0.35.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "89e25299b6992b179144464e410680cf096919f43cf97f9a6fea2f7be5e1cadd"
+source = "git+https://github.com/cardananium/pallas.git?rev=38a467936b7aad87bd5061a778e646ed14e36d00#38a467936b7aad87bd5061a778e646ed14e36d00"
 dependencies = [
- "cryptoxide",
+ "cryptoxide 0.4.4",
  "hex",
  "pallas-codec",
  "rand_core 0.6.4",
@@ -1299,8 +1302,7 @@ dependencies = [
 [[package]]
 name = "pallas-primitives"
 version = "0.35.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "857f6908501bcb6f794f2c81674eb0f69414e66399739bbd808aa178c17c2001"
+source = "git+https://github.com/cardananium/pallas.git?rev=38a467936b7aad87bd5061a778e646ed14e36d00#38a467936b7aad87bd5061a778e646ed14e36d00"
 dependencies = [
  "base58",
  "bech32 0.9.1",
@@ -1315,8 +1317,7 @@ dependencies = [
 [[package]]
 name = "pallas-traverse"
 version = "0.35.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "88753e28c456fe38c6a4d84ff8847a25bf564753c255a1d6d211d9fd6a42380e"
+source = "git+https://github.com/cardananium/pallas.git?rev=38a467936b7aad87bd5061a778e646ed14e36d00#38a467936b7aad87bd5061a778e646ed14e36d00"
 dependencies = [
  "hex",
  "itertools 0.13.0",
@@ -1456,6 +1457,17 @@ dependencies = [
  "log",
  "typed-arena",
  "unicode-segmentation",
+]
+
+[[package]]
+name = "pretty"
+version = "0.12.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0d22152487193190344590e4f30e219cf3fe140d9e7a3fdb683d82aa2c5f4156"
+dependencies = [
+ "arrayvec",
+ "typed-arena",
+ "unicode-width 0.2.2",
 ]
 
 [[package]]
@@ -2044,13 +2056,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7dd6e30e90baa6f72411720665d41d89b9a3d039dc45b8faea1ddd07f617f6af"
 
 [[package]]
+name = "unicode-width"
+version = "0.2.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b4ac048d71ede7ee76d585517add45da530660ef4390e49b098733c6e897f254"
+
+[[package]]
 name = "uplc"
-version = "1.1.22"
-source = "git+https://github.com/aiken-lang/aiken?rev=7a0a8e2b70f58354e157ca1cd9a53876421eeea1#7a0a8e2b70f58354e157ca1cd9a53876421eeea1"
+version = "1.1.24"
+source = "git+https://github.com/aiken-lang/aiken?tag=v1.1.24#bacbeb35fbc9f1db93cd2e1e93fb1d93053acb4a"
 dependencies = [
  "bitvec",
  "blst",
- "cryptoxide",
+ "cryptoxide 0.6.5",
  "hamming",
  "hex",
  "indexmap 1.9.3",
@@ -2067,7 +2085,7 @@ dependencies = [
  "pallas-primitives",
  "pallas-traverse",
  "peg",
- "pretty",
+ "pretty 0.12.5",
  "secp256k1",
  "serde",
  "serde_json",

@@ -6,8 +6,13 @@ use crate::js_error::JsError;
 
 #[wasm_bindgen]
 pub fn get_ref_script_bytes(tx_hex: &str, output_index: u32) -> Result<String, JsError> {
-    let tx_bytes =
-        hex::decode(tx_hex).map_err(|e| JsError::new(&format!("Failed to decode tx hex: {}", e)))?;
+    // pallas decodes the transaction recursively on the host stack: the
+    // bytes pass the well-formedness and nesting gate calibrated for it.
+    let tx_bytes = crate::csl_preflight::check_pallas_cbor_hex(
+        tx_hex,
+        crate::csl_preflight::CslShape::Transaction,
+    )
+            .map_err(|e| JsError::new(&format!("Failed to parse transaction: {}", e)))?;
 
     let tx = MintedTx::decode_fragment(&tx_bytes)
         .map_err(|e| JsError::new(&format!("Failed to parse transaction: {}", e)))?;

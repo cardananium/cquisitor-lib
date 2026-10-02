@@ -1,38 +1,37 @@
 use crate::csl_decoders::params::PlutusDataSchema;
+use crate::csl_preflight;
 use cardano_serialization_lib as csl;
 use cardano_serialization_lib::chain_core::property::FromStr;
 use cardano_serialization_lib::legacy_address::ExtendedAddr;
 use cardano_serialization_lib::{AddressKind, ByronAddress, RewardAddress};
 use serde_json::Value;
-use crate::js_value::JsValue;
-use crate::js_value::from_serde_json_value;
+use crate::csl_decoders::{answer, object_answer, rendered_json, Answer, Part};
 use crate::plutus::plutus_script_normalizer::{normalize_plutus_script_with_core_version, OutputEncoding};
 
-pub fn decode_address(input: &str, is_hex: bool, is_bech32: bool, is_base58: bool) -> Result<JsValue, String> {
+pub fn decode_address(input: &str, is_hex: bool, is_bech32: bool, is_base58: bool) -> Result<Answer, String> {
     let decoded = decode_address_internal(input, is_hex, is_bech32, is_base58)?;
     format_address(decoded)
 }
 
-pub fn decode_transaction(input: &str, is_hex: bool, _is_bech32: bool, _is_base58: bool) -> Result<JsValue, String> {
+pub fn decode_transaction(input: &str, is_hex: bool, _is_bech32: bool, _is_base58: bool) -> Result<Answer, String> {
     if !is_hex {
         Err("Only hex encoding is supported".to_string())?;
     }
     let fixed_tx = csl::FixedTransaction::from_hex(input)
         .map_err(|e| format!("Failed to decode Transaction: {:?}", e))?;
-    let parsed_tx: Value = csl::Transaction::from_hex(input)
+    let rendered_tx = csl::Transaction::from_hex(input)
         .map_err(|e| format!("Failed to decode Transaction: {:?}", e))
         .and_then(|tx| tx.to_json().map_err(|e| format!("Failed to convert to JSON: {:?}", e)))
-        .and_then(|json| crate::csl_decoders::parse_rendered_json(&json))?;
-    let value = Ok::<Value, String>(serde_json::json!({
-        "transaction_hash": fixed_tx.transaction_hash().to_hex(),
-        "transaction": parsed_tx,
-    }))?;
-    from_serde_json_value(&value).map_err(|e| format!("Failed to convert to JsValue: {}", e))
+        .and_then(|json| rendered_json(&json))?;
+    Ok(object_answer(vec![
+        ("transaction_hash", Part::Value(Value::String(fixed_tx.transaction_hash().to_hex()))),
+        ("transaction", Part::Rendered(rendered_tx)),
+    ]))
 }
 
 pub fn decode_address_internal(input: &str, is_hex: bool, is_bech32: bool, is_base58: bool) -> Result<csl::Address, String> {
     if is_bech32 {
-        if let Ok(decoded) = csl::Address::from_bech32(input) {
+        if let Ok(decoded) = csl_preflight::address_from_bech32(input) {
             return Ok(decoded);
         }
     }
@@ -40,7 +39,7 @@ pub fn decode_address_internal(input: &str, is_hex: bool, is_bech32: bool, is_ba
         return Ok(decode_byron_addr_internal(input, is_hex, is_bech32, is_base58)?.to_address());
     }
     if is_hex {
-        if let Ok(decoded) = csl::Address::from_hex(input) {
+        if let Ok(decoded) = csl_preflight::address_from_hex(input) {
             return Ok(decoded);
         } else if let Ok(byron_addr) = decode_byron_addr_internal(input, is_hex, is_bech32, is_base58) {
             return Ok(byron_addr.to_address());
@@ -52,7 +51,7 @@ pub fn decode_address_internal(input: &str, is_hex: bool, is_bech32: bool, is_ba
     Err("Failed to decode".to_string())
 }
 
-pub fn format_address(address: csl::Address) -> Result<JsValue, String> {
+pub fn format_address(address: csl::Address) -> Result<Answer, String> {
     let address_type = address.kind();
     let json_representation = match address_type {
         AddressKind::Byron => {
@@ -82,8 +81,7 @@ pub fn format_address(address: csl::Address) -> Result<JsValue, String> {
         "address_type": address_kind_to_string(address_type),
         "details": json_representation,
     }))?;
-    from_serde_json_value(&address_info)
-        .map_err(|e| format!("Failed to convert to JsValue: {}", e))
+    answer(address_info)
 }
 
 pub fn format_pointer_address(address: csl::PointerAddress) -> Result<Value, String> {
@@ -212,25 +210,27 @@ fn decode_byron_addr_internal(input: &str, is_hex: bool, _is_bech32: bool, is_ba
     Err("Failed to decode".to_string())
 }
 
-pub fn decode_native_script(input: &str, is_hex: bool, _is_bech32: bool, _is_base58: bool) -> Result<JsValue, String> {
+pub fn decode_native_script(input: &str, is_hex: bool, _is_bech32: bool, _is_base58: bool) -> Result<Answer, String> {
     if !is_hex {
         Err("Only hex encoding is supported".to_string())?;
     }
 
     let script = csl::NativeScript::from_hex(input)
         .map_err(|e| format!("Failed to decode NativeScript: {:?}", e))?;
-    let script_json = script.to_json()
-        .map_err(|e| format!("Failed to convert to JSON: {:?}", e))?;
-    let script_value: Value = serde_json::from_str(&script_json)
-        .map_err(|e| format!("Failed to convert to JSON: {:?}", e))?;
-    let value =  Ok::<Value, String>(serde_json::json!({
-      "script_hash": script.hash().to_hex(),
-      "script": script_value,
-    }))?;
-    from_serde_json_value(&value).map_err(|e| format!("Failed to convert to JsValue: {}", e))
+    // The library's own `to_json` pretty-prints a native script, which
+    // costs indentation quadratic in its depth; the same JSON is written
+    // compactly, in one pass, from the script's flat form.
+    let rendered_script = crate::native_script::FlatNativeScript::from_csl(&script)
+        .map(|flat| flat.to_csl_json())
+        .map_err(|e| format!("Failed to convert to JSON: {}", e))
+        .and_then(|json| rendered_json(&json))?;
+    Ok(object_answer(vec![
+        ("script_hash", Part::Value(Value::String(script.hash().to_hex()))),
+        ("script", Part::Rendered(rendered_script)),
+    ]))
 }
 
-pub fn decode_plutus_script(input: &str, version: Option<i32>, is_hex: bool, _is_bech32: bool, _is_base58: bool) -> Result<JsValue, String> {
+pub fn decode_plutus_script(input: &str, version: Option<i32>, is_hex: bool, _is_bech32: bool, _is_base58: bool) -> Result<Answer, String> {
     if !is_hex {
         Err("Only hex encoding is supported".to_string())?;
     }
@@ -247,8 +247,7 @@ pub fn decode_plutus_script(input: &str, version: Option<i32>, is_hex: bool, _is
                 "script_hash": script.hash().to_hex(),
                 "core_version": core_version_str,
             }))?;
-            from_serde_json_value(&value)
-                .map_err(|e| format!("Failed to convert to JsValue: {}", e))
+            answer(value)
         }
         2 => {
             let script = csl::PlutusScript::from_bytes_v2(normalized_script)
@@ -257,8 +256,7 @@ pub fn decode_plutus_script(input: &str, version: Option<i32>, is_hex: bool, _is
                 "script_hash": script.hash().to_hex(),
                 "core_version": core_version_str,
             }))?;
-            from_serde_json_value(&value)
-                .map_err(|e| format!("Failed to convert to JsValue: {}", e))
+            answer(value)
         }
         3 => {
             let script = csl::PlutusScript::from_bytes_v3(normalized_script)
@@ -267,8 +265,7 @@ pub fn decode_plutus_script(input: &str, version: Option<i32>, is_hex: bool, _is
                 "script_hash": script.hash().to_hex(),
                 "core_version": core_version_str,
             }))?;
-            from_serde_json_value(&value)
-                .map_err(|e| format!("Failed to convert to JsValue: {}", e))
+            answer(value)
         }
         _ => Err("Invalid Plutus script version".to_string()),
     }
@@ -280,24 +277,20 @@ pub fn decode_plutus_data(
     is_hex: bool,
     _is_bech32: bool,
     _is_base58: bool
-) -> Result<JsValue, String> {
+) -> Result<Answer, String> {
     if !is_hex {
         Err("Only hex encoding is supported".to_string())?;
     }
     if let Ok(decoded) = csl::PlutusData::from_hex(input) {
         let data_hash = csl::hash_plutus_data(&decoded);
-        let plutus_data_json: Value = decoded
+        let rendered_data = decoded
             .to_json(map_schema(schema))
             .map_err(|e| format!("Failed to convert to JSON: {:?}", e))
-            .and_then(|json| {
-                crate::csl_decoders::parse_rendered_json(&json)
-            })?;
-        let value = Ok::<Value, String>(serde_json::json!({
-            "data_hash": data_hash.to_hex(),
-            "plutus_data": plutus_data_json,
-        }))?;
-        return from_serde_json_value(&value)
-            .map_err(|e| format!("Failed to convert to JsValue: {}", e));
+            .and_then(|json| rendered_json(&json))?;
+        return Ok(object_answer(vec![
+            ("data_hash", Part::Value(Value::String(data_hash.to_hex()))),
+            ("plutus_data", Part::Rendered(rendered_data)),
+        ]));
     }
     Err("Failed to decode".to_string())
 }

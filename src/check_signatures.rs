@@ -76,36 +76,56 @@ pub fn check_tx_signature(
 
 #[wasm_bindgen]
 pub fn check_block_or_tx_signatures(hex_str: &str) -> Result<JsValue, JsError> {
-    if let Ok(block) = decode_block_from_hex(hex_str) {
-        let results = check_block_txs_signatures_internal(&block)
-            .map_err(|e| JsError::new(&e))?;
-
-        for r in &results {
-            if !r.valid {
-                return to_js_value(r).map_err(|e| JsError::new(&e));
-            }
+    let block_error = match decode_block_from_hex(hex_str) {
+        Ok(block) => {
+            let results = check_block_txs_signatures_internal(&block)
+                .map_err(|e| JsError::new(&e))?;
+            return block_results_to_js(results);
         }
-        let res = CheckResult::valid("All block txs are valid");
-        return to_js_value(&res).map_err(|e| JsError::new(&e));
-    }
+        Err(e) => e,
+    };
 
-    if let Ok(tx) = decode_transaction_from_hex(hex_str) {
-        let result = check_tx_signatures_internal(&tx);
-        return to_js_value(&result).map_err(|e| JsError::new(&e));
+    match decode_transaction_from_hex(hex_str) {
+        Ok(tx) => {
+            let result = check_tx_signatures_internal(&tx);
+            to_js_value(&result).map_err(|e| JsError::new(&e))
+        }
+        Err(tx_error) => Err(JsError::new(&format!(
+            "cannot parse block or transaction from given hex ({}; {})",
+            block_error, tx_error
+        ))),
     }
+}
 
-    Err(JsError::new("cannot parse block or transaction from given hex"))
+/// The first invalid transaction's result, or one valid result for the block.
+fn block_results_to_js(results: Vec<CheckResult>) -> Result<JsValue, JsError> {
+    for r in &results {
+        if !r.valid {
+            return to_js_value(r).map_err(|e| JsError::new(&e));
+        }
+    }
+    let res = CheckResult::valid("All block txs are valid");
+    to_js_value(&res).map_err(|e| JsError::new(&e))
 }
 
 fn decode_block_from_hex(hex_str: &str) -> Result<FixedBlock, String> {
     let block_bytes = from_hex_string(hex_str)?;
+    crate::csl_preflight::check_cbor(&block_bytes, crate::csl_preflight::CslShape::Block)
+        .map_err(|e| format!("Cannot decode block: {}", e))?;
     FixedBlock::from_bytes(block_bytes)
         .map_err(|e| format!("Cannot decode block: {:?}", e))
 }
 
 fn decode_transaction_from_hex(hex_str: &str) -> Result<FixedTransaction, String> {
-    FixedTransaction::from_hex(hex_str)
-        .map_err(|e| format!("Cannot decode tx: {:?}", e))
+    let tx_bytes = from_hex_string(hex_str)?;
+    crate::csl_preflight::check_cbor(&tx_bytes, crate::csl_preflight::CslShape::Transaction)
+        .map_err(|e| format!("Cannot decode tx: {}", e))?;
+    FixedTransaction::from_bytes(tx_bytes.clone()).map_err(|e| {
+        format!(
+            "Cannot decode tx: {}",
+            crate::csl_preflight::transaction_parse_failure(&tx_bytes, &e)
+        )
+    })
 }
 
 pub fn check_tx_signatures(tx_hex: &str) -> Result<CheckResult, String> {

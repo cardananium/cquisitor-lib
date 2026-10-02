@@ -1,5 +1,7 @@
 pub mod validation;
 pub mod errors;
 pub mod hints;
-mod data_mapper;
-mod eval_redeemer;
+pub(crate) mod context_data;
+pub(crate) mod context_guard;
+pub(crate) mod data_mapper;
+pub(crate) mod eval_redeemer;

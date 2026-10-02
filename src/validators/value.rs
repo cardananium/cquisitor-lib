@@ -142,16 +142,24 @@ impl Value {
         }
     }
 
-    pub fn new_from_common_assets(assets: &Vec<crate::common::Asset>) -> Self {
+    /// The value of a UTxO's asset list. A quantity that is not an integer
+    /// is an input error, named with its unit.
+    pub fn new_from_common_assets(assets: &Vec<crate::common::Asset>) -> Result<Self, String> {
         let mut value = Value::zero();
         for asset in assets {
-            if asset.unit == "lovelace" || asset.unit == "lovelace" {
-                value.add_coins(asset.quantity.parse::<i128>().unwrap());
+            let quantity = asset.quantity.parse::<i128>().map_err(|e| {
+                format!(
+                    "Invalid quantity '{}' for asset '{}': {}",
+                    asset.quantity, asset.unit, e
+                )
+            })?;
+            if asset.unit == "lovelace" || asset.unit.is_empty() {
+                value.add_coins(quantity);
             } else {
-                value.add_asset(asset.unit.clone(), asset.quantity.parse::<i128>().unwrap());
+                value.add_asset(asset.unit.clone(), quantity);
             }
         }
-        value
+        Ok(value)
     }
 
     pub fn new_from_csl_value(value: &csl::Value) -> Self {
@@ -297,9 +305,17 @@ impl Serialize for ValidatorAsset {
     where
         S: Serializer,
     {
+        // A unit is a policy id (56 hex characters) followed by the asset
+        // name; one too short or split inside a character is reported whole
+        // as the policy id rather than sliced.
+        let (policy_id, asset_name) = if self.unit.is_char_boundary(56) {
+            self.unit.split_at(56)
+        } else {
+            (self.unit.as_str(), "")
+        };
         let mut state = serializer.serialize_struct("Asset", 3)?;
-        state.serialize_field("policy_id", &self.unit[0..56])?;
-        state.serialize_field("asset_name", &self.unit[56..])?;
+        state.serialize_field("policy_id", policy_id)?;
+        state.serialize_field("asset_name", asset_name)?;
         state.serialize_field("quantity", &self.quantity)?;
         state.end()
     }

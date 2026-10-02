@@ -53,3 +53,52 @@ jobs:
         run: wasm-pack build --target browser --out-dir pkg/browser
         env:
           WASM_BINDGEN_WEAKREF: 1
+
+      # TypeScript library (ts/ -> pkg/lib). The tests are bun:test suites and the
+      # tracked lockfile is bun.lock (package-lock.json is gitignored), so bun does
+      # the install and runs the tests; typecheck/build are plain tsc. The suites
+      # that call the wasm load pkg/wasm/node/cquisitor_lib.cjs, hence the
+      # assembly step (post-build.sh) runs before them.
+      # bun is pinned to the minor the lockfile was written with (lockfileVersion 1).
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.x
+
+      - name: bun install (TypeScript layer deps)
+        run: bun install --frozen-lockfile
+
+      # The tracked schemas/ and types/cquisitor_lib.d.ts are generated from the
+      # Rust types; the layer is compiled against them, so a Rust change without
+      # a regenerated d.ts must fail here rather than ship stale declarations.
+      - name: generate-dts is up to date
+        run: |
+          bun run generate-dts
+          git diff --exit-code -- schemas types/cquisitor_lib.d.ts
+
+      - name: lib typecheck
+        run: bun run lib:typecheck
+
+      - name: lib build + assemble package (post-build.sh)
+        run: bun run assemble
+
+      - name: lib test
+        run: bun run lib:test
+
+      # The assembled package must be loadable (the root resolves its own `./wasm`
+      # subpath by package self-reference) and pack cleanly.
+      - name: package smoke
+        run: |
+          node --input-type=module -e "
+            import { possibleTypes, configure, KoiosClient } from './pkg/index.js';
+            import { nodeBrotliCompressor, createNodeWorkerBackend } from './pkg/lib/node/index.js';
+            if (typeof configure !== 'function' || typeof KoiosClient !== 'function') process.exit(1);
+            if (!(await possibleTypes('05')).includes('Int')) process.exit(1);
+            const backend = createNodeWorkerBackend();
+            configure({ backend });
+            if (!(await possibleTypes('05')).includes('Int')) process.exit(1);
+            await backend.dispose();
+            const bytes = new TextEncoder().encode('x'.repeat(1000));
+            const back = await nodeBrotliCompressor.decompress(await nodeBrotliCompressor.compress(bytes), 1 << 20);
+            if (back.length !== bytes.length) process.exit(1);
+          "
+          cd pkg && npm pack --dry-run

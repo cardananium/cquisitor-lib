@@ -2,12 +2,12 @@ use crate::{
     js_error::JsError,
     validators::{
         common::ScriptDataHashDecomposition,
-        helpers::{normalize_script_ref, string_to_csl_address},
+        helpers::{normalize_script_ref, string_to_csl_address, unexamined_script_ref},
         input_contexts::ValidationInputContext,
         phase_1::{
             converter::pp_cost_model_to_csl,
-            errors::{Phase1Error, ValidationPhase1Error},
-            validation::NativeScriptExecutor,
+            errors::{Phase1Error, Phase1Warning, ValidationPhase1Error, ValidationPhase1Warning},
+            validation::{native_script_executor::ValidityInterval, NativeScriptExecutor},
         },
         validation_result::ValidationResult,
     },
@@ -89,6 +89,9 @@ pub struct WitnessValidator<'a> {
     /// Map of native script hashes to their sources
     pub native_script_sources: HashMap<csl::ScriptHash, WitnessSource>,
     pub provided_native_scripts: HashMap<csl::ScriptHash, csl::NativeScript>,
+    /// Native scripts provided by a context script reference nested too
+    /// deep to be read: provided (by hash), not evaluated. Why, per hash.
+    pub unexamined_native_scripts: HashMap<csl::ScriptHash, String>,
     pub native_scripts_signature_candidates: HashSet<csl::Ed25519KeyHash>,
     /// Map of plutus script hashes to their sources
     pub plutus_script_sources: HashMap<csl::ScriptHash, WitnessSource>,
@@ -127,6 +130,7 @@ impl<'a> WitnessValidator<'a> {
             provided_vkey_witnesses: HashMap::new(),
             native_script_sources: HashMap::new(),
             provided_native_scripts: HashMap::new(),
+            unexamined_native_scripts: HashMap::new(),
             native_scripts_signature_candidates: HashSet::new(),
             plutus_script_sources: HashMap::new(),
             plutus_script_versions: HashMap::new(),
@@ -156,7 +160,7 @@ impl<'a> WitnessValidator<'a> {
 
         context.collect_output_datums_hashes(tx_body);
 
-        context.collect_invalid_native_scripts().map_err(|e| {
+        context.collect_invalid_native_scripts(tx_body).map_err(|e| {
             JsError::new(&format!("Failed to collect invalid native scripts: {}", e))
         })?;
 
@@ -195,15 +199,17 @@ impl<'a> WitnessValidator<'a> {
         }
     }
 
-    fn collect_invalid_native_scripts(&mut self) -> Result<(), String> {
+    /// Native scripts are judged against the transaction's validity
+    /// interval (body keys 8 and 3), not the context slot.
+    fn collect_invalid_native_scripts(&mut self, tx_body: &csl::TransactionBody) -> Result<(), String> {
         let signatures = self.provided_vkey_witnesses.keys().cloned().collect();
-        let slot = self.validation_input_context.slot;
+        let interval = ValidityInterval::of_body(tx_body);
         for (_i, required_native_script_witness) in
             self.required_native_script_witnesses.iter().enumerate()
         {
             let script_hash = &required_native_script_witness.script_hash;
             if let Some(native_script) = self.provided_native_scripts.get(&script_hash) {
-                let executor = NativeScriptExecutor::new(native_script, &signatures, slot);
+                let executor = NativeScriptExecutor::new(native_script, &signatures, interval);
                 match executor.execute() {
                     Ok(result) => {
                         if !result {
@@ -330,6 +336,16 @@ impl<'a> WitnessValidator<'a> {
 
                 // Check script_ref - scripts CAN be provided via both regular inputs and reference inputs
                 if let Some(script_ref_hex) = &utxo.utxo.output.script_ref {
+                    // Too deep to hand to the serialization library: the
+                    // script is provided (its hash is read from the bytes),
+                    // but not evaluated, and the rest still validates.
+                    if let Some(unexamined) = unexamined_script_ref(script_ref_hex) {
+                        self.native_script_sources
+                            .insert(unexamined.script_hash.clone(), witness_source.clone());
+                        self.unexamined_native_scripts
+                            .insert(unexamined.script_hash, unexamined.reason);
+                        continue;
+                    }
                     let script_ref = normalize_script_ref(script_ref_hex)?;
                     // ScriptRef contains either NativeScript or PlutusScript
                     // Try to get as NativeScript
@@ -1283,51 +1299,34 @@ impl<'a> WitnessValidator<'a> {
             ));
         }
 
-        ValidationResult::new_phase_1(errors, vec![])
+        let mut warnings = Vec::new();
+        for required in &self.required_native_script_witnesses {
+            if let Some(reason) = self.unexamined_native_scripts.get(&required.script_hash) {
+                warnings.push(ValidationPhase1Warning::new(
+                    Phase1Warning::NativeScriptNotExamined {
+                        script_hash: required.script_hash.to_hex(),
+                        reason: reason.clone(),
+                    },
+                    required.location.clone(),
+                ));
+            }
+        }
+
+        ValidationResult::new_phase_1(errors, warnings)
     }
 }
 
+/// Every key hash a `ScriptPubkey` anywhere in `native_script` names,
+/// collected in one pass over its flat form (no recursion, no subtree
+/// clones). A script whose encoding cannot be read back names none.
 fn get_native_script_key_hashes(native_script: &csl::NativeScript) -> HashSet<csl::Ed25519KeyHash> {
-    let mut key_hashes = HashSet::new();
-    get_native_script_key_hashes_internal(native_script, &mut key_hashes);
-    key_hashes
-}
-
-fn get_native_script_key_hashes_internal(
-    native_script: &csl::NativeScript,
-    key_hashes: &mut HashSet<csl::Ed25519KeyHash>,
-) {
-    let script_kind = native_script.kind();
-    match script_kind {
-        csl::NativeScriptKind::ScriptPubkey => {
-            if let Some(script_pubkey) = native_script.as_script_pubkey() {
-                key_hashes.insert(script_pubkey.addr_keyhash());
-            }
-        }
-        csl::NativeScriptKind::ScriptAll => {
-            if let Some(script_all) = native_script.as_script_all() {
-                for script in script_all.native_scripts() {
-                    get_native_script_key_hashes_internal(&script, key_hashes);
-                }
-            }
-        }
-        csl::NativeScriptKind::ScriptAny => {
-            if let Some(script_any) = native_script.as_script_any() {
-                for script in script_any.native_scripts() {
-                    get_native_script_key_hashes_internal(&script, key_hashes);
-                }
-            }
-        }
-        csl::NativeScriptKind::ScriptNOfK => {
-            if let Some(script_n_of_k) = native_script.as_script_n_of_k() {
-                for script in script_n_of_k.native_scripts() {
-                    get_native_script_key_hashes_internal(&script, key_hashes);
-                }
-            }
-        }
-        csl::NativeScriptKind::TimelockStart => {}
-        csl::NativeScriptKind::TimelockExpiry => {}
-    }
+    let flat = match crate::native_script::FlatNativeScript::from_csl(native_script) {
+        Ok(flat) => flat,
+        Err(_) => return HashSet::new(),
+    };
+    flat.key_hashes()
+        .filter_map(|key| csl::Ed25519KeyHash::from_bytes(key.to_vec()).ok())
+        .collect()
 }
 
 /// Builds a mapping from TransactionInput to sorted index

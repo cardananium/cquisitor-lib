@@ -2588,6 +2588,31 @@
             "DuplicateCommitteeHotRegistrationInTx"
           ],
           "additionalProperties": false
+        },
+        {
+          "description": "A required native script is provided by a script reference of the\n validation context that nests deeper than the library reads (past\n 32768 CBOR levels with the reference's own wrapping; native scripts\n are otherwise read at any depth): it is counted as provided (its\n hash is read from the bytes) but not evaluated. An implementation\n limit, not a finding about the script.",
+          "type": "object",
+          "properties": {
+            "NativeScriptNotExamined": {
+              "type": "object",
+              "properties": {
+                "script_hash": {
+                  "type": "string"
+                },
+                "reason": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "script_hash",
+                "reason"
+              ]
+            }
+          },
+          "required": [
+            "NativeScriptNotExamined"
+          ],
+          "additionalProperties": false
         }
       ]
     },
@@ -2776,9 +2801,117 @@
           "const": "InlineDatumNotAllowedForPlutusV1"
         },
         {
-          "description": "Reference inputs and script references are not allowed in PlutusV1",
+          "description": "The evaluator cannot build a PlutusV1 context for a transaction with\n reference inputs, or spending an output that carries a reference\n script. The Conway ledger accepts both for PlutusV1 (it refuses\n only inline datums), so this is the evaluator's limit, not a ledger rule.",
           "type": "string",
           "const": "ReferenceInputsNotAllowedForPlutusV1"
+        },
+        {
+          "description": "A transaction output the script context cannot be built from: an\n address that cannot be read, a zero token quantity or a policy with\n no tokens (values the node refuses while decoding the transaction)",
+          "type": "object",
+          "properties": {
+            "UnreadableOutput": {
+              "type": "object",
+              "properties": {
+                "output_index": {
+                  "type": "integer",
+                  "format": "uint64",
+                  "minimum": 0
+                },
+                "reason": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "output_index",
+                "reason"
+              ]
+            }
+          },
+          "required": [
+            "UnreadableOutput"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "description": "A body field other than an output the script context cannot be\n built from: a reward account (withdrawal key, proposal return\n account, treasury withdrawal key) that is not a stake address, or a\n rational number with denominator 0 in a proposal (values the node\n refuses while decoding the transaction). `field` names it, e.g.\n `withdrawals[0]`, `proposal_procedures[1].gov_action.quorum`",
+          "type": "object",
+          "properties": {
+            "UnreadableTransactionField": {
+              "type": "object",
+              "properties": {
+                "field": {
+                  "type": "string"
+                },
+                "reason": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "field",
+                "reason"
+              ]
+            }
+          },
+          "required": [
+            "UnreadableTransactionField"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "description": "A Conway certificate (kinds 9-18) in a transaction that runs a\n PlutusV1/V2 script: the ledger's `CertificateNotSupported`",
+          "type": "object",
+          "properties": {
+            "CertificateNotSupportedInPlutusV1V2": {
+              "type": "object",
+              "properties": {
+                "certificate_index": {
+                  "type": "integer",
+                  "format": "uint64",
+                  "minimum": 0
+                },
+                "certificate_type": {
+                  "type": "string"
+                },
+                "language": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "certificate_index",
+                "certificate_type",
+                "language"
+              ]
+            }
+          },
+          "required": [
+            "CertificateNotSupportedInPlutusV1V2"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "description": "A Conway body field (votes, proposals, treasury donation, current\n treasury value) in a transaction that runs a PlutusV1/V2 script: the\n ledger's `VotingProceduresFieldNotSupported`,\n `ProposalProceduresFieldNotSupported`, `TreasuryDonationFieldNotSupported`\n and `CurrentTreasuryFieldNotSupported`",
+          "type": "object",
+          "properties": {
+            "FieldNotSupportedInPlutusV1V2": {
+              "type": "object",
+              "properties": {
+                "field": {
+                  "type": "string"
+                },
+                "language": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "field",
+                "language"
+              ]
+            }
+          },
+          "required": [
+            "FieldNotSupportedInPlutusV1V2"
+          ],
+          "additionalProperties": false
         },
         {
           "description": "The validity slot is too far in the past for slot-to-time conversion",
@@ -3051,6 +3184,31 @@
           },
           "required": [
             "BudgetIsBiggerThanExpected"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "description": "A UTxO the transaction spends or references carries a script\n reference or inline datum nested deeper than the library reads, so\n no script context was built and the redeemer was not evaluated. An\n implementation limit, not a finding about the transaction.",
+          "type": "object",
+          "properties": {
+            "ScriptContextNotExamined": {
+              "type": "object",
+              "properties": {
+                "input": {
+                  "type": "string"
+                },
+                "reason": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "input",
+                "reason"
+              ]
+            }
+          },
+          "required": [
+            "ScriptContextNotExamined"
           ],
           "additionalProperties": false
         }

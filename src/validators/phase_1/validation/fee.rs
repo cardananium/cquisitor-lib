@@ -20,6 +20,8 @@ pub struct FeeValidator {
 }
 
 impl FeeValidator {
+    /// `tx_size` is the transaction's size as the ledger measures it
+    /// (`crate::csl_preflight::ledger_tx_size`: no `is_valid` flag).
     pub fn new<'a>(
         tx_size: usize,
         tx_body: &csl::TransactionBody,

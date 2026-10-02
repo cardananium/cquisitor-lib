@@ -1,7 +1,6 @@
 use std::collections::HashMap;
 use std::convert::{TryFrom, TryInto};
 
-use cardano_serialization_lib::Address;
 use pallas_codec::utils::{Bytes, CborWrap, NonEmptyKeyValuePairs, PositiveCoin};
 use pallas_primitives::{
     conway::{
@@ -34,8 +33,8 @@ pub fn to_pallas_utxos(utxos: &[UTxO]) -> Result<Vec<ResolvedInput>, JsError> {
                 .try_into()
                 .map_err(|_| JsError::new("Invalid tx hash length found"))?;
 
-            let address_bytes = Address::from_bech32(&utxo.output.address)
-                .map_err(|err| JsError::new(&format!("Invalid address found: {:?}", err)))?
+            let address_bytes = crate::csl_preflight::address_from_bech32(&utxo.output.address)
+                .map_err(|err| JsError::new(&format!("Invalid address found: {}", err)))?
                 .to_bytes();
 
             Ok(ResolvedInput {
@@ -60,17 +59,29 @@ pub fn to_pallas_script_ref(
     let Some(script_ref) = script_ref else {
         return Ok(None);
     };
-    let script_bytes = hex::decode(script_ref)
-        .map_err(|err| JsError::new(&format!("Invalid script hex found: {}", err)))?;
-    let pallas_script = ScriptRef::decode_fragment(&script_bytes)
-        .map_err(|err| JsError::new(&format!("Invalid script found: {}", err)))?;
+    // pallas reads native scripts recursively on the host stack: the bytes
+    // pass the well-formedness and nesting gate calibrated for it first.
+    let script_bytes =
+        crate::csl_preflight::check_pallas_cbor_hex(script_ref, crate::csl_preflight::CslShape::ScriptRef)
+            .map_err(|err| JsError::new(&format!("Invalid script hex found: {}", err)))?;
+    // Both forms the validation context takes: the bare `[language, script]`
+    // and the output's `#6.24(bytes)` wrapping of it.
+    let pallas_script = if script_bytes.starts_with(&[0xd8, 0x18]) {
+        CborWrap::<ScriptRef>::decode_fragment(&script_bytes).map(|wrapped| wrapped.0)
+    } else {
+        ScriptRef::decode_fragment(&script_bytes)
+    }
+    .map_err(|err| JsError::new(&format!("Invalid script found: {}", err)))?;
     Ok(Some(CborWrap(pallas_script)))
 }
 
 pub fn to_pallas_datum(utxo_output: &TxOutput) -> Result<Option<DatumOption>, JsError> {
     if let Some(inline_datum) = &utxo_output.plutus_data {
-        let plutus_data_bytes = hex::decode(inline_datum)
-            .map_err(|err| JsError::new(&format!("Invalid plutus data found: {}", err)))?;
+        let plutus_data_bytes = crate::csl_preflight::check_pallas_cbor_hex(
+            inline_datum,
+            crate::csl_preflight::CslShape::Item,
+        )
+        .map_err(|err| JsError::new(&format!("Invalid plutus data found: {}", err)))?;
         let datum = CborWrap(
             PlutusData::decode_fragment(&plutus_data_bytes)
                 .map_err(|_| JsError::new("Invalid plutus data found"))?,
@@ -104,7 +115,7 @@ pub fn to_pallas_multi_asset_value(assets: &[Asset]) -> Result<Value, JsError> {
             coins = parse_quantity(&asset.quantity)?;
             continue;
         }
-        if asset.unit.len() < POLICY_ID_HEX_LEN {
+        if !asset.unit.is_char_boundary(POLICY_ID_HEX_LEN) {
             return Err(JsError::new(&format!(
                 "Invalid asset unit (too short): {}",
                 asset.unit
@@ -148,4 +159,27 @@ fn parse_quantity(quantity: &str) -> Result<u64, JsError> {
     quantity
         .parse::<u64>()
         .map_err(|err| JsError::new(&format!("Invalid quantity '{}': {}", quantity, err)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::to_pallas_script_ref;
+
+    /// The execution export reads a context UTxO's script reference in both
+    /// forms the validation reads: bare `[language, script]` and wrapped in
+    /// tag 24, as an output carries it.
+    #[test]
+    fn a_script_reference_reads_bare_and_tag_24_wrapped() {
+        // [0, [0, h'cd…']]: a native script requiring one key.
+        let bare = format!("82008200581c{}", "cd".repeat(28));
+        let wrapped = format!("d81858{:02x}{}", bare.len() / 2, bare);
+        let read = |hex: &str| {
+            to_pallas_script_ref(&Some(hex.to_string()))
+                .unwrap_or_else(|e| panic!("{}: {}", hex, e))
+                .expect("a script reference")
+        };
+        assert_eq!(read(&bare), read(&wrapped));
+        // A tag-24 wrapping of something that is no script reference.
+        assert!(to_pallas_script_ref(&Some("d81843010203".to_string())).is_err());
+    }
 }

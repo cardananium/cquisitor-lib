@@ -29,8 +29,14 @@ pub fn get_necessary_data_list_js(tx_hex: &str, network_type: &str) -> Result<St
 }
 
 pub fn get_necessary_data_list(tx_hex: &str, network_type: NetworkType) -> Result<NecessaryInputData, String> {
-    let csl_tx = csl::Transaction::from_hex(tx_hex)
-        .map_err(|e| format!("Failed to parse transaction: {:?}", e))?;
+    let tx_bytes = crate::csl_preflight::check_cbor_hex(tx_hex, crate::csl_preflight::CslShape::Transaction)
+        .map_err(|e| format!("Failed to parse transaction: {}", e))?;
+    let csl_tx = csl::Transaction::from_bytes(tx_bytes.clone()).map_err(|e| {
+        format!(
+            "Failed to parse transaction: {}",
+            crate::csl_preflight::transaction_parse_failure(&tx_bytes, &e)
+        )
+    })?;
 
     let mut utxos = HashSet::new();
     let mut accounts = HashSet::new();
@@ -441,18 +447,26 @@ pub fn validate_transaction(
     tx_hex: &str,
     validation_context: ValidationInputContext,
 ) -> Result<ValidationResult, JsError> {
-    let csl_tx = csl::FixedTransaction::from_hex(tx_hex)
-        .map_err(|e| JsError::new(&format!("Failed to parse transaction: {:?}", e)))?;
+    let tx_bytes = crate::csl_preflight::check_cbor_hex(tx_hex, crate::csl_preflight::CslShape::Transaction)
+        .map_err(|e| JsError::new(&format!("Failed to parse transaction: {}", e)))?;
+    // The size the ledger charges fees for and bounds by `maxTxSize`, read
+    // from the bytes as written (no `is_valid` flag), never re-serialized.
+    let tx_size = crate::csl_preflight::ledger_tx_size(&tx_bytes).unwrap_or(tx_bytes.len());
+    let csl_tx = csl::FixedTransaction::from_bytes(tx_bytes.clone()).map_err(|e| {
+        JsError::new(&format!(
+            "Failed to parse transaction: {}",
+            crate::csl_preflight::validation_parse_failure(&tx_bytes, &e)
+        ))
+    })?;
     let tx_body = csl_tx.body();
     let tx_witness_set = csl_tx.witness_set();
     let tx_hash = csl_tx.transaction_hash();
     let auxiliary_data = csl_tx.auxiliary_data();
-    let tx_size = tx_hex.len() / 2; // Convert hex string length to bytes
 
     let mut overall_result = ValidationResult::new_empty();
 
     // 1. Balance validation
-    let balance_context = BalanceValidator::new(&tx_body, &validation_context);
+    let balance_context = BalanceValidator::new(&tx_body, &validation_context)?;
     let balance_result = balance_context.validate();
     overall_result.append(balance_result);
 
@@ -469,7 +483,7 @@ pub fn validate_transaction(
 
     // 4. Collateral validation
     let collateral_context =
-        CollateralValidator::new(&tx_body, &tx_witness_set, &validation_context);
+        CollateralValidator::new(&tx_body, &tx_witness_set, &validation_context)?;
     let collateral_result = collateral_context.validate();
     overall_result.append(collateral_result);
 

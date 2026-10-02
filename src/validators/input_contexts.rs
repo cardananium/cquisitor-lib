@@ -27,6 +27,15 @@ pub struct GovActionInputContext {
     pub action_id: GovernanceActionId,
     pub action_type: GovernanceActionType,
     pub is_active: bool,
+    /// For a `ParameterChangeAction`: the names of the protocol parameters
+    /// it changes. Ledger names (`maxBlockBodySize`), CDDL names
+    /// (`max_block_body_size`), db-sync / Koios names (`max_block_size`,
+    /// `max_block_ex_mem`) and the CDDL keys as text (`"2"`) are all read.
+    /// Stake pools may vote on the action only when one of them is in the
+    /// ledger's security group. Absent when not known; a stake pool's vote on
+    /// the action is then reported as disallowed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub changed_parameters: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]

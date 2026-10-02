@@ -9,7 +9,6 @@ use uplc::{
             find_script, DataLookupTable, PlutusScript, ScriptContext, TxInfo, TxInfoV1, TxInfoV2,
             TxInfoV3,
         },
-        to_plutus_data::ToPlutusData,
         ResolvedInput, SlotConfig,
     },
     PlutusData,
@@ -19,7 +18,13 @@ use crate::{
     common::ExUnits,
     script_context::SerializableScriptContext,
     validators::{
-        common::NetworkType, phase_2::errors::Phase2Error, validation_result::EvalRedeemerResult,
+        common::NetworkType,
+        phase_2::{
+            context_data::script_context_data,
+            context_guard::{script_context_refusal, transaction_refusal, withdrawal_refusal},
+            errors::Phase2Error,
+        },
+        validation_result::EvalRedeemerResult,
     },
 };
 
@@ -53,50 +58,61 @@ pub fn eval_redeemer(
     lookup_table: &DataLookupTable,
     cost_mdls_opt: Option<&CostModels>,
     initial_budget: &ExBudget,
+    protocol_major: u16,
 ) -> (EvalRedeemerResult, Option<Phase2Error>) {
     fn do_eval_redeemer(
+        tx: &MintedTx,
         cost_mdl_opt: Option<&CostModel>,
         initial_budget: &ExBudget,
+        protocol_major: u16,
         lang: &Language,
         datum: Option<PlutusData>,
         redeemer: &Redeemer,
         tx_info: TxInfo,
         script_hex: String,
         program: Program<NamedDeBruijn>,
-    ) -> (EvalRedeemerResult, Option<Phase2Error>) {
+    ) -> Result<(EvalRedeemerResult, Option<Phase2Error>), Phase2Error> {
+        // No script purpose in the transaction matches this redeemer's
+        // tag and index: the redeemer is extraneous.
         let script_context = tx_info
             .into_script_context(redeemer, datum.as_ref())
-            .expect("couldn't create script context from transaction?");
+            .ok_or_else(|| Phase2Error::ExtraneousRedeemer {
+                tag: redeemer_tag_to_string(&redeemer.tag),
+                index: redeemer.index as u64,
+            })?;
 
-        let script_context_data = script_context.to_plutus_data();
-        let script_context_bytes =
-            Some(hex::encode(uplc::plutus_data_to_bytes(&script_context_data)));
+        let script_context_json = SerializableScriptContext::try_from(&script_context)
+            .ok()
+            .and_then(|ctx| serde_json::to_string(&ctx).ok());
+        let is_v3 = matches!(script_context, ScriptContext::V3 { .. });
+        let context_data = script_context_data(tx, script_context)
+            .map_err(|error| Phase2Error::BuildTxContextError { error })?;
+        let script_context_bytes = Some(hex::encode(uplc::plutus_data_to_bytes(&context_data)));
         // The exact PlutusData args applied to the program — handed to de-uplc verbatim.
         let redeemer_bytes = Some(hex::encode(uplc::plutus_data_to_bytes(&redeemer.data)));
         let datum_bytes = datum
             .as_ref()
             .map(|d| hex::encode(uplc::plutus_data_to_bytes(d)));
         let plutus_version = Some(language_to_version_string(lang));
-        let script_context_json = SerializableScriptContext::try_from(&script_context)
-            .ok()
-            .and_then(|ctx| serde_json::to_string(&ctx).ok());
 
-        let program = match script_context {
-            ScriptContext::V1V2 { .. } => if let Some(datum) = datum {
+        let program = if is_v3 {
+            program.apply_data(context_data)
+        } else {
+            if let Some(datum) = datum {
                 program.apply_data(datum)
             } else {
                 program
             }
             .apply_data(redeemer.data.clone())
-            .apply_data(script_context_data),
-
-            ScriptContext::V3 { .. } => program.apply_data(script_context_data),
+            .apply_data(context_data)
         };
 
+        // Builtin availability, semantics and costing follow the language
+        // and the protocol major version together, as the ledger selects them.
         let eval_result = if let Some(costs) = cost_mdl_opt {
-            program.eval_as(lang, costs, Some(initial_budget))
+            program.eval_as_with_protocol(lang, protocol_major, costs, Some(initial_budget))
         } else {
-            program.eval_version(ExBudget::max(), lang)
+            program.eval_version_with_protocol(ExBudget::max(), lang, protocol_major)
         };
 
         let cost = eval_result.cost();
@@ -131,7 +147,7 @@ pub fn eval_redeemer(
             datum_bytes,
         };
 
-        (new_redeemer, error)
+        Ok((new_redeemer, error))
     }
 
     let program = |script: Bytes| {
@@ -140,13 +156,32 @@ pub fn eval_redeemer(
             .map(Into::<Program<NamedDeBruijn>>::into)
     };
 
+    // The context builder panics on some content a transaction can hold
+    // (see `context_guard`); such content is this redeemer's error instead.
+    // The lookup of a reward redeemer already reads the withdrawal keys.
+    if let Some(error) = withdrawal_refusal(tx) {
+        return eval_redeemer_result(redeemer, error);
+    }
+
     let redeemers_script = find_script(redeemer, tx, utxos, lookup_table).map_err(|e| {
         parse_script_lookup_error(e, redeemer)
     });
 
+    let refusal = transaction_refusal(tx).or_else(|| match &redeemers_script {
+        Ok((script, _)) => script_context_refusal(tx, &script_language(script)),
+        Err(_) => None,
+    });
+    if let Some(error) = refusal {
+        return match &redeemers_script {
+            Ok((script, datum)) => refused_redeemer_result(redeemer, error, script, datum.as_ref()),
+            Err(_) => eval_redeemer_result(redeemer, error),
+        };
+    }
+
     (|| -> Result<(EvalRedeemerResult, Option<Phase2Error>), Phase2Error> {
         match redeemers_script {
-            Ok((PlutusScript::V1(script), datum)) => Ok(do_eval_redeemer(
+            Ok((PlutusScript::V1(script), datum)) => do_eval_redeemer(
+                tx,
                 cost_mdls_opt
                     .map(|cost_mdls| {
                         cost_mdls
@@ -158,6 +193,7 @@ pub fn eval_redeemer(
                     })
                     .transpose()?,
                 initial_budget,
+                protocol_major,
                 &Language::PlutusV1,
                 datum,
                 redeemer,
@@ -168,9 +204,10 @@ pub fn eval_redeemer(
                 program(script.0).map_err(|err| Phase2Error::ScriptDecodeError {
                     error: err.to_string(),
                 })?,
-            )),
+            ),
 
-            Ok((PlutusScript::V2(script), datum)) => Ok(do_eval_redeemer(
+            Ok((PlutusScript::V2(script), datum)) => do_eval_redeemer(
+                tx,
                 cost_mdls_opt
                     .map(|cost_mdls| {
                         cost_mdls
@@ -182,6 +219,7 @@ pub fn eval_redeemer(
                     })
                     .transpose()?,
                 initial_budget,
+                protocol_major,
                 &Language::PlutusV2,
                 datum,
                 redeemer,
@@ -192,9 +230,10 @@ pub fn eval_redeemer(
                 program(script.0).map_err(|err| Phase2Error::ScriptDecodeError {
                     error: err.to_string(),
                 })?,
-            )),
+            ),
 
-            Ok((PlutusScript::V3(script), datum)) => Ok(do_eval_redeemer(
+            Ok((PlutusScript::V3(script), datum)) => do_eval_redeemer(
+                tx,
                 cost_mdls_opt
                     .map(|cost_mdls| {
                         cost_mdls
@@ -206,6 +245,7 @@ pub fn eval_redeemer(
                     })
                     .transpose()?,
                 initial_budget,
+                protocol_major,
                 &Language::PlutusV3,
                 datum,
                 redeemer,
@@ -216,11 +256,50 @@ pub fn eval_redeemer(
                 program(script.0).map_err(|err| Phase2Error::ScriptDecodeError {
                     error: err.to_string(),
                 })?,
-            )),
+            ),
             Err(e) => Err(e),
         }
     })()
     .unwrap_or_else(|e| eval_redeemer_result(redeemer, e))
+}
+
+/// The Plutus language of a script found for a redeemer.
+pub(crate) fn script_language(script: &PlutusScript) -> Language {
+    match script {
+        PlutusScript::V1(_) => Language::PlutusV1,
+        PlutusScript::V2(_) => Language::PlutusV2,
+        PlutusScript::V3(_) => Language::PlutusV3,
+    }
+}
+
+/// Whether the script of a redeemer ran, given the error [`eval_redeemer`]
+/// returned with its result: a run ends in success or in a machine error,
+/// and every other error stops before the machine starts (its calculated
+/// units are then zero and mean nothing).
+pub(crate) fn script_ran(error: Option<&Phase2Error>) -> bool {
+    matches!(error, None | Some(Phase2Error::MachineError { .. }))
+}
+
+/// The result of a redeemer whose script was found but whose context the
+/// ledger refuses to build: not run, with the script, its version and the
+/// arguments it would have been applied to.
+fn refused_redeemer_result(
+    redeemer: &Redeemer,
+    error: Phase2Error,
+    script: &PlutusScript,
+    datum: Option<&PlutusData>,
+) -> (EvalRedeemerResult, Option<Phase2Error>) {
+    let (mut result, error) = eval_redeemer_result(redeemer, error);
+    let script_bytes = match script {
+        PlutusScript::V1(script) => &script.0,
+        PlutusScript::V2(script) => &script.0,
+        PlutusScript::V3(script) => &script.0,
+    };
+    result.script_bytes = Some(hex::encode(script_bytes.as_slice()));
+    result.plutus_version = Some(language_to_version_string(&script_language(script)));
+    result.redeemer_bytes = Some(hex::encode(uplc::plutus_data_to_bytes(&redeemer.data)));
+    result.datum_bytes = datum.map(|d| hex::encode(uplc::plutus_data_to_bytes(d)));
+    (result, error)
 }
 
 fn eval_redeemer_result(
@@ -436,5 +515,80 @@ fn map_tag_to_redeemer_tag(tag: &RedeemerTag) -> ValidatorRedeemerTag {
         RedeemerTag::Propose => ValidatorRedeemerTag::Propose,
         RedeemerTag::Vote => ValidatorRedeemerTag::Vote,
         RedeemerTag::Reward  => ValidatorRedeemerTag::Reward,
+    }
+}
+
+#[cfg(test)]
+mod protocol_tests {
+    use std::{convert::TryInto, rc::Rc};
+
+    use pallas_codec::utils::KeyValuePairs;
+    use pallas_primitives::conway::{Language, PlutusData};
+    use uplc::{
+        ast::{Constant, Name, NamedDeBruijn, Program, Term, Type},
+        builtins::DefaultFunction,
+        machine::{cost_model::ExBudget, Error},
+    };
+
+    fn program(term: Term<Name>) -> Program<NamedDeBruijn> {
+        Program::<Name> { version: (1, 1, 0), term }.try_into().unwrap()
+    }
+
+    fn constant(constant: Constant) -> Term<Name> {
+        Term::Constant(Rc::new(constant))
+    }
+
+    /// `dropList 1 [1, 2]`.
+    fn drop_list() -> Program<NamedDeBruijn> {
+        let list = Constant::ProtoList(
+            Type::Integer,
+            vec![
+                Rc::new(Constant::Integer(1.into())),
+                Rc::new(Constant::Integer(2.into())),
+            ],
+        );
+        program(
+            Term::Builtin(DefaultFunction::DropList)
+                .force()
+                .apply(constant(Constant::Integer(1.into())))
+                .apply(constant(list)),
+        )
+    }
+
+    /// `unValueData (Map [])`: a CIP-153 builtin.
+    fn un_value_data() -> Program<NamedDeBruijn> {
+        program(
+            Term::Builtin(DefaultFunction::UnValueData)
+                .apply(constant(Constant::Data(PlutusData::Map(KeyValuePairs::from(vec![]))))),
+        )
+    }
+
+    fn run(
+        program: Program<NamedDeBruijn>,
+        language: &Language,
+        protocol_major: u16,
+    ) -> Result<(), Error> {
+        program
+            .eval_version_with_protocol(ExBudget::max(), language, protocol_major)
+            .result()
+            .map(|_| ())
+    }
+
+    #[test]
+    fn protocol_eleven_builtins_evaluate() {
+        assert!(run(drop_list(), &Language::PlutusV3, 11).is_ok());
+        assert!(run(un_value_data(), &Language::PlutusV3, 11).is_ok());
+    }
+
+    #[test]
+    fn value_builtins_follow_the_protocol_version() {
+        assert!(matches!(
+            run(un_value_data(), &Language::PlutusV3, 10),
+            Err(Error::BuiltinNotAvailable(DefaultFunction::UnValueData))
+        ));
+        assert!(matches!(
+            run(un_value_data(), &Language::PlutusV2, 11),
+            Err(Error::BuiltinNotAvailable(DefaultFunction::UnValueData))
+        ));
     }
 }

@@ -89,6 +89,7 @@ fn unregistered_drep_voter_is_flagged() {
         },
         action_type: GovernanceActionType::InfoAction,
         is_active: true,
+        changed_parameters: None,
     });
 
     let validator = GovernanceValidator::new(&body, &ctx);
@@ -128,6 +129,7 @@ fn voter_error_uses_hex_hash_not_byte_array() {
         },
         action_type: GovernanceActionType::InfoAction,
         is_active: true,
+        changed_parameters: None,
     });
 
     let result = GovernanceValidator::new(&body, &ctx).validate(&body, &ctx);
@@ -186,6 +188,7 @@ fn registered_drep_voter_passes_existence_check() {
         },
         action_type: GovernanceActionType::InfoAction,
         is_active: true,
+        changed_parameters: None,
     });
 
     let validator = GovernanceValidator::new(&body, &ctx);
@@ -229,6 +232,7 @@ fn unregistered_pool_voter_is_flagged() {
         },
         action_type: GovernanceActionType::InfoAction,
         is_active: true,
+        changed_parameters: None,
     });
 
     let validator = GovernanceValidator::new(&body, &ctx);
@@ -282,6 +286,7 @@ fn committee_hot_voter_for_known_member_passes() {
         },
         action_type: GovernanceActionType::InfoAction,
         is_active: true,
+        changed_parameters: None,
     });
 
     let validator = GovernanceValidator::new(&body, &ctx);
@@ -336,6 +341,7 @@ fn resigned_committee_voter_triggers_invalid_committee_vote() {
         },
         action_type: GovernanceActionType::InfoAction,
         is_active: true,
+        changed_parameters: None,
     });
 
     let validator = GovernanceValidator::new(&body, &ctx);
@@ -427,6 +433,7 @@ fn voting_on_expired_gov_action_is_flagged() {
         },
         action_type: GovernanceActionType::InfoAction,
         is_active: false,
+        changed_parameters: None,
     });
 
     let validator = GovernanceValidator::new(&body, &ctx);
@@ -795,6 +802,7 @@ fn spo_voting_on_parameter_change_is_disallowed() {
         },
         action_type: GovernanceActionType::ParameterChangeAction,
         is_active: true,
+        changed_parameters: None,
     });
 
     let validator = GovernanceValidator::new(&body, &ctx);
@@ -849,6 +857,7 @@ fn committee_voting_on_no_confidence_is_disallowed() {
         },
         action_type: GovernanceActionType::NoConfidenceAction,
         is_active: true,
+        changed_parameters: None,
     });
 
     let validator = GovernanceValidator::new(&body, &ctx);
@@ -898,6 +907,7 @@ fn drep_can_vote_on_all_action_types() {
         },
         action_type: GovernanceActionType::TreasuryWithdrawalsAction,
         is_active: true,
+        changed_parameters: None,
     });
 
     let validator = GovernanceValidator::new(&body, &ctx);
@@ -911,4 +921,104 @@ fn drep_can_vote_on_all_action_types() {
         "DRep must be allowed for TreasuryWithdrawals, got: {:?}",
         result.errors
     );
+}
+
+/// Errors of an SPO's Yes vote on an active ParameterChange whose context
+/// lists `changed_parameters`.
+fn spo_vote_on_parameter_change(changed_parameters: Option<Vec<&str>>) -> Vec<Phase1Error> {
+    let pool_key = csl::Ed25519KeyHash::from_bytes(vec![0x44; 28]).unwrap();
+    let voter = csl::Voter::new_stake_pool_key_hash(&pool_key);
+    let mut proc = csl::VotingProcedures::new();
+    let action_id = csl::GovernanceActionId::new(
+        &csl::TransactionHash::from_bytes(vec![0x78; 32]).unwrap(),
+        1,
+    );
+    proc.insert(&voter, &action_id, &csl::VotingProcedure::new(csl::VoteKind::Yes));
+    let mut body = empty_body();
+    body.set_voting_procedures(&proc);
+
+    let mut ctx = preview_simple_context();
+    ctx.utxo_set.clear();
+    ctx.pool_contexts.push(PoolInputContext {
+        pool_id: pool_key.to_hex(),
+        is_registered: true,
+        retirement_epoch: None,
+    });
+    ctx.gov_action_contexts.push(GovActionInputContext {
+        action_id: GovernanceActionId {
+            tx_hash: vec![0x78; 32],
+            index: 1,
+        },
+        action_type: GovernanceActionType::ParameterChangeAction,
+        is_active: true,
+        changed_parameters: changed_parameters
+            .map(|names| names.into_iter().map(str::to_string).collect()),
+    });
+    let validator = GovernanceValidator::new(&body, &ctx);
+    validator
+        .validate(&body, &ctx)
+        .errors
+        .into_iter()
+        .map(|e| e.error)
+        .collect()
+}
+
+/// The ledger lets stake pools vote on a parameter change that changes a
+/// parameter of the security group, under every spelling the context may
+/// carry: ledger, CDDL, db-sync / Koios names and the CDDL key.
+#[test]
+fn spo_may_vote_on_a_parameter_change_of_the_security_group() {
+    for changed in [
+        vec!["maxBlockExecutionUnits"],
+        vec!["max_block_ex_mem", "max_block_ex_steps"],
+        vec!["maxBlockBodySize"],
+        vec!["txFeePerByte"],
+        vec!["min_fee_a"],
+        vec!["utxoCostPerByte"],
+        vec!["coins_per_utxo_size"],
+        vec!["max_val_size"],
+        vec!["govActionDeposit"],
+        vec!["minFeeRefScriptCostPerByte"],
+        vec!["2"],
+        vec!["costModels", "maxTxSize"],
+    ] {
+        let errors = spo_vote_on_parameter_change(Some(changed.clone()));
+        assert!(
+            !errors
+                .iter()
+                .any(|e| matches!(e, Phase1Error::DisallowedVoters { .. })),
+            "{:?}: {:?}",
+            changed,
+            errors
+        );
+    }
+}
+
+/// A parameter change of no security-group parameter, or one whose
+/// parameters the context does not list, stays closed to stake pools.
+#[test]
+fn spo_may_not_vote_on_other_parameter_changes() {
+    for changed in [
+        Some(vec!["costModels"]),
+        Some(vec!["cost_models", "price_mem", "collateral_percent"]),
+        Some(vec!["dRepVotingThresholds", "committeeMinSize", "stakeAddressDeposit"]),
+        Some(vec!["18"]),
+        Some(vec![]),
+        None,
+    ] {
+        let errors = spo_vote_on_parameter_change(changed.clone());
+        let pair = errors.iter().find_map(|e| match e {
+            Phase1Error::DisallowedVoters { disallowed_pairs } => Some(disallowed_pairs.clone()),
+            _ => None,
+        });
+        let pairs = pair.unwrap_or_else(|| panic!("{:?}: {:?}", changed, errors));
+        // The pair names the action voted on.
+        assert_eq!(
+            pairs[0].1,
+            GovernanceActionId {
+                tx_hash: vec![0x78; 32],
+                index: 1
+            }
+        );
+    }
 }

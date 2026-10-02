@@ -1,14 +1,18 @@
 /**
-* @param {string} tx_hex
-* @param {NetworkType} network_type
-* @returns {string}
-*/
-export function get_necessary_data_list_js(tx_hex: string, network_type: NetworkType): string;
+ * Lists the chain data a transaction needs for validation (UTxOs, reward
+ * accounts, pools, DReps, governance actions, committee members), answering
+ * with the JSON text of a `NecessaryInputData` (see *Document walkers
+ * answer in JSON text* below for how to read it).
+ * @param {string} tx_hex
+ * @param {NetworkType} network_type
+ * @returns {JsonText<NecessaryInputData>}
+ */
+export function get_necessary_data_list_js(tx_hex: string, network_type: NetworkType): JsonText<NecessaryInputData>;
 
 /**
  * Extracts all script and datum hashes from a transaction
  * @param {string} tx_hex - Hex-encoded transaction bytes
- * @returns {string} JSON string with ExtractedHashes structure
+ * @returns {JsonText<ExtractedHashes>} JSON text of an ExtractedHashes
  * 
  * Schema:
  * ```typescript
@@ -42,7 +46,7 @@ export function get_necessary_data_list_js(tx_hex: string, network_type: Network
  * type InlineScriptType = "Native" | { Plutus: PlutusVersion };
  * ```
  */
-export function extract_hashes_from_transaction_js(tx_hex: string): string;
+export function extract_hashes_from_transaction_js(tx_hex: string): JsonText<ExtractedHashes>;
 
   // ========== ExtractedHashes types ==========
   
@@ -76,11 +80,28 @@ export interface InlineScriptInfo {
 export type InlineScriptType = "Native" | { Plutus: PlutusVersion };
 
 /**
-* @param {string} tx_hex
-* @param {ValidationInputContext} validation_context
-* @returns {string}
-*/
-export function validate_transaction_js(tx_hex: string, validation_context: string): string;
+ * Runs phase-1 (and, given scripts, phase-2) validation of a transaction
+ * against the JSON text of a `ValidationInputContext`, answering with the
+ * JSON text of a `ValidationResult`.
+ *
+ * Nesting: a transaction nested more than 128 CBOR levels outside its
+ * native scripts is refused (`CBOR nesting is deeper than the supported
+ * limit of 128 levels for decoding by the serialization library; native
+ * scripts do not count toward it …`), as by every export that reads a
+ * transaction (`get_necessary_data_list_js`,
+ * `extract_hashes_from_transaction_js`, `check_block_or_tx_signatures`,
+ * the witness inserters; `execute_tx_scripts`, `get_utxo_list_from_tx`
+ * and `get_ref_script_bytes` apply the same 128 for pallas and the Plutus
+ * evaluator). Native scripts — in the witness set, the auxiliary data, an
+ * output's or a context UTxO's script reference — are read and evaluated
+ * without recursion at any depth up to 32768 CBOR levels for the whole
+ * input: a required native script thousands of levels deep is evaluated
+ * like any other.
+ * @param {string} tx_hex
+ * @param {string} validation_context - JSON text of a `ValidationInputContext`
+ * @returns {JsonText<ValidationResult>}
+ */
+export function validate_transaction_js(tx_hex: string, validation_context: string): JsonText<ValidationResult>;
 
 /**
  * @returns {(string)[]}
@@ -88,36 +109,95 @@ export function validate_transaction_js(tx_hex: string, validation_context: stri
 export function get_decodable_types(): (string)[];
 /**
  * Decodes `input` as the named ledger type, through the serialization
- * library's own decoder for it, and answers with the object it decodes
- * to. Throws a string naming the reason when it does not decode.
+ * library's own decoder for it, and answers with the JSON text of the
+ * object it decodes to (parse it exactly: integers past 2^53 are bare
+ * literals; the typed wrapper `decode` does). Throws a string naming the
+ * reason when it does not decode.
  *
- * **CBOR nesting stops at 256 levels here.** The typed decoders, and
- * the walk that serialises their answer across the boundary, recurse on
- * the host's own stack, which none of the heap-walking bounds above
- * measure; so hex input is scanned for its depth first, iteratively,
- * and a document nested more than 256 levels below its root is refused
- * by a thrown message naming the limit rather than handed to a decoder.
- * An implementation limit, never a verdict on the bytes — and far above
- * any ledger document: metadata, the one ledger type whose nesting the
- * ledger leaves unbounded, nests a handful of levels in practice. Input
- * that is not hex carries no CBOR to nest and is not scanned.
+ * The answer is text, not a JS object: a deep object would be built,
+ * structured-cloned and walked level by level on the host stack.
+ *
+ * **CBOR nesting outside native scripts stops at 64 levels here.** Parts
+ * of the decoding and rendering still recurse on the host's own stack
+ * (around Plutus data and metadata), which none of the heap-walking bounds
+ * above measure, and a WebKit (Safari) Web Worker's stack is the smallest
+ * this runs on; so hex input is scanned for its depth first, iteratively,
+ * and a document nested more than 64 levels below its root is refused by
+ * a thrown message naming the limit (`CBOR nesting is deeper than the
+ * supported limit of 64 levels for typed decoding; native scripts do not
+ * count toward it and may nest up to 32768 levels`) rather than handed to
+ * a decoder. An implementation limit, never a verdict on the bytes.
+ *
+ * Levels inside the native scripts the named type holds where the ledger
+ * puts them do not count toward the 64: a `NativeScript` (and `ScriptAll`,
+ * `ScriptAny`, `ScriptNOfK`, …) itself, `NativeScripts`, a witness set's
+ * key 1, auxiliary data's scripts, an output's script reference
+ * (`ScriptRef`, `TransactionOutput`, a body's outputs, a `Transaction`,
+ * a `Block`). Native scripts are read, cloned, dropped and rendered
+ * without recursion, so a script as deep as a maximum-size transaction
+ * holds (about 5,430 levels) decodes; the whole input, payloads under tag
+ * 24 included, still nests at most 32768 levels. Input that is not hex
+ * carries no CBOR to nest and is not scanned.
  *
  * @param {string} input
  * @param {string} type_name
  * @param {any} params_json
- * @returns {any}
+ * @returns {JsonText<unknown>}
  */
-export function decode_specific_type(input: string, type_name: string, params_json: DecodingParams): any;
+export function decode_specific_type(input: string, type_name: string, params_json: DecodingParams): JsonText<unknown>;
 /**
- * The names of the ledger types `input` decodes as, sorted. Hex input
- * nested more than 256 levels below its root decodes as none of them:
- * it is refused before any decoder sees it, for the reason
- * `decode_specific_type` gives, so the answer is the empty list.
+ * The names of the ledger types `input` decodes as, sorted. A type whose
+ * reading of the hex input nests more than 64 levels below its root
+ * (outside the native scripts it holds, as `decode_specific_type` counts)
+ * is not tried at all: it is refused before its decoder sees the input.
+ * Use `get_possible_types_report` to tell a type not tried from one the
+ * input does not decode as.
  *
  * @param {string} input
  * @returns {(string)[]}
  */
 export function get_possible_types_for_input(input: string): (string)[];
+/**
+ * `get_possible_types_for_input` with the types that were not tried and
+ * why, as JSON text. `unexamined` is present when reading the input as
+ * some type nests past what the typed decoders follow: an implementation
+ * limit, not a finding that the input is not of those types. With `types`
+ * empty and every type in `unexamined.types`, nothing was tried.
+ *
+ * @param {string} input
+ * @returns {JsonText<PossibleTypesReport>}
+ */
+export function get_possible_types_report(input: string): JsonText<PossibleTypesReport>;
+/** Answer of `get_possible_types_report`. */
+export interface PossibleTypesReport {
+    /** Sorted names of the types the input decodes as. */
+    types: string[];
+    /**
+     * Present when some type was not tried: reading the input as it nests
+     * past the typed decoders' bound (native scripts not counted).
+     */
+    unexamined?: {
+        kind: "nesting_too_deep";
+        /**
+         * The bound, in CBOR levels: the typed decoders' 64, or 32768 when
+         * the input nests past that even with native scripts counted.
+         */
+        limit: number;
+        /**
+         * How deep the input nests, native scripts included, when the scan
+         * measured it (it stops past 32768).
+         */
+        depth?: number;
+        /**
+         * `CBOR nesting is deeper than the supported limit of 64 levels for
+         * typed decoding; native scripts do not count toward it and may
+         * nest up to 32768 levels` (or the 32768-level refusal).
+         */
+        message: string;
+        /** Sorted names of the types not tried. */
+        types: string[];
+    };
+}
 /**
  * ## Implementation limits: one contract for every walker
  *
@@ -151,7 +231,7 @@ export function get_possible_types_for_input(input: string): (string)[];
 export type ImplementationLimitKind =
     /**
      * The input nests past what the walk follows: a CBOR document more
-     * than 16384 levels below its root; CDDL text past 9 levels of
+     * than 32768 levels below its root; CDDL text past 9 levels of
      * brackets, or past the document-wide budget on them; a descent
      * that holds more memory — the levels of the data, the rule
      * references resolved on the way to them and, for the validator,
@@ -211,7 +291,7 @@ export type JsonText<T> = string & { readonly __json?: T };
  * failing position, and a human `message`.
  *
  * Also never throws on well-formed input that is simply nested too
- * deeply: an item more than 16384 levels below the root is refused with
+ * deeply: an item more than 32768 levels below the root is refused with
  * `kind: "nesting_too_deep"` and the prefix decoded so far. That is an
  * implementation limit, not a statement about the bytes.
  *
@@ -243,7 +323,7 @@ export type CborDecodeErrorKind =
     | "int_not_representable"
     | "non_finite_float"
     /**
-     * The item sits more than 16384 levels below the root. An
+     * The item sits more than 32768 levels below the root. An
      * implementation limit — the bytes may be valid CBOR. Every
      * enclosing array, map and tag counts one level; a map key sits at
      * the same level as its value, and the chunks of an
@@ -312,7 +392,7 @@ export function validate_cddl(cddl: string): CddlValidationResult;
  * it against a decoded tree the same way — key first, then position —
  * rather than assuming an array.
  *
- * **CBOR nesting stops at 16384 levels here**, the same depth the
+ * **CBOR nesting stops at 32768 levels here**, the same depth the
  * decoding and mapping entry points allow. The validator holds its
  * levels on the heap, so what a level costs it is memory rather than
  * stack, and a document inside the bound is walked in full on whatever
@@ -331,7 +411,7 @@ export function validate_cddl(cddl: string): CddlValidationResult;
  * holds, all of that together, as well as in what it counts, and the
  * two bounds together decide how deep a given schema reaches. A rule
  * of a few alternatives — `x = [* x] / uint`, say — reaches the full
- * 16384 levels. `plutus_data` does not: its `constr` alternative is a
+ * 32768 levels. `plutus_data` does not: its `constr` alternative is a
  * choice of some hundred and thirty tags, every one of which records
  * its mismatch at every level of a nested map or list before the
  * alternative that matches is reached, so the descent holds tens of
@@ -438,7 +518,7 @@ export interface SourceSpan {
  * `map_cbor_to_cddl` and `decode_cbor_against_cddl` carry the same
  * schema bounds, reported in their result as `kind: "nesting_too_deep"`
  * rather than thrown, and additionally refuse CBOR input nested more
- * than 16384 levels below its root. `validate_cbor_against_cddl` stops
+ * than 32768 levels below its root. `validate_cbor_against_cddl` stops
  * at the same depth. All three bound what the descent to a level holds
  * once the schema's own rule references are counted, and the work one
  * walk may do — see their own documentation. The contract they share is
@@ -1002,12 +1082,19 @@ export function check_block_or_tx_signatures(hex_str: string): CheckSignaturesRe
 export function get_utxo_list_from_tx(tx_hex: string): string[];
 
 /**
+ * Runs every Plutus script of the transaction against `utxo_json` with
+ * `cost_models_json`; one entry per redeemer. Integers (execution units,
+ * redeemer index) are decimal strings here; the typed `executeTxScripts`
+ * reads them as numbers. No protocol version is taken: scripts run with
+ * the builtins, semantics and costing of protocol version 11 (V1/V2:
+ * semantics D, V3: semantics E); `validate_transaction_js` follows the
+ * context's `protocolVersion` instead.
  * @param {string} tx_hex
  * @param {UTxO[]} utxo_json
  * @param {CostModels} cost_models_json
- * @returns {ExecuteTxScriptsResult}
+ * @returns {ExecuteTxScriptsRawResult}
  */
-export function execute_tx_scripts(tx_hex: string, utxo_json: UTxO[], cost_models_json: CostModels): ExecuteTxScriptsResult;
+export function execute_tx_scripts(tx_hex: string, utxo_json: UTxO[], cost_models_json: CostModels): ExecuteTxScriptsRawResult;
 /**
  * @param {string} hex
  * @returns {ProgramJson}
@@ -1350,7 +1437,7 @@ export type CborValidationResult =
  *  - "nesting_too_deep" — an implementation limit was reached (see
  *    `ImplementationLimitKind`), never a
  *    claim about the input: the CDDL text nests brackets past what the
- *    parser can be run on, the CBOR input nests more than 16384 levels
+ *    parser can be run on, the CBOR input nests more than 32768 levels
  *    below its root, or the descent to an item holds more memory than
  *    the budget allows once the rule references the schema resolves
  *    along the way are counted as well as the levels. When a run reports one
@@ -1419,9 +1506,20 @@ export interface CborValidationErrorInfo {
      * are named in the notation the CDDL literal for the same data item
      * is written in, so that the key can be matched against the schema:
      * `unexpected key 1.5`, `unexpected key h'0102'`, `unexpected key
-     * true`, `object missing key: h'0102'`. A composite key has no such
-     * notation and is described the way every other data item is —
-     * `unexpected key #6.1(array(2 items))`.
+     * true`, `map missing key: h'0102'`. A composite key (an array, a
+     * map, a tagged item) is written in CBOR diagnostic notation —
+     * `unexpected key [2, h'0102']`, `unexpected key {1: 2}`,
+     * `unexpected key 24(0)`.
+     *
+     * A `.size` failure names lengths, not data: `expected byte string
+     * of size 28 bytes, got 27 bytes`, `expected text string of size 3
+     * bytes, got 2 bytes` (UTF-8 bytes), `expected byte string length to
+     * be in the range 0 <= value <= 64, got 100`. An indefinite-length
+     * string is held to `.size` one chunk at a time (the Cardano
+     * ledger's reading for `bounded_bytes`), and an oversized chunk is
+     * named with its index: `expected each chunk length of the
+     * indefinite-length byte string to be in the range 0 <= value <= 64,
+     * got 70 in chunk 0`.
      *
      * A description is lost only where that rebuild has nothing to work
      * from: a data item the message names outside its `, got …` tail, or
@@ -1434,15 +1532,31 @@ export interface CborValidationErrorInfo {
     message: string;
     /**
      * The type or constraint the validator wanted, length-capped, and
-     * rendered the same way as `message`. Absent where the failure names
-     * no type — an unclaimed map entry, an implementation limit.
+     * rendered the same way as `message`. For `map missing key: <k>` it
+     * is the missing key, for `map requires entry with key of type <T>`
+     * the key type. Absent where the failure names no type — an
+     * unclaimed map entry (`unexpected key <k>`), an implementation limit.
      */
     expected?: string;
     /**
-     * Semantic path into the CBOR (e.g. `$.b[0]`). A map key that is
-     * neither text nor an integer names its entry in the notation the
-     * CDDL literal for the same data item is written in: `$.1.5`,
-     * `$.h'0102'`, `$.true`, `$.null`.
+     * Semantic path into the CBOR (e.g. `$.b[0]`). An `unexpected key`
+     * error is located at the entry, so the path ends in the key
+     * (`$.age`, `$[2]`). A float key is written in brackets, `$[1.5]`; a
+     * byte string, boolean or null key in the notation of its CDDL
+     * literal, `$.h'0102'`, `$.true`, `$.null`. A composite key is written
+     * in CBOR diagnostic notation inside the bracket form:
+     * `$[[2, h'0102']]`, `$[{1: 2}]`, `$[24(0)]`. The validator does not
+     * write out a key whose rendering would pass 256 bytes: it names the
+     * entry by its position in the map, `$[n]`, when the map holds no
+     * integer key `n`, and by `$[...]`, which names no entry, when it
+     * does. Where the library can tell which entry that is (always for
+     * `$[n]`; for `$[...]`, when the map has no composite key and only
+     * that entry's key is a text or byte string rendering past 256 bytes)
+     * and the key is a text or byte string whose rendering fits 1024
+     * bytes, the path writes the key out instead (`$.aaa…`, `$["a b…"]`,
+     * `$.h'abab…'`). Every other such entry keeps `$[n]` / `$[...]`; its
+     * byte spans are the entry's when the library can tell which entry it
+     * is, the map's when it cannot.
      */
     path?: string;
     /**
@@ -1453,10 +1567,15 @@ export interface CborValidationErrorInfo {
     /**
      * Byte range in the CBOR input that triggered the error. On
      * `kind: "input_parse"` it is a one-byte mark at `offset` when the
-     * decoder could not pinpoint a wider range.
+     * decoder could not pinpoint a wider range. A container is marked at
+     * its header (see `anchor_spans` for the whole item). An `unexpected
+     * key` error carries two spans: the key's first, the value's second.
      */
     byte_spans?: CborPosition[];
-    /** Byte range covering the whole containing CBOR structure. */
+    /**
+     * Byte range covering the whole CBOR item each entry of `byte_spans`
+     * marks (header through last byte for a container), one per span.
+     */
     anchor_spans?: CborPosition[];
     /**
      * True when `byte_spans` / `anchor_spans` address bytes inside an
@@ -1517,43 +1636,80 @@ export interface DecodingParams {
 
 export type PlutusDataSchema = "BasicConversions" | "DetailedSchema";
 
+/**
+ * One verdict. For a transaction, its own; for a block, the first
+ * transaction with a bad signature, or, when every one checks out,
+ * `{ valid: true, tx_hash: "All block txs are valid" }` (a sentence in
+ * place of a hash).
+ */
 export interface CheckSignaturesResult {
-    /** Indicates whether the transaction or block is valid. */
+    /** Whether every signature checked out. */
     valid: boolean;
-    /** The transaction hash as a hexadecimal string (if available). */
+    /** The transaction hash as hex (see above for a block). */
     tx_hash?: string;
-    /** An array of invalid Catalyst witness signatures (hex strings). */
-    invalidCatalystWitnesses: string[];
-    /** An array of invalid VKey witness signatures (hex strings). */
-    invalidVkeyWitnesses: string[];
+    /** Catalyst witness signatures that do not verify (hex). Omitted when there are none. */
+    invalidCatalystWitnesses?: string[];
+    /** Vkey witness signatures that do not verify (hex). Omitted when there are none, so always for a valid transaction. */
+    invalidVkeyWitnesses?: string[];
 }
 
 // RedeemerTag lives in the autogenerated block below (from Rust
 // validators::validation_result::RedeemerTag).
 
-// A successful redeemer evaluation contains the original execution units,
-// the calculated execution units, and additional redeemer info.
+/**
+ * Execution units as the raw `execute_tx_scripts` export writes them: the
+ * u64 values as decimal strings. The typed `executeTxScripts` reads them
+ * into `ExUnits` (`number`, or `bigint` past 2^53).
+ */
+export interface ExUnitsText {
+    mem: string;
+    steps: string;
+}
+
+/** A redeemer that evaluated, as the raw `execute_tx_scripts` export writes it (integers as decimal strings). */
+export interface RawRedeemerSuccess {
+    original_ex_units: ExUnitsText;
+    calculated_ex_units: ExUnitsText;
+    redeemer_index: string;
+    redeemer_tag: RedeemerTag;
+}
+
+/** A redeemer that failed, as the raw `execute_tx_scripts` export writes it (integers as decimal strings). */
+export interface RawRedeemerError {
+    original_ex_units: ExUnitsText;
+    error: string;
+    redeemer_index: string;
+    redeemer_tag: RedeemerTag;
+}
+
+export type RawRedeemerResult = RawRedeemerSuccess | RawRedeemerError;
+
+/** What the raw `execute_tx_scripts` export returns: one entry per redeemer, integers as decimal strings. */
+export type ExecuteTxScriptsRawResult = RawRedeemerResult[];
+
+/**
+ * A redeemer that evaluated, as the typed `executeTxScripts` answers it:
+ * the budget the transaction declared and the one the script used.
+ */
 export interface RedeemerSuccess {
     original_ex_units: ExUnits;
     calculated_ex_units: ExUnits;
-    redeemer_index: number;
+    redeemer_index: number | bigint;
     redeemer_tag: RedeemerTag;
 }
 
-// A failed redeemer evaluation contains the original execution units,
-// an error message, and additional redeemer info.
+/** A redeemer whose script failed, as the typed `executeTxScripts` answers it. */
 export interface RedeemerError {
     original_ex_units: ExUnits;
     error: string;
-    redeemer_index: number;
+    redeemer_index: number | bigint;
     redeemer_tag: RedeemerTag;
 }
 
-// The result from executing the transaction scripts is an array of redeemer results.
-// Each result can be either a success or an error.
+/** One redeemer's outcome: tell the two apart by `"error" in result`. */
 export type RedeemerResult = RedeemerSuccess | RedeemerError;
 
-// Type for the `execute_tx_scripts` response after JSON-parsing.
+/** What the typed `executeTxScripts` answers: one entry per redeemer, integers as `number` (or `bigint` past 2^53). */
 export type ExecuteTxScriptsResult = RedeemerResult[];
 
 // The overall JSON produced by `to_json_program`:
@@ -1640,7 +1796,9 @@ export type Constant =
     | PairConstant
     | DataConstant
     | Bls12_381G1ElementConstant
-    | Bls12_381G2ElementConstant;
+    | Bls12_381G2ElementConstant
+    | Bls12_381MlResultConstant
+    | ValueConstant;
 
 export interface IntegerConstant {
     integer: string; // represented as a string
@@ -1694,6 +1852,24 @@ export interface Bls12_381G2ElementConstant {
     bls12_381_G2_element: BlstP2;
 }
 
+// A Miller-loop result has no serialized form.
+export interface Bls12_381MlResultConstant {
+    bls12_381_mlresult: "<not serializable>";
+}
+
+// A CIP-153 `value` constant (Plutus V3, protocol version 11+): currency
+// symbols ascending, each with its token names ascending; quantities are
+// signed 128-bit decimal strings.
+export interface ValueConstant {
+    value: Array<{
+        currency_symbol: string; // hex-encoded
+        tokens: Array<{
+            token_name: string; // hex-encoded
+            quantity: string;
+        }>;
+    }>;
+}
+
 // The UPLC type is represented either as a string literal or an object.
 export type Type =
     | "bool"
@@ -1705,6 +1881,7 @@ export type Type =
     | "bls12_381_G1_element"
     | "bls12_381_G2_element"
     | "bls12_381_mlresult"
+    | "value"
     | ListType
     | PairType;
 
@@ -1818,11 +1995,11 @@ export type SerializableTransactionOutput =
     };
 export type SerializableCardanoValue =
   | {
-      amount: bigint;
+      amount: number | bigint;
       value_type: "Coin";
     }
   | {
-      coin: bigint;
+      coin: number | bigint;
       assets: SerializableAsset[];
       value_type: "Multiasset";
     };
@@ -1841,8 +2018,8 @@ export type SerializableDatumOption =
 export type SerializablePlutusData =
   | {
       type: "Constr";
-      tag: bigint;
-      any_constructor?: number | null;
+      tag: number | bigint;
+      any_constructor?: number | bigint | null;
       fields: SerializablePlutusData[];
     }
   | {
@@ -1905,17 +2082,17 @@ export type SerializableCertificate =
     }
   | {
       pool_keyhash: string;
-      epoch: bigint;
+      epoch: number | bigint;
       certificate_type: "PoolRetirement";
     }
   | {
       stake_credential: SerializableStakeCredential;
-      deposit: bigint;
+      deposit: number | bigint;
       certificate_type: "Reg";
     }
   | {
       stake_credential: SerializableStakeCredential;
-      refund: bigint;
+      refund: number | bigint;
       certificate_type: "UnReg";
     }
   | {
@@ -1932,20 +2109,20 @@ export type SerializableCertificate =
   | {
       stake_credential: SerializableStakeCredential;
       pool_keyhash: string;
-      deposit: bigint;
+      deposit: number | bigint;
       certificate_type: "StakeRegDeleg";
     }
   | {
       stake_credential: SerializableStakeCredential;
       drep: SerializableDRep;
-      deposit: bigint;
+      deposit: number | bigint;
       certificate_type: "VoteRegDeleg";
     }
   | {
       stake_credential: SerializableStakeCredential;
       pool_keyhash: string;
       drep: SerializableDRep;
-      deposit: bigint;
+      deposit: number | bigint;
       certificate_type: "StakeVoteRegDeleg";
     }
   | {
@@ -1960,13 +2137,13 @@ export type SerializableCertificate =
     }
   | {
       drep_credential: SerializableStakeCredential;
-      deposit: bigint;
+      deposit: number | bigint;
       anchor?: SerializableAnchor | null;
       certificate_type: "RegDRepCert";
     }
   | {
       drep_credential: SerializableStakeCredential;
-      refund: bigint;
+      refund: number | bigint;
       certificate_type: "UnRegDRepCert";
     }
   | {
@@ -2014,42 +2191,6 @@ export type SerializableDRep =
   | {
       drep_type: "NoConfidence";
     };
-export type SerializableGovAction =
-  | {
-      gov_action_id?: SerializableGovActionId | null;
-      protocol_params_update: SerializableProtocolParamsUpdate;
-      policy_hash?: string | null;
-      action_type: "ParameterChange";
-    }
-  | {
-      gov_action_id?: SerializableGovActionId | null;
-      protocol_version: ProtocolVersion;
-      action_type: "HardForkInitiation";
-    }
-  | {
-      withdrawals: [unknown, unknown][];
-      policy_hash?: string | null;
-      action_type: "TreasuryWithdrawals";
-    }
-  | {
-      gov_action_id?: SerializableGovActionId | null;
-      action_type: "NoConfidence";
-    }
-  | {
-      gov_action_id?: SerializableGovActionId | null;
-      members_to_remove: SerializableStakeCredential[];
-      members_to_add: [unknown, unknown][];
-      quorum_threshold: SubCoin;
-      action_type: "UpdateCommittee";
-    }
-  | {
-      gov_action_id?: SerializableGovActionId | null;
-      constitution: SerializableConstitution;
-      action_type: "NewConstitution";
-    }
-  | {
-      action_type: "Information";
-    };
 export type SerializableScriptPurpose =
   | {
       policy_id: string;
@@ -2064,7 +2205,7 @@ export type SerializableScriptPurpose =
       purpose_type: "Rewarding";
     }
   | {
-      index: bigint;
+      index: number;
       certificate: SerializableCertificate;
       purpose_type: "Certifying";
     }
@@ -2073,7 +2214,7 @@ export type SerializableScriptPurpose =
       purpose_type: "Voting";
     }
   | {
-      index: bigint;
+      index: number;
       proposal: SerializableProposalProcedure;
       purpose_type: "Proposing";
     };
@@ -2098,6 +2239,71 @@ export type SerializableVoter =
       hash: string;
       voter_type: "StakePoolKey";
     };
+export type SerializableGovAction =
+  | {
+      gov_action_id?: SerializableGovActionId | null;
+      protocol_params_update: SerializableProtocolParamsUpdate;
+      policy_hash?: string | null;
+      action_type: "ParameterChange";
+    }
+  | {
+      gov_action_id?: SerializableGovActionId | null;
+      protocol_version: ProtocolVersion;
+      action_type: "HardForkInitiation";
+    }
+  | {
+      withdrawals: [string, number][];
+      policy_hash?: string | null;
+      action_type: "TreasuryWithdrawals";
+    }
+  | {
+      gov_action_id?: SerializableGovActionId | null;
+      action_type: "NoConfidence";
+    }
+  | {
+      gov_action_id?: SerializableGovActionId | null;
+      members_to_remove: SerializableStakeCredential[];
+      members_to_add: [SerializableStakeCredential, number][];
+      quorum_threshold: SubCoin;
+      action_type: "UpdateCommittee";
+    }
+  | {
+      gov_action_id?: SerializableGovActionId | null;
+      constitution: SerializableConstitution;
+      action_type: "NewConstitution";
+    }
+  | {
+      action_type: "Information";
+    };
+export type SerializableRedeemerTag =
+  | {
+      tag: "Spend";
+    }
+  | {
+      tag: "Mint";
+    }
+  | {
+      tag: "Cert";
+    }
+  | {
+      tag: "Reward";
+    }
+  | {
+      tag: "Vote";
+    }
+  | {
+      tag: "Propose";
+    };
+export type SerializableVote =
+  | {
+      vote_type: "No";
+    }
+  | {
+      vote_type: "Yes";
+    }
+  | {
+      vote_type: "Abstain";
+    };
 export type SerializableScriptInfo =
   | {
       policy_id: string;
@@ -2113,7 +2319,7 @@ export type SerializableScriptInfo =
       script_info_type: "Rewarding";
     }
   | {
-      index: bigint;
+      index: number;
       certificate: SerializableCertificate;
       script_info_type: "Certifying";
     }
@@ -2122,7 +2328,7 @@ export type SerializableScriptInfo =
       script_info_type: "Voting";
     }
   | {
-      index: bigint;
+      index: number;
       proposal: SerializableProposalProcedure;
       script_info_type: "Proposing";
     };
@@ -2133,11 +2339,11 @@ export interface SerializableTxInfoV1 {
   fee: SerializableCardanoValue;
   mint: SerializableMintValue;
   certificates: SerializableCertificate[];
-  withdrawals: [unknown, unknown][];
+  withdrawals: [string, number][];
   valid_range: SerializableTimeRange;
   signatories: string[];
-  data: [unknown, unknown][];
-  redeemers: [unknown, unknown][];
+  data: [string, SerializablePlutusData][];
+  redeemers: [SerializableScriptPurpose, SerializableRedeemer][];
   id: string;
 }
 export interface SerializableTxInInfo {
@@ -2146,7 +2352,7 @@ export interface SerializableTxInInfo {
 }
 export interface SerializableTransactionInput {
   transaction_id: string;
-  index: bigint;
+  index: number | bigint;
 }
 export interface SerializableAsset {
   policy_id: string;
@@ -2171,8 +2377,8 @@ export interface SerializableMintValue {
 export interface SerializablePoolParams {
   operator: string;
   vrf_keyhash: string;
-  pledge: bigint;
-  cost: bigint;
+  pledge: number | bigint;
+  cost: number | bigint;
   margin: SubCoin;
   reward_account: string;
   pool_owners: string[];
@@ -2189,43 +2395,11 @@ export interface SerializableAnchor {
   data_hash: string;
 }
 export interface SerializableTimeRange {
-  lower_bound?: number | null;
-  upper_bound?: number | null;
-}
-export interface SerializableTxInfoV2 {
-  inputs: SerializableTxInInfo[];
-  reference_inputs: SerializableTxInInfo[];
-  outputs: SerializableTransactionOutput[];
-  fee: SerializableCardanoValue;
-  mint: SerializableMintValue;
-  certificates: SerializableCertificate[];
-  withdrawals: [unknown, unknown][];
-  valid_range: SerializableTimeRange;
-  signatories: string[];
-  data: [unknown, unknown][];
-  redeemers: [unknown, unknown][];
-  id: string;
-}
-export interface SerializableTxInfoV3 {
-  inputs: SerializableTxInInfo[];
-  reference_inputs: SerializableTxInInfo[];
-  outputs: SerializableTransactionOutput[];
-  fee: bigint;
-  mint: SerializableMintValue;
-  certificates: SerializableCertificate[];
-  withdrawals: [unknown, unknown][];
-  valid_range: SerializableTimeRange;
-  signatories: string[];
-  data: [unknown, unknown][];
-  redeemers: [unknown, unknown][];
-  id: string;
-  votes: [unknown, unknown][];
-  proposal_procedures: SerializableProposalProcedure[];
-  current_treasury_amount?: number | null;
-  treasury_donation?: number | null;
+  lower_bound?: number | bigint | null;
+  upper_bound?: number | bigint | null;
 }
 export interface SerializableProposalProcedure {
-  deposit: bigint;
+  deposit: number | bigint;
   reward_account: string;
   gov_action: SerializableGovAction;
   anchor: SerializableAnchor;
@@ -2235,35 +2409,35 @@ export interface SerializableGovActionId {
   action_index: number;
 }
 export interface SerializableProtocolParamsUpdate {
-  minfee_a?: number | null;
-  minfee_b?: number | null;
-  max_block_body_size?: number | null;
-  max_transaction_size?: number | null;
-  max_block_header_size?: number | null;
-  key_deposit?: number | null;
-  pool_deposit?: number | null;
-  maximum_epoch?: number | null;
-  desired_number_of_stake_pools?: number | null;
+  minfee_a?: number | bigint | null;
+  minfee_b?: number | bigint | null;
+  max_block_body_size?: number | bigint | null;
+  max_transaction_size?: number | bigint | null;
+  max_block_header_size?: number | bigint | null;
+  key_deposit?: number | bigint | null;
+  pool_deposit?: number | bigint | null;
+  maximum_epoch?: number | bigint | null;
+  desired_number_of_stake_pools?: number | bigint | null;
   pool_pledge_influence?: SubCoin | null;
   expansion_rate?: SubCoin | null;
   treasury_growth_rate?: SubCoin | null;
-  min_pool_cost?: number | null;
-  ada_per_utxo_byte?: number | null;
+  min_pool_cost?: number | bigint | null;
+  ada_per_utxo_byte?: number | bigint | null;
   cost_models_for_script_languages?: SerializableCostModels | null;
   execution_costs?: SerializableExUnitPrices | null;
   max_tx_ex_units?: ExUnits | null;
   max_block_ex_units?: ExUnits | null;
-  max_value_size?: number | null;
-  collateral_percentage?: number | null;
-  max_collateral_inputs?: number | null;
+  max_value_size?: number | bigint | null;
+  collateral_percentage?: number | bigint | null;
+  max_collateral_inputs?: number | bigint | null;
   pool_voting_thresholds?: SerializablePoolVotingThresholds | null;
   drep_voting_thresholds?: SerializableDRepVotingThresholds | null;
-  min_committee_size?: number | null;
-  committee_term_limit?: number | null;
-  governance_action_validity_period?: number | null;
-  governance_action_deposit?: number | null;
-  drep_deposit?: number | null;
-  drep_inactivity_period?: number | null;
+  min_committee_size?: number | bigint | null;
+  committee_term_limit?: number | bigint | null;
+  governance_action_validity_period?: number | bigint | null;
+  governance_action_deposit?: number | bigint | null;
+  drep_deposit?: number | bigint | null;
+  drep_inactivity_period?: number | bigint | null;
   minfee_refscript_cost_per_byte?: SubCoin | null;
 }
 export interface SerializableCostModels {
@@ -2300,6 +2474,48 @@ export interface SerializableConstitution {
   anchor: SerializableAnchor;
   guardrail_script?: string | null;
 }
+export interface SerializableRedeemer {
+  tag: SerializableRedeemerTag;
+  index: number;
+  data: SerializablePlutusData;
+  ex_units: ExUnits;
+}
+export interface SerializableTxInfoV2 {
+  inputs: SerializableTxInInfo[];
+  reference_inputs: SerializableTxInInfo[];
+  outputs: SerializableTransactionOutput[];
+  fee: SerializableCardanoValue;
+  mint: SerializableMintValue;
+  certificates: SerializableCertificate[];
+  withdrawals: [string, number][];
+  valid_range: SerializableTimeRange;
+  signatories: string[];
+  data: [string, SerializablePlutusData][];
+  redeemers: [SerializableScriptPurpose, SerializableRedeemer][];
+  id: string;
+}
+export interface SerializableTxInfoV3 {
+  inputs: SerializableTxInInfo[];
+  reference_inputs: SerializableTxInInfo[];
+  outputs: SerializableTransactionOutput[];
+  fee: number | bigint;
+  mint: SerializableMintValue;
+  certificates: SerializableCertificate[];
+  withdrawals: [string, number][];
+  valid_range: SerializableTimeRange;
+  signatories: string[];
+  data: [string, SerializablePlutusData][];
+  redeemers: [SerializableScriptPurpose, SerializableRedeemer][];
+  id: string;
+  votes: [SerializableVoter, [SerializableGovActionId, SerializableVotingProcedure][]][];
+  proposal_procedures: SerializableProposalProcedure[];
+  current_treasury_amount?: number | bigint | null;
+  treasury_donation?: number | bigint | null;
+}
+export interface SerializableVotingProcedure {
+  vote: SerializableVote;
+  anchor?: SerializableAnchor | null;
+}
 
 export type GovernanceActionType =
   | "parameterChangeAction"
@@ -2315,7 +2531,7 @@ export type NetworkType = "mainnet" | "preview" | "preprod";
 export interface ValidationInputContext {
   utxoSet: UtxoInputContext[];
   protocolParameters: ProtocolParameters;
-  slot: bigint;
+  slot: number | bigint;
   accountContexts: AccountInputContext[];
   drepContexts: DrepInputContext[];
   poolContexts: PoolInputContext[];
@@ -2323,7 +2539,7 @@ export interface ValidationInputContext {
   lastEnactedGovAction: GovActionInputContext[];
   currentCommitteeMembers: CommitteeInputContext[];
   potentialCommitteeMembers: CommitteeInputContext[];
-  treasuryValue: bigint;
+  treasuryValue: number | bigint;
   networkType: NetworkType;
   /**
    * Current constitution. When present, enables the ParameterChange /
@@ -2357,11 +2573,11 @@ export interface ProtocolParameters {
   /**
    * Linear factor for the minimum fee calculation formula
    */
-  minFeeCoefficientA: bigint;
+  minFeeCoefficientA: number | bigint;
   /**
    * Constant factor for the minimum fee calculation formula
    */
-  minFeeConstantB: bigint;
+  minFeeConstantB: number | bigint;
   /**
    * Maximum block body size in bytes
    */
@@ -2377,11 +2593,11 @@ export interface ProtocolParameters {
   /**
    * Deposit amount required for registering a stake key
    */
-  stakeKeyDeposit: bigint;
+  stakeKeyDeposit: number | bigint;
   /**
    * Deposit amount required for registering a stake pool
    */
-  stakePoolDeposit: bigint;
+  stakePoolDeposit: number | bigint;
   /**
    * Maximum number of epochs that can be used for pool retirement ahead
    */
@@ -2392,15 +2608,15 @@ export interface ProtocolParameters {
    * @minItems 2
    * @maxItems 2
    */
-  protocolVersion: [unknown, unknown];
+  protocolVersion: [number, number];
   /**
    * Minimum pool cost in lovelace
    */
-  minPoolCost: bigint;
+  minPoolCost: number | bigint;
   /**
    * Cost per UTxO byte in lovelace
    */
-  adaPerUtxoByte: bigint;
+  adaPerUtxoByte: number | bigint;
   costModels: CostModels;
   executionPrices: ExUnitPrices;
   maxTxExecutionUnits: ExUnits;
@@ -2420,11 +2636,11 @@ export interface ProtocolParameters {
   /**
    * Deposit amount required for submitting a governance action
    */
-  governanceActionDeposit: bigint;
+  governanceActionDeposit: number | bigint;
   /**
    * Deposit amount required for registering as a DRep
    */
-  drepDeposit: bigint;
+  drepDeposit: number | bigint;
   referenceScriptCostPerByte: SubCoin;
 }
 /**
@@ -2443,8 +2659,8 @@ export interface ExUnitPrices {
   stepPrice: SubCoin;
 }
 export interface SubCoin {
-  numerator: bigint;
-  denominator: bigint;
+  numerator: number | bigint;
+  denominator: number | bigint;
 }
 /**
  * Maximum execution units allowed for a transaction
@@ -2461,25 +2677,35 @@ export interface SubCoin {
 export interface AccountInputContext {
   bech32Address: string;
   isRegistered: boolean;
-  payedDeposit?: number | null;
+  payedDeposit?: number | bigint | null;
   delegatedToDrep?: string | null;
   delegatedToPool?: string | null;
-  balance?: number | null;
+  balance?: number | bigint | null;
 }
 export interface DrepInputContext {
   bech32Drep: string;
   isRegistered: boolean;
-  payedDeposit?: number | null;
+  payedDeposit?: number | bigint | null;
 }
 export interface PoolInputContext {
   poolId: string;
   isRegistered: boolean;
-  retirementEpoch?: number | null;
+  retirementEpoch?: number | bigint | null;
 }
 export interface GovActionInputContext {
   actionId: GovernanceActionId;
   actionType: GovernanceActionType;
   isActive: boolean;
+  /**
+   * For a `ParameterChangeAction`: the names of the protocol parameters
+   *  it changes. Ledger names (`maxBlockBodySize`), CDDL names
+   *  (`max_block_body_size`), db-sync / Koios names (`max_block_size`,
+   *  `max_block_ex_mem`) and the CDDL keys as text (`"2"`) are all read.
+   *  Stake pools may vote on the action only when one of them is in the
+   *  ledger's security group. Absent when not known; a stake pool's vote on
+   *  the action is then reported as disallowed.
+   */
+  changedParameters?: string[] | null;
 }
 
 export interface CommitteeInputContext {
@@ -2514,22 +2740,22 @@ export type Phase1Error =
     }
   | {
       OutsideValidityIntervalUTxO: {
-        current_slot: bigint;
-        interval_start: bigint;
-        interval_end: bigint;
+        current_slot: number | bigint;
+        interval_start: number | bigint;
+        interval_end: number | bigint;
       };
     }
   | {
       MaxTxSizeUTxO: {
-        actual_size: bigint;
-        max_size: bigint;
+        actual_size: number | bigint;
+        max_size: number | bigint;
       };
     }
   | "InputSetEmptyUTxO"
   | {
       FeeTooSmallUTxO: {
-        actual_fee: bigint;
-        min_fee: bigint;
+        actual_fee: number | bigint;
+        min_fee: number | bigint;
         fee_decomposition: FeeDecomposition;
       };
     }
@@ -2558,41 +2784,41 @@ export type Phase1Error =
     }
   | {
       OutputTooSmallUTxO: {
-        output_amount: number;
-        min_amount: number;
+        output_amount: number | bigint;
+        min_amount: number | bigint;
       };
     }
   | {
       CollateralReturnTooSmall: {
-        output_amount: number;
-        min_amount: number;
+        output_amount: number | bigint;
+        min_amount: number | bigint;
       };
     }
   | {
       OutputBootAddrAttrsTooBig: {
         output: unknown;
-        actual_size: bigint;
-        max_size: bigint;
+        actual_size: number | bigint;
+        max_size: number | bigint;
       };
     }
   | {
       OutputsValueTooBig: {
-        actual_size: bigint;
-        max_size: bigint;
+        actual_size: number | bigint;
+        max_size: number | bigint;
       };
     }
   | {
       InsufficientCollateral: {
-        total_collateral: number;
-        required_collateral: number;
+        total_collateral: number | bigint;
+        required_collateral: number | bigint;
       };
     }
   | {
       ExUnitsTooBigUTxO: {
-        actual_memory_units: bigint;
-        actual_steps_units: bigint;
-        max_memory_units: bigint;
-        max_steps_units: bigint;
+        actual_memory_units: number | bigint;
+        actual_steps_units: number | bigint;
+        max_memory_units: number | bigint;
+        max_steps_units: number | bigint;
       };
     }
   | "CalculatedCollateralContainsNonAdaAssets"
@@ -2615,8 +2841,8 @@ export type Phase1Error =
   | "NoCollateralInputs"
   | {
       IncorrectTotalCollateralField: {
-        declared_total: number;
-        actual_sum: number;
+        declared_total: number | bigint;
+        actual_sum: number | bigint;
       };
     }
   | {
@@ -2652,7 +2878,7 @@ export type Phase1Error =
   | {
       MissingRedeemer: {
         tag: string;
-        index: bigint;
+        index: number;
       };
     }
   | "MissingTxBodyMetadataHash"
@@ -2686,7 +2912,7 @@ export type Phase1Error =
   | {
       StakeNonZeroAccountBalance: {
         reward_address: string;
-        remaining_balance: bigint;
+        remaining_balance: number | bigint;
       };
     }
   | {
@@ -2696,8 +2922,8 @@ export type Phase1Error =
     }
   | {
       WrongRequestedWithdrawalAmount: {
-        expected_amount: number;
-        requested_amount: bigint;
+        expected_amount: number | bigint;
+        requested_amount: number | bigint;
         reward_address: string;
       };
     }
@@ -2708,22 +2934,22 @@ export type Phase1Error =
     }
   | {
       WrongRetirementEpoch: {
-        specified_epoch: bigint;
-        current_epoch: bigint;
-        min_epoch: bigint;
-        max_epoch: bigint;
+        specified_epoch: number | bigint;
+        current_epoch: number | bigint;
+        min_epoch: number | bigint;
+        max_epoch: number | bigint;
       };
     }
   | {
       StakePoolCostTooLow: {
-        specified_cost: bigint;
-        min_cost: bigint;
+        specified_cost: number | bigint;
+        min_cost: number | bigint;
       };
     }
   | {
       InsufficientFundsForMir: {
-        requested_amount: bigint;
-        available_amount: bigint;
+        requested_amount: number | bigint;
+        available_amount: number | bigint;
       };
     }
   | {
@@ -2734,14 +2960,14 @@ export type Phase1Error =
     }
   | {
       DRepIncorrectDeposit: {
-        supplied_deposit: number;
-        required_deposit: number;
+        supplied_deposit: number | bigint;
+        required_deposit: number | bigint;
       };
     }
   | {
       DRepDeregistrationWrongRefund: {
-        supplied_refund: number;
-        required_refund: number;
+        supplied_refund: number | bigint;
+        required_refund: number | bigint;
       };
     }
   | {
@@ -2752,20 +2978,20 @@ export type Phase1Error =
     }
   | {
       StakeRegistrationWrongDeposit: {
-        supplied_deposit: number;
-        required_deposit: number;
+        supplied_deposit: number | bigint;
+        required_deposit: number | bigint;
       };
     }
   | {
       StakeDeregistrationWrongRefund: {
-        supplied_refund: number;
-        required_refund: number;
+        supplied_refund: number | bigint;
+        required_refund: number | bigint;
       };
     }
   | {
       PoolRegistrationWrongDeposit: {
-        supplied_deposit: number;
-        required_deposit: number;
+        supplied_deposit: number | bigint;
+        required_deposit: number | bigint;
       };
     }
   | {
@@ -2775,14 +3001,14 @@ export type Phase1Error =
     }
   | {
       TreasuryValueMismatch: {
-        declared_value: bigint;
-        actual_value: bigint;
+        declared_value: number | bigint;
+        actual_value: number | bigint;
       };
     }
   | {
       RefScriptsSizeTooBig: {
-        actual_size: bigint;
-        max_size: bigint;
+        actual_size: number | bigint;
+        max_size: number | bigint;
       };
     }
   | {
@@ -2846,11 +3072,11 @@ export type Phase1Error =
         /**
          * The supplied deposit amount
          */
-        supplied_deposit: number;
+        supplied_deposit: number | bigint;
         /**
          * The required deposit amount
          */
-        required_deposit: number;
+        required_deposit: number | bigint;
         proposal_index: number;
       };
     }
@@ -2859,7 +3085,7 @@ export type Phase1Error =
         /**
          * List of disallowed voter and action ID pairs
          */
-        disallowed_pairs: [unknown, unknown][];
+        disallowed_pairs: [Voter, GovernanceActionId][];
       };
     }
   | {
@@ -3014,6 +3240,22 @@ export type LocalCredential =
   | {
       scriptHash: number[];
     };
+export type Voter =
+  | {
+      constitutionalCommitteeHotScriptHash: string;
+    }
+  | {
+      constitutionalCommitteeHotKeyHash: string;
+    }
+  | {
+      dRepScriptHash: string;
+    }
+  | {
+      dRepKeyHash: string;
+    }
+  | {
+      stakingPoolKeyHash: string;
+    };
 export type Phase1Warning =
   | (
       | "InputsAreNotSorted"
@@ -3023,8 +3265,8 @@ export type Phase1Warning =
     )
   | {
       FeeIsBiggerThanMinFee: {
-        actual_fee: bigint;
-        min_fee: bigint;
+        actual_fee: number | bigint;
+        min_fee: number | bigint;
         fee_decomposition: FeeDecomposition;
       };
     }
@@ -3084,6 +3326,12 @@ export type Phase1Warning =
         committee_credential: LocalCredential;
         cert_index: number;
       };
+    }
+  | {
+      NativeScriptNotExamined: {
+        script_hash: string;
+        reason: string;
+      };
     };
 /**
  * Phase 1 validation errors
@@ -3099,7 +3347,7 @@ export type Phase2Error =
   | {
       InvalidRedeemerIndex: {
         tag: string;
-        index: bigint;
+        index: number | bigint;
       };
     }
   | {
@@ -3120,22 +3368,47 @@ export type Phase2Error =
   | {
       ResolvedInputNotFound: {
         tx_hash: string;
-        tx_index: bigint;
+        tx_index: number | bigint;
       };
     }
   | "ByronAddressNotAllowed"
   | "InlineDatumNotAllowedForPlutusV1"
   | "ReferenceInputsNotAllowedForPlutusV1"
   | {
+      UnreadableOutput: {
+        output_index: number | bigint;
+        reason: string;
+      };
+    }
+  | {
+      UnreadableTransactionField: {
+        field: string;
+        reason: string;
+      };
+    }
+  | {
+      CertificateNotSupportedInPlutusV1V2: {
+        certificate_index: number | bigint;
+        certificate_type: string;
+        language: string;
+      };
+    }
+  | {
+      FieldNotSupportedInPlutusV1V2: {
+        field: string;
+        language: string;
+      };
+    }
+  | {
       SlotTooFarInThePast: {
-        oldest_allowed: bigint;
+        oldest_allowed: number | bigint;
       };
     }
   | "NoPaymentCredential"
   | {
       ExtraneousRedeemer: {
         tag: string;
-        index: bigint;
+        index: number | bigint;
       };
     }
   | {
@@ -3146,8 +3419,8 @@ export type Phase2Error =
   | {
       RedeemerIndexOutOfBounds: {
         tag: string;
-        index: bigint;
-        max_index?: number | null;
+        index: number | bigint;
+        max_index?: number | bigint | null;
       };
     }
   | {
@@ -3170,12 +3443,19 @@ export type Phase2Error =
         error: string;
       };
     };
-export type Phase2Warning = {
-  BudgetIsBiggerThanExpected: {
-    expected_budget: ExUnits;
-    actual_budget: ExUnits;
-  };
-};
+export type Phase2Warning =
+  | {
+      BudgetIsBiggerThanExpected: {
+        expected_budget: ExUnits;
+        actual_budget: ExUnits;
+      };
+    }
+  | {
+      ScriptContextNotExamined: {
+        input: string;
+        reason: string;
+      };
+    };
 export type RedeemerTag = "Mint" | "Spend" | "Cert" | "Propose" | "Vote" | "Reward";
 
 export interface ValidationResult {
@@ -3199,13 +3479,13 @@ export interface TxInput {
   txHash: string;
 }
 export interface FeeDecomposition {
-  txSizeFee: bigint;
-  referenceScriptsFee: bigint;
-  executionUnitsFee: bigint;
+  txSizeFee: number | bigint;
+  referenceScriptsFee: number | bigint;
+  executionUnitsFee: number | bigint;
 }
 export interface Value {
   assets: MultiAsset;
-  coins: number;
+  coins: number | bigint;
 }
 export interface MultiAsset {
   assets: ValidatorAsset[];
@@ -3217,7 +3497,7 @@ export interface ValidatorAsset {
 }
 export interface GovernanceActionId {
   txHash: number[];
-  index: bigint;
+  index: number;
 }
 /**
  * The invalid governance action
@@ -3231,8 +3511,8 @@ export interface GovernanceActionId {
  * The supplied protocol version
  */
 export interface ProtocolVersion {
-  major: bigint;
-  minor: bigint;
+  major: number | bigint;
+  minor: number | bigint;
 }
 
 /**
@@ -3322,8 +3602,8 @@ export interface ValidationPhase2Error {
   hint?: string | null;
 }
 export interface ExUnits {
-  mem: bigint;
-  steps: bigint;
+  mem: number | bigint;
+  steps: number | bigint;
 }
 export interface ValidationPhase2Warning {
   warning: Phase2Warning;
@@ -3333,7 +3613,7 @@ export interface ValidationPhase2Warning {
 }
 export interface EvalRedeemerResult {
   tag: RedeemerTag;
-  index: bigint;
+  index: number | bigint;
   provided_ex_units: ExUnits;
   calculated_ex_units: ExUnits;
   logs: string[];

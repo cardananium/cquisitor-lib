@@ -5,23 +5,37 @@ import path from 'path';
 import { compile } from 'json-schema-to-typescript';
 
 /**
- * Extract all field paths that should be bigint from a schema based on format
+ * Integer formats whose values may not fit a JS number exactly. The wrappers hand
+ * these back as `number` when the value fits 2^53 and `bigint` above, so the
+ * declared type is `number | bigint`. u32 and narrower stay `number`.
+ */
+const WIDE_INTEGER_FORMATS = new Set(['uint64', 'int64', 'uint128', 'int128']);
+const WIDE_INTEGER_TYPE = 'number | bigint';
+
+function isIntegerSchema(schema) {
+    if (schema.type === 'integer') return true;
+    return Array.isArray(schema.type) && schema.type.includes('integer');
+}
+
+/**
+ * Extract all field paths that should be `number | bigint` from a schema based on
+ * format. Keyed by the definition name that owns the field, so the rewrite can be
+ * scoped to that type's block instead of every same-named field in the file.
  */
 function extractBigIntFields(schema, prefix = '', bigIntFields = new Map(), typeName = '') {
     if (!schema || typeof schema !== 'object') return bigIntFields;
-    
-    // Check if this is a bigint field based on format
-    if (schema.type === 'integer' && (schema.format === 'uint64' || schema.format === 'int64')) {
-        const fieldPath = prefix || typeName;
-        if (!bigIntFields.has(fieldPath)) {
-            bigIntFields.set(fieldPath, []);
+
+    if (isIntegerSchema(schema) && WIDE_INTEGER_FORMATS.has(schema.format)) {
+        if (!bigIntFields.has(typeName)) {
+            bigIntFields.set(typeName, []);
         }
-        bigIntFields.get(fieldPath).push({
+        bigIntFields.get(typeName).push({
             path: prefix,
-            format: schema.format
+            format: schema.format,
+            nullable: Array.isArray(schema.type) && schema.type.includes('null')
         });
     }
-    
+
     // Recursively check properties
     if (schema.properties) {
         Object.entries(schema.properties).forEach(([key, propSchema]) => {
@@ -29,12 +43,19 @@ function extractBigIntFields(schema, prefix = '', bigIntFields = new Map(), type
             extractBigIntFields(propSchema, newPrefix, bigIntFields, typeName);
         });
     }
-    
-    // Check array items
+
+    // Array items (one schema, or a positional list) and tuple prefixes
     if (schema.items) {
-        extractBigIntFields(schema.items, prefix, bigIntFields, typeName);
+        (Array.isArray(schema.items) ? schema.items : [schema.items]).forEach(item =>
+            extractBigIntFields(item, prefix, bigIntFields, typeName));
     }
-    
+    if (Array.isArray(schema.prefixItems)) {
+        schema.prefixItems.forEach(item => extractBigIntFields(item, prefix, bigIntFields, typeName));
+    }
+    if (schema.additionalProperties && typeof schema.additionalProperties === 'object') {
+        extractBigIntFields(schema.additionalProperties, prefix, bigIntFields, typeName);
+    }
+
     // Check oneOf, anyOf, allOf
     ['oneOf', 'anyOf', 'allOf'].forEach(unionKey => {
         if (schema[unionKey] && Array.isArray(schema[unionKey])) {
@@ -43,71 +64,154 @@ function extractBigIntFields(schema, prefix = '', bigIntFields = new Map(), type
             });
         }
     });
-    
+
     // Check definitions/defs
     if (schema.$defs) {
         Object.entries(schema.$defs).forEach(([defName, defSchema]) => {
             extractBigIntFields(defSchema, '', bigIntFields, defName);
         });
     }
-    
+
     if (schema.definitions) {
         Object.entries(schema.definitions).forEach(([defName, defSchema]) => {
             extractBigIntFields(defSchema, '', bigIntFields, defName);
         });
     }
-    
+
     return bigIntFields;
 }
 
 /**
- * Convert number types to bigint based on schema format information
+ * json-schema-to-typescript predates `prefixItems` (JSON Schema 2020-12) and
+ * emits `[unknown, unknown]` for a tuple described that way. Rewrite tuples into
+ * the positional `items` array it understands, so `protocolVersion` comes out as
+ * `[number, number]`. Returns a deep copy; the schema files are not touched.
+ */
+function normalizeTuples(schema) {
+    if (Array.isArray(schema)) return schema.map(normalizeTuples);
+    if (!schema || typeof schema !== 'object') return schema;
+    const out = {};
+    for (const [key, value] of Object.entries(schema)) {
+        out[key] = normalizeTuples(value);
+    }
+    if (Array.isArray(out.prefixItems) && (out.items === undefined || out.items === false)) {
+        out.items = out.prefixItems;
+        if (out.minItems === undefined) out.minItems = out.prefixItems.length;
+        if (out.maxItems === undefined) out.maxItems = out.prefixItems.length;
+        delete out.prefixItems;
+    }
+    return out;
+}
+
+/**
+ * Locate every top-level `export interface Name {...}` / `export type Name = ...;`
+ * declaration of `typeName` in `content` — including the `Name1`, `Name2` copies
+ * json-schema-to-typescript emits when one definition is reached through several
+ * paths (the dedup pass folds them back once their bodies agree), and the repeats
+ * that come from compiling several schemas sharing a definition. Returns
+ * [start, end) pairs in document order.
+ */
+function findTypeBlocks(content, typeName) {
+    const re = new RegExp(`^export (interface|type) ${typeName}\\d*\\b`, 'gm');
+    const blocks = [];
+    let match;
+    while ((match = re.exec(content)) !== null) {
+        blocks.push(blockExtent(content, match));
+    }
+    return blocks;
+}
+
+function blockExtent(content, match) {
+    const start = match.index;
+    let i = start + match[0].length;
+    if (match[1] === 'interface') {
+        // Up to the matching closing brace of the first `{`.
+        let depth = 0;
+        let seenOpen = false;
+        for (; i < content.length; i++) {
+            const ch = content[i];
+            if (ch === '{') { depth++; seenOpen = true; }
+            else if (ch === '}') { depth--; if (seenOpen && depth === 0) { i++; break; } }
+        }
+        return [start, i];
+    }
+    // Type alias: up to the first `;` at bracket depth 0 outside strings.
+    let depth = 0;
+    let inString = false;
+    let stringChar = '';
+    for (; i < content.length; i++) {
+        const ch = content[i];
+        const prev = content[i - 1];
+        if ((ch === '"' || ch === "'") && prev !== '\\') {
+            if (!inString) { inString = true; stringChar = ch; }
+            else if (ch === stringChar) inString = false;
+        }
+        if (inString) continue;
+        if (ch === '{' || ch === '[' || ch === '(' || ch === '<') depth++;
+        else if (ch === '}' || ch === ']' || ch === ')' || ch === '>') depth--;
+        else if (ch === ';' && depth === 0) { i++; break; }
+    }
+    return [start, i];
+}
+
+function widenFieldsIn(text, fieldName) {
+    // fieldName: number;  ->  fieldName: number | bigint;
+    const required = new RegExp(`(\\s+${fieldName}\\s*:\\s*)number(\\s*;)`, 'g');
+    // fieldName?: number | null;  ->  fieldName?: number | bigint | null;
+    const optional = new RegExp(`(\\s+${fieldName}\\??\\s*:\\s*)number(\\s*\\|\\s*null\\s*;)`, 'g');
+    return text
+        .replace(required, `$1${WIDE_INTEGER_TYPE}$2`)
+        .replace(optional, `$1${WIDE_INTEGER_TYPE}$2`);
+}
+
+/**
+ * Widen 64/128-bit integer fields to `number | bigint`, scoped to the type that
+ * declares them. A type whose block cannot be found falls back to a file-wide
+ * rewrite of that field name (with a warning), which is what earlier versions did.
  */
 function convertToBigInt(content, allSchemas) {
-    console.log('🔄 Converting uint64/int64 fields to bigint based on schema format...');
-    
-    // Collect all fields that should be bigint from all schemas
+    console.log('🔄 Widening uint64/int64/int128 fields to number | bigint based on schema format...');
+
     const bigIntFields = new Map();
     Object.entries(allSchemas).forEach(([typeName, schema]) => {
         extractBigIntFields(schema, '', bigIntFields, typeName);
     });
-    
-    console.log(`📋 Found ${bigIntFields.size} types with bigint fields:`, 
+
+    console.log(`📋 Found ${bigIntFields.size} types with wide integer fields:`,
         Array.from(bigIntFields.keys()));
-    
-    // Debug: show what fields were found
+
+    let convertedContent = content;
+    let widened = 0;
+
     bigIntFields.forEach((fields, typeName) => {
-        if (fields.length > 0) {
-            console.log(`  ${typeName}: ${fields.map(f => f.path || 'root').join(', ')}`);
+        const names = [...new Set(fields.map(f => f.path.split('.').pop()).filter(Boolean))];
+        if (names.length === 0) return;
+        const blocks = findTypeBlocks(convertedContent, typeName);
+        if (blocks.length === 0) {
+            console.warn(`  ⚠️  No declaration block for ${typeName}; widening ${names.join(', ')} file-wide`);
+            names.forEach(name => {
+                const before = convertedContent;
+                convertedContent = widenFieldsIn(convertedContent, name);
+                if (convertedContent !== before) widened++;
+            });
+            return;
+        }
+        // Last block first, so earlier offsets stay valid while the text changes.
+        for (const [start, end] of blocks.reverse()) {
+            let blockText = convertedContent.slice(start, end);
+            names.forEach(name => {
+                const before = blockText;
+                blockText = widenFieldsIn(blockText, name);
+                if (blockText !== before) {
+                    widened++;
+                    console.log(`  ✅ ${typeName}.${name}: number | bigint`);
+                }
+            });
+            convertedContent = convertedContent.slice(0, start) + blockText + convertedContent.slice(end);
         }
     });
-    
-    let convertedContent = content;
-    
-    // Convert fields based on their actual schema format
-    bigIntFields.forEach((fields, typeName) => {
-        fields.forEach(fieldInfo => {
-            if (fieldInfo.path) {
-                // Extract just the field name from the path
-                const fieldName = fieldInfo.path.split('.').pop();
-                
-                // Pattern: fieldName: number; (in context of the type)
-                const pattern = new RegExp(`(\\s+${fieldName}\\s*:\\s*)number(\\s*;)`, 'g');
-                const oldContent = convertedContent;
-                convertedContent = convertedContent.replace(pattern, '$1bigint$2');
-                
-                // Pattern: fieldName?: number | null;
-                const optionalPattern = new RegExp(`(\\s+${fieldName}\\?\\s*:\\s*)number(\\s*\\|\\s*null\\s*;)`, 'g');
-                convertedContent = convertedContent.replace(optionalPattern, '$1bigint$2');
-                
-                if (convertedContent !== oldContent) {
-                    console.log(`  ✅ Converted ${fieldName} to bigint`);
-                }
-            }
-        });
-    });
-    
-    console.log('✅ Completed bigint conversion based on schema format');
+
+    console.log(`✅ Widened ${widened} field declarations`);
     return convertedContent;
 }
 
@@ -576,8 +680,9 @@ async function generateTypesBody(allSchemas) {
                 additionalProperties: false
             };
             
-            // Compile the schema to TypeScript
-            const compiledType = await compile(schema, typeName, options);
+            // Compile the schema to TypeScript (tuples rewritten into the positional
+            // `items` form the compiler understands)
+            const compiledType = await compile(normalizeTuples(schema), typeName, options);
             
             // Keep export statements as-is, don't convert to declare
             const exportedType = compiledType
@@ -594,7 +699,7 @@ async function generateTypesBody(allSchemas) {
         }
     }
     
-    // Post-process to convert large integers to bigint
+    // Post-process: 64/128-bit integers are `number | bigint` at runtime
     content = convertToBigInt(content, allSchemas);
     
     // Remove duplicate type definitions and replace references
@@ -662,7 +767,8 @@ async function main() {
 // Generated at: ${new Date().toISOString()}
 //
 // This file contains exported TypeScript types that can be imported in other modules.
-// Large integers (uint64, int64) are represented as bigint for safe handling.
+// 64/128-bit integers (uint64, int64, int128) are typed "number | bigint": the library
+// hands them back as a number when they fit 2^53 and as a bigint above.
 
 `;
         const indexPath = path.join(outputDir, 'index.ts');

@@ -5,6 +5,7 @@ import { MAX_SHARE_PAYLOAD_BYTES, overBudgetMessage } from "../worker/inputBudge
 import { URL_FORMAT_VERSION, CTX_SCHEMA_VERSION } from "./version.js";
 import { fromBase64Url, bytesToText, bytesToHex } from "./base64url.js";
 import { parseShareJson } from "./bigintJson.js";
+import { isCquisitorTarget, normalizeAnnotationList } from "./annotations.js";
 import type {
   TabId,
   ParsedValidatorShare,
@@ -12,6 +13,7 @@ import type {
   ParsedGeneralCborShare,
   ParsedCddlShare,
   ValidatorRichPayloadV1,
+  ParsedShareAnnotations,
 } from "./types.js";
 
 const VALID_TABS: readonly TabId[] = [
@@ -111,8 +113,17 @@ function getRichVersionState(params: URLSearchParams):
   return { kind: "current", encoding, data };
 }
 
+/** Annotations of a rich payload's `rest`; unknown kinds and malformed entries are dropped. */
+function readAnnotations(out: ParsedShareAnnotations, rest: unknown): void {
+  if (typeof rest !== "object" || rest === null) return;
+  const { ann, ann_focus } = rest as { ann?: unknown; ann_focus?: unknown };
+  const { annotations, annotationFocus } = normalizeAnnotationList(ann, ann_focus, isCquisitorTarget);
+  out.annotations = annotations;
+  out.annotationFocus = annotationFocus;
+}
+
 export async function parseValidatorShare(params: URLSearchParams): Promise<ParsedValidatorShare> {
-  const out: ParsedValidatorShare = {};
+  const out: ParsedValidatorShare = { annotations: [], annotationFocus: 0 };
   const rawCbor = params.get("cbor");
   const rawNet = parseNet(params.get("net"));
   if (rawCbor) out.cbor = rawCbor;
@@ -128,6 +139,7 @@ export async function parseValidatorShare(params: URLSearchParams): Promise<Pars
   try {
     const payload = await decodeRichPayload(vState.encoding, vState.data);
     const rest = payload.rest as Partial<ValidatorRichPayloadV1>;
+    readAnnotations(out, payload.rest);
     if (!out.cbor && payload.cbor) out.cbor = payload.cbor;
     if (!out.net && rest.net && VALID_NETS.includes(rest.net)) {
       out.net = rest.net;
@@ -150,7 +162,7 @@ export async function parseValidatorShare(params: URLSearchParams): Promise<Pars
 export async function parseCardanoCborShare(
   params: URLSearchParams
 ): Promise<ParsedCardanoCborShare> {
-  const out: ParsedCardanoCborShare = {};
+  const out: ParsedCardanoCborShare = { annotations: [], annotationFocus: 0 };
   const rawCbor = params.get("cbor");
   if (rawCbor) out.cbor = rawCbor;
   const net = parseNet(params.get("net"));
@@ -177,6 +189,7 @@ export async function parseCardanoCborShare(
       psv: number;
       pds: PlutusDataSchema;
     }>;
+    readAnnotations(out, payload.rest);
     if (!out.cbor && payload.cbor) out.cbor = payload.cbor;
     if (!out.net && rest.net && VALID_NETS.includes(rest.net)) out.net = rest.net;
     if (!out.type && typeof rest.type === "string") out.type = rest.type;
@@ -197,7 +210,7 @@ export async function parseCardanoCborShare(
 
 /** Parse a CDDL share. `preset` is the era id; this module does not resolve it to schema text. */
 export async function parseCddlShare(params: URLSearchParams): Promise<ParsedCddlShare> {
-  const out: ParsedCddlShare = {};
+  const out: ParsedCddlShare = { annotations: [], annotationFocus: 0 };
   const rawCddl = params.get("cddl");
   if (rawCddl) out.cddl = rawCddl;
   const rawPreset = params.get("preset");
@@ -217,6 +230,7 @@ export async function parseCddlShare(params: URLSearchParams): Promise<ParsedCdd
   try {
     const payload = await decodeRichPayload(vState.encoding, vState.data);
     const rest = payload.rest as Partial<{ cddl: string; rule: string; preset: string }>;
+    readAnnotations(out, payload.rest);
     if (!out.cbor && payload.cbor) out.cbor = payload.cbor;
     if (!out.cddl && typeof rest.cddl === "string") out.cddl = rest.cddl;
     if (!out.preset && typeof rest.preset === "string") out.preset = rest.preset;
@@ -230,7 +244,7 @@ export async function parseCddlShare(params: URLSearchParams): Promise<ParsedCdd
 export async function parseGeneralCborShare(
   params: URLSearchParams
 ): Promise<ParsedGeneralCborShare> {
-  const out: ParsedGeneralCborShare = {};
+  const out: ParsedGeneralCborShare = { annotations: [], annotationFocus: 0 };
   const rawCbor = params.get("cbor");
   if (rawCbor) out.cbor = rawCbor;
 
@@ -244,6 +258,7 @@ export async function parseGeneralCborShare(
   try {
     const payload = await decodeRichPayload(vState.encoding, vState.data);
     if (!out.cbor && payload.cbor) out.cbor = payload.cbor;
+    readAnnotations(out, payload.rest);
   } catch (e) {
     out.parseError = e instanceof Error ? e.message : "Failed to parse rich payload";
   }

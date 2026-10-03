@@ -1,14 +1,16 @@
 import type { PlutusDataSchema } from "@cardananium/cquisitor-lib/wasm";
-import { getCompressor } from "../configure.js";
+import { getCompressor, isCompressorConfigured } from "../configure.js";
 import { URL_FORMAT_VERSION, CTX_SCHEMA_VERSION } from "./version.js";
 import { toBase64Url, textToBytes, hexToBytes } from "./base64url.js";
 import { stringifyShareJson } from "./bigintJson.js";
+import { annotationPayload, isCquisitorTarget } from "./annotations.js";
 import type {
   ShareLinkMode,
   ValidatorShareInput,
   CardanoCborShareInput,
   GeneralCborShareInput,
   CddlShareInput,
+  ShareAnnotationsInput,
 } from "./types.js";
 
 /**
@@ -52,6 +54,34 @@ async function encodeRichData(
   return toBase64Url(compressed);
 }
 
+function annotationFields(input: ShareAnnotationsInput) {
+  return annotationPayload(input.annotations, input.annotationFocus, isCquisitorTarget);
+}
+
+/**
+ * The rich encoding for `mode`, or null for a minimal link. Annotations need the rich
+ * payload, so with annotations a minimal request is upgraded: `b` when a compressor is
+ * configured, `j` otherwise.
+ */
+function richEncoding(mode: ShareLinkMode, hasAnnotations: boolean): "j" | "b" | null {
+  if (mode.kind === "compressed") return "b";
+  if (mode.kind === "readable") return "j";
+  if (!hasAnnotations) return null;
+  return isCompressorConfigured() ? "b" : "j";
+}
+
+async function pushRichParams(
+  parts: string[],
+  cborHex: string,
+  rest: unknown,
+  encoding: "j" | "b"
+): Promise<void> {
+  const data = await encodeRichData(cborHex, rest, encoding);
+  parts.push(`v=${URL_FORMAT_VERSION}`);
+  parts.push(`e=${encoding}`);
+  parts.push(`d=${data}`);
+}
+
 function pdsShort(pds: PlutusDataSchema | null | undefined): string | undefined {
   if (pds === "BasicConversions") return "b";
   if (pds === "DetailedSchema") return "d";
@@ -63,6 +93,11 @@ function buildUrl(opts: BuildLinkOpts, tab: string, params: string[]): string {
   return `${opts.origin}${opts.basePath}/#${tab}${query}`;
 }
 
+/**
+ * Encode transaction validator state. The link is rich when the validation context is
+ * included (`includeCtx`, a context present, mode not minimal) or annotations are
+ * present; otherwise it is minimal. The context travels only in the first case.
+ */
 export async function encodeValidatorLink(
   opts: BuildLinkOpts,
   input: ValidatorShareInput,
@@ -70,22 +105,20 @@ export async function encodeValidatorLink(
   includeCtx: boolean
 ): Promise<string> {
   const parts: string[] = [];
-  const hasCtx = includeCtx && !!input.ctx;
-  const effectiveMode: ShareLinkMode =
-    hasCtx && mode.kind !== "minimal" ? mode : { kind: "minimal" };
+  const hasCtx = includeCtx && !!input.ctx && mode.kind !== "minimal";
+  const ann = annotationFields(input);
+  const hasAnnotations = ann.ann !== undefined;
+  const encoding = hasCtx || hasAnnotations ? richEncoding(mode, hasAnnotations) : null;
 
-  if (effectiveMode.kind !== "minimal") {
+  if (encoding) {
     const rest = {
       ctx_v: CTX_SCHEMA_VERSION,
       net: input.net,
-      capturedAt: input.capturedAt,
-      ctx: input.ctx,
+      capturedAt: hasCtx ? input.capturedAt : undefined,
+      ctx: hasCtx ? input.ctx : undefined,
+      ...ann,
     };
-    const encoding: "j" | "b" = effectiveMode.kind === "compressed" ? "b" : "j";
-    const data = await encodeRichData(input.cbor, rest, encoding);
-    parts.push(`v=${URL_FORMAT_VERSION}`);
-    parts.push(`e=${encoding}`);
-    parts.push(`d=${data}`);
+    await pushRichParams(parts, input.cbor, rest, encoding);
   }
   appendParam(parts, "cbor", input.cbor);
   appendParam(parts, "net", input.net);
@@ -99,19 +132,18 @@ export async function encodeCardanoCborLink(
   mode: ShareLinkMode
 ): Promise<string> {
   const parts: string[] = [];
+  const ann = annotationFields(input);
+  const encoding = richEncoding(mode, ann.ann !== undefined);
 
-  if (mode.kind !== "minimal") {
+  if (encoding) {
     const rest = {
       net: input.net,
       type: input.type ?? undefined,
       psv: input.psv ?? undefined,
       pds: input.pds ?? undefined,
+      ...ann,
     };
-    const encoding: "j" | "b" = mode.kind === "compressed" ? "b" : "j";
-    const data = await encodeRichData(input.cbor, rest, encoding);
-    parts.push(`v=${URL_FORMAT_VERSION}`);
-    parts.push(`e=${encoding}`);
-    parts.push(`d=${data}`);
+    await pushRichParams(parts, input.cbor, rest, encoding);
   } else {
     appendParam(parts, "cbor", input.cbor);
     appendParam(parts, "net", input.net);
@@ -129,13 +161,11 @@ export async function encodeGeneralCborLink(
   mode: ShareLinkMode
 ): Promise<string> {
   const parts: string[] = [];
+  const ann = annotationFields(input);
+  const encoding = richEncoding(mode, ann.ann !== undefined);
 
-  if (mode.kind !== "minimal") {
-    const encoding: "j" | "b" = mode.kind === "compressed" ? "b" : "j";
-    const data = await encodeRichData(input.cbor, {}, encoding);
-    parts.push(`v=${URL_FORMAT_VERSION}`);
-    parts.push(`e=${encoding}`);
-    parts.push(`d=${data}`);
+  if (encoding) {
+    await pushRichParams(parts, input.cbor, { ...ann }, encoding);
   } else {
     appendParam(parts, "cbor", input.cbor);
   }
@@ -143,7 +173,10 @@ export async function encodeGeneralCborLink(
   return buildUrl(opts, "general-cbor", parts);
 }
 
-/** Encode CDDL validator state. Compressed is the practical mode; minimal still works for a preset name. */
+/**
+ * Encode CDDL validator state. Compressed is the practical mode; minimal still works for a
+ * preset name (and is upgraded to a rich link when annotations are present).
+ */
 export async function encodeCddlLink(
   opts: BuildLinkOpts,
   input: CddlShareInput,
@@ -151,8 +184,10 @@ export async function encodeCddlLink(
 ): Promise<string> {
   const parts: string[] = [];
   const preset = input.preset || undefined;
+  const ann = annotationFields(input);
+  const encoding = richEncoding(mode, ann.ann !== undefined);
 
-  if (mode.kind === "minimal") {
+  if (!encoding) {
     // Minimal: preset id, or the full schema text if there is no preset.
     if (preset) appendParam(parts, "preset", preset);
     else appendParam(parts, "cddl", input.cddl);
@@ -163,12 +198,9 @@ export async function encodeCddlLink(
       preset,
       cddl: preset ? undefined : input.cddl || undefined,
       rule: input.rule || undefined,
+      ...ann,
     };
-    const encoding: "j" | "b" = mode.kind === "compressed" ? "b" : "j";
-    const data = await encodeRichData(input.cbor, rest, encoding);
-    parts.push(`v=${URL_FORMAT_VERSION}`);
-    parts.push(`e=${encoding}`);
-    parts.push(`d=${data}`);
+    await pushRichParams(parts, input.cbor, rest, encoding);
   }
 
   return buildUrl(opts, "cddl-validator", parts);

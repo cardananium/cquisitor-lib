@@ -23,7 +23,8 @@ import {
   parseValidatorShare,
 } from "./parser.js";
 import { CTX_SCHEMA_VERSION, URL_FORMAT_VERSION } from "./version.js";
-import { hexToBytes, textToBytes, toBase64Url } from "./base64url.js";
+import { bytesToText, fromBase64Url, hexToBytes, textToBytes, toBase64Url } from "./base64url.js";
+import { MAX_ANNOTATIONS, type Annotation, type CquisitorTarget } from "./annotations.js";
 
 const OPTS: BuildLinkOpts = { origin: "https://example.test", basePath: "/cquisitor" };
 
@@ -35,6 +36,9 @@ const BIG_CDDL: string = Array.from({ length: 700 }, (_, i) =>
 beforeAll(() => {
   configure({ compressor: nodeBrotliCompressor });
 });
+
+/** What every parser returns for a link without annotations. */
+const NO_ANNOTATIONS = { annotations: [], annotationFocus: 0 };
 
 const SAMPLE_CBOR = "a3646e616d6565416c69636563616765181e686e69636b6e616d6563416c69";
 const SAMPLE_CDDL = `; CDDL schema — edit me.
@@ -117,7 +121,7 @@ describe("compressor injection", () => {
       ).rejects.toThrow(/configure\(/);
       // Uncompressed and minimal links need no compressor at all.
       const url = await encodeGeneralCborLink(OPTS, { cbor: SAMPLE_CBOR }, { kind: "readable" });
-      expect(await parseGeneralCborShare(paramsOf(url))).toEqual({ cbor: SAMPLE_CBOR });
+      expect(await parseGeneralCborShare(paramsOf(url))).toEqual({ ...NO_ANNOTATIONS, cbor: SAMPLE_CBOR });
     } finally {
       configure({ compressor: nodeBrotliCompressor });
     }
@@ -153,14 +157,14 @@ describe("encodeCddlLink / parseCddlShare", () => {
     expect(url).not.toContain("nickname");
 
     const parsed = await parseCddlShare(params);
-    expect(parsed).toEqual({ cddl: SAMPLE_CDDL, cbor: SAMPLE_CBOR, rule: "Person" });
+    expect(parsed).toEqual({ ...NO_ANNOTATIONS, cddl: SAMPLE_CDDL, cbor: SAMPLE_CBOR, rule: "Person" });
   });
 
   test("uncompressed round trip", async () => {
     const url = await encodeCddlLink(OPTS, input, { kind: "readable" });
     expect(paramsOf(url).get("e")).toBe("j");
     const parsed = await parseCddlShare(paramsOf(url));
-    expect(parsed).toEqual({ cddl: SAMPLE_CDDL, cbor: SAMPLE_CBOR, rule: "Person" });
+    expect(parsed).toEqual({ ...NO_ANNOTATIONS, cddl: SAMPLE_CDDL, cbor: SAMPLE_CBOR, rule: "Person" });
   });
 
   test("minimal round trip uses plain params only", async () => {
@@ -173,7 +177,7 @@ describe("encodeCddlLink / parseCddlShare", () => {
     expect(params.get("cbor")).toBe(SAMPLE_CBOR);
 
     const parsed = await parseCddlShare(params);
-    expect(parsed).toEqual({ cddl: SAMPLE_CDDL, cbor: SAMPLE_CBOR, rule: "Person" });
+    expect(parsed).toEqual({ ...NO_ANNOTATIONS, cddl: SAMPLE_CDDL, cbor: SAMPLE_CBOR, rule: "Person" });
   });
 
   test("an empty schema and empty CBOR survive as empty", async () => {
@@ -214,6 +218,7 @@ describe("encodeCddlLink / parseCddlShare", () => {
     expect(params.get("preset")).toBe("conway");
     expect(params.get("cddl")).toBeNull();
     expect(await parseCddlShare(params)).toEqual({
+      ...NO_ANNOTATIONS,
       preset: "conway",
       rule: "transaction",
       cbor: SAMPLE_CBOR,
@@ -371,7 +376,7 @@ describe("validator share context", () => {
     expect(params.get("cbor")).toBe(SAMPLE_CBOR);
 
     const parsed = await parseValidatorShare(params);
-    expect(parsed).toEqual({ cbor: SAMPLE_CBOR, net: "mainnet" });
+    expect(parsed).toEqual({ ...NO_ANNOTATIONS, cbor: SAMPLE_CBOR, net: "mainnet" });
   });
 
   test("declining to include the context downgrades the link", async () => {
@@ -405,6 +410,7 @@ describe("cardano-cbor and general-cbor round trips", () => {
     );
     expect(tabOf(url)).toBe("cardano-cbor");
     expect(await parseCardanoCborShare(paramsOf(url))).toEqual({
+      ...NO_ANNOTATIONS,
       cbor: SAMPLE_CBOR,
       net: "preview",
       type: "Transaction",
@@ -437,6 +443,248 @@ describe("cardano-cbor and general-cbor round trips", () => {
     const url = await encodeGeneralCborLink(OPTS, { cbor: SAMPLE_CBOR }, { kind: "compressed" });
     expect(tabOf(url)).toBe("general-cbor");
     expect(paramsOf(url).get("e")).toBe("b");
-    expect(await parseGeneralCborShare(paramsOf(url))).toEqual({ cbor: SAMPLE_CBOR });
+    expect(await parseGeneralCborShare(paramsOf(url))).toEqual({ ...NO_ANNOTATIONS, cbor: SAMPLE_CBOR });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Annotations
+// ---------------------------------------------------------------------------
+
+const ANN: Annotation<CquisitorTarget>[] = [
+  { target: { kind: "tx_path", path: "transaction.body.fee" }, label: "Fee", hint: "Too small", severity: "error" },
+  { target: { kind: "diagnostic", name: "FeeTooSmall", occurrence: 0 } },
+  { target: { kind: "redeemer", tag: "Spend", index: 0 }, severity: "warning" },
+  { target: { kind: "cbor_span", offset: 2, length: 4 } },
+  { target: { kind: "cbor_path", path: "$.name" }, hint: "line one\nline two" },
+  { target: { kind: "cddl_range", start: 0, end: 6 } },
+  { target: { kind: "cddl_rule", name: "Person" }, severity: "info" },
+];
+
+/** The JSON rest of an uncompressed (`e=j`) link. */
+function readableRest(url: string): Record<string, unknown> {
+  const container = fromBase64Url(paramsOf(url).get("d")!);
+  const cborLen = new DataView(container.buffer, container.byteOffset).getUint32(0, false);
+  return JSON.parse(bytesToText(container.subarray(4 + cborLen)));
+}
+
+/** A parse result without its annotation fields: what a parser that predates them returns. */
+function withoutAnnotations<T extends { annotations: unknown; annotationFocus: unknown }>(parsed: T) {
+  const { annotations: _a, annotationFocus: _f, ...rest } = parsed;
+  return rest;
+}
+
+type Encoder = (mode: ShareLinkModeKind, ann?: Annotation<CquisitorTarget>[], focus?: number) => Promise<string>;
+type ShareLinkModeKind = "minimal" | "readable" | "compressed";
+type Parser = (params: URLSearchParams) => Promise<{ annotations: Annotation<CquisitorTarget>[]; annotationFocus: number }>;
+
+const ctx = { utxos: [], protocolParams: null } as unknown as FetchedValidationData;
+
+const TABS: { name: string; encode: Encoder; parse: Parser }[] = [
+  {
+    name: "transaction-validator",
+    encode: (kind, annotations, annotationFocus) =>
+      encodeValidatorLink(
+        OPTS,
+        { cbor: SAMPLE_CBOR, net: "preprod" as NetworkType, annotations, annotationFocus },
+        { kind },
+        true,
+      ),
+    parse: parseValidatorShare,
+  },
+  {
+    name: "cardano-cbor",
+    encode: (kind, annotations, annotationFocus) =>
+      encodeCardanoCborLink(
+        OPTS,
+        { cbor: SAMPLE_CBOR, net: "preview" as NetworkType, type: "Transaction", psv: 2, pds: "BasicConversions", annotations, annotationFocus },
+        { kind },
+      ),
+    parse: parseCardanoCborShare,
+  },
+  {
+    name: "general-cbor",
+    encode: (kind, annotations, annotationFocus) =>
+      encodeGeneralCborLink(OPTS, { cbor: SAMPLE_CBOR, annotations, annotationFocus }, { kind }),
+    parse: parseGeneralCborShare,
+  },
+  {
+    name: "cddl-validator",
+    encode: (kind, annotations, annotationFocus) =>
+      encodeCddlLink(OPTS, { cddl: SAMPLE_CDDL, cbor: SAMPLE_CBOR, rule: "Person", annotations, annotationFocus }, { kind }),
+    parse: parseCddlShare,
+  },
+];
+
+for (const tab of TABS) {
+  describe(`${tab.name} annotations`, () => {
+    for (const kind of ["readable", "compressed"] as const) {
+      test(`${kind} round trip`, async () => {
+        const url = await tab.encode(kind, ANN, 3);
+        expect(paramsOf(url).get("e")).toBe(kind === "compressed" ? "b" : "j");
+        const parsed = await tab.parse(paramsOf(url));
+        expect(parsed.annotations).toEqual(ANN);
+        expect(parsed.annotationFocus).toBe(3);
+        expect(parsed).not.toHaveProperty("parseError");
+      });
+    }
+
+    test("readable links write ann / ann_focus into the JSON rest", async () => {
+      const rest = readableRest(await tab.encode("readable", ANN, 2));
+      expect(rest.ann).toEqual(ANN);
+      expect(rest.ann_focus).toBe(2);
+      const noFocus = readableRest(await tab.encode("readable", ANN));
+      expect(noFocus.ann).toEqual(ANN);
+      expect("ann_focus" in noFocus).toBe(false);
+    });
+
+    test("a minimal request with annotations becomes compressed when a compressor is configured", async () => {
+      const url = await tab.encode("minimal", ANN);
+      const params = paramsOf(url);
+      expect(params.get("v")).toBe(String(URL_FORMAT_VERSION));
+      expect(params.get("e")).toBe("b");
+      expect((await tab.parse(params)).annotations).toEqual(ANN);
+    });
+
+    test("a minimal request with annotations becomes readable without a compressor", async () => {
+      resetConfig();
+      try {
+        const url = await tab.encode("minimal", ANN, 1);
+        expect(paramsOf(url).get("e")).toBe("j");
+        const parsed = await tab.parse(paramsOf(url));
+        expect(parsed.annotations).toEqual(ANN);
+        expect(parsed.annotationFocus).toBe(1);
+      } finally {
+        configure({ compressor: nodeBrotliCompressor });
+      }
+    });
+
+    test("annotations that are all invalid leave a minimal link minimal", async () => {
+      const junk = [{ target: { kind: "nope" } }] as unknown as Annotation<CquisitorTarget>[];
+      const url = await tab.encode("minimal", junk);
+      expect(paramsOf(url).get("d")).toBeNull();
+      expect(await tab.parse(paramsOf(url))).toMatchObject(NO_ANNOTATIONS);
+    });
+
+    test("invalid entries are dropped before encoding, focus follows its entry", async () => {
+      const mixed = [
+        ANN[0],
+        { target: { kind: "nope" } },
+        ANN[1],
+      ] as unknown as Annotation<CquisitorTarget>[];
+      const parsed = await tab.parse(paramsOf(await tab.encode("readable", mixed, 2)));
+      expect(parsed.annotations).toEqual([ANN[0], ANN[1]]);
+      expect(parsed.annotationFocus).toBe(1);
+    });
+
+    test("annotations do not change the other parsed fields", async () => {
+      for (const kind of ["readable", "compressed"] as const) {
+        const plain = await tab.parse(paramsOf(await tab.encode(kind)));
+        const annotated = await tab.parse(paramsOf(await tab.encode(kind, ANN, 1)));
+        expect(withoutAnnotations(annotated)).toEqual(withoutAnnotations(plain));
+      }
+    });
+  });
+}
+
+describe("annotations read from hand-made payloads", () => {
+  test("unknown kinds and malformed entries are skipped, the link still opens", async () => {
+    const container = packContainer(SAMPLE_CBOR, {
+      rule: "Person",
+      ann: [
+        { target: { kind: "from_the_future", x: 1 }, label: "later" },
+        "garbage",
+        { target: { kind: "cddl_rule", name: "Person" }, label: "Person" },
+        { target: { kind: "cbor_span", offset: "0", length: 1 } },
+      ],
+      ann_focus: 2,
+    });
+    const parsed = await parseCddlShare(richParams(container));
+    expect(parsed.parseError).toBeUndefined();
+    expect(parsed.rule).toBe("Person");
+    expect(parsed.cbor).toBe(SAMPLE_CBOR);
+    expect(parsed.annotations).toEqual([{ target: { kind: "cddl_rule", name: "Person" }, label: "Person" }]);
+    expect(parsed.annotationFocus).toBe(0);
+  });
+
+  test("a non-array ann is ignored", async () => {
+    const parsed = await parseGeneralCborShare(richParams(packContainer(SAMPLE_CBOR, { ann: { kind: "tx_path" } })));
+    expect(parsed).toEqual({ ...NO_ANNOTATIONS, cbor: SAMPLE_CBOR });
+  });
+
+  test("focus past the end clamps to the last annotation", async () => {
+    const container = packContainer(SAMPLE_CBOR, {
+      ann: [{ target: { kind: "cbor_path", path: "$" } }, { target: { kind: "cbor_path", path: "$[0]" } }],
+      ann_focus: 40,
+    });
+    expect((await parseGeneralCborShare(richParams(container))).annotationFocus).toBe(1);
+  });
+
+  test("at most MAX_ANNOTATIONS are read", async () => {
+    const ann = Array.from({ length: MAX_ANNOTATIONS + 5 }, (_, i) => ({
+      target: { kind: "cbor_span", offset: i, length: 1 },
+    }));
+    const url = await encodeGeneralCborLink(
+      OPTS,
+      { cbor: SAMPLE_CBOR, annotations: ann as Annotation<CquisitorTarget>[] },
+      { kind: "compressed" },
+    );
+    expect((await parseGeneralCborShare(paramsOf(url))).annotations.length).toBe(MAX_ANNOTATIONS);
+  });
+
+  test("a future format version yields no annotations", async () => {
+    const container = packContainer(SAMPLE_CBOR, { ann: [{ target: { kind: "cddl_rule", name: "a" } }] });
+    const parsed = await parseCddlShare(richParams(container, URL_FORMAT_VERSION + 1));
+    expect(parsed.futureVersion).toBe(true);
+    expect(parsed.annotations).toEqual([]);
+  });
+});
+
+describe("validator links with annotations", () => {
+  test("annotations alone make the link rich; the context travels only with includeCtx", async () => {
+    const withCtx = { cbor: SAMPLE_CBOR, net: "mainnet" as NetworkType, ctx, capturedAt: 1700000000, annotations: ANN };
+    const excluded = await encodeValidatorLink(OPTS, withCtx, { kind: "readable" }, false);
+    const rest = readableRest(excluded);
+    expect(rest.ctx).toBeUndefined();
+    expect(rest.capturedAt).toBeUndefined();
+    expect(rest.ann).toEqual(ANN);
+    const parsedExcluded = await parseValidatorShare(paramsOf(excluded));
+    expect(parsedExcluded.ctx).toBeUndefined();
+    expect(parsedExcluded.annotations).toEqual(ANN);
+
+    const included = await parseValidatorShare(
+      paramsOf(await encodeValidatorLink(OPTS, withCtx, { kind: "compressed" }, true)),
+    );
+    expect(included.ctx).toEqual(ctx);
+    expect(included.capturedAt).toBe(1700000000);
+    expect(included.annotations).toEqual(ANN);
+  });
+
+  test("a minimal request keeps the context out even with includeCtx", async () => {
+    const url = await encodeValidatorLink(
+      OPTS,
+      { cbor: SAMPLE_CBOR, net: "mainnet" as NetworkType, ctx, annotations: ANN },
+      { kind: "minimal" },
+      true,
+    );
+    const params = paramsOf(url);
+    expect(params.get("e")).toBe("b");
+    expect(params.get("cbor")).toBe(SAMPLE_CBOR);
+    const parsed = await parseValidatorShare(params);
+    expect(parsed.ctx).toBeUndefined();
+    expect(parsed.annotations).toEqual(ANN);
+  });
+
+  test("the plain cbor / net params stay next to the payload", async () => {
+    const url = await encodeValidatorLink(
+      OPTS,
+      { cbor: SAMPLE_CBOR, net: "preview" as NetworkType, annotations: ANN },
+      { kind: "readable" },
+      false,
+    );
+    const params = paramsOf(url);
+    expect(params.get("cbor")).toBe(SAMPLE_CBOR);
+    expect(params.get("net")).toBe("preview");
+    expect(readableRest(url).ctx_v).toBe(CTX_SCHEMA_VERSION);
   });
 });

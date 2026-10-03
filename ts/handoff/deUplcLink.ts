@@ -8,6 +8,8 @@
 //
 // de-uplc-web accepts a URL deep-link in "parts" mode (script + v + context + redeemer/datum) and a
 // compressed form `#d=<base64url(gzip(json))>` for large scripts. See de-uplc-web/apps/web/src/url-launch.ts.
+// UI annotations (`ann`, `ann_focus`) and decompiler `options` exist only in the `#d=` form, so
+// the URL builders switch to it whenever any are present.
 //
 // Apply-order rule (de-uplc applies datum -> redeemer -> context, only what's present):
 //   V3 (any purpose): context ONLY — the V3 ScriptContext embeds the redeemer and the (optional) datum.
@@ -17,6 +19,13 @@
 import type { EvalRedeemerResult } from "@cardananium/cquisitor-lib/wasm";
 import type { Redeemer } from "../types/transaction.js";
 import { toBase64Url } from "../share/base64url.js";
+import {
+  annotationPayload,
+  isDeUplcTarget,
+  normalizeAnnotationList,
+  type Annotation,
+  type DeUplcTarget,
+} from "../share/annotations.js";
 
 /** Deployed de-uplc-web origin (GitHub Pages, project subpath). */
 export const DEFAULT_DE_UPLC_BASE_URL = "https://cardananium.github.io/de-uplc-web";
@@ -48,6 +57,10 @@ export interface DeUplcFields {
   exUnits?: [number, number];
   /** Redeemer purpose + index, e.g. "Spending #0". Overrides the inferred kind. */
   purpose?: string;
+  /** Debugger annotations; written as `ann` in the `#d=` payload (invalid entries dropped). */
+  annotations?: Annotation<DeUplcTarget>[];
+  /** Index of the annotation to focus first; written as `ann_focus` when not 0. */
+  annotationFocus?: number;
 }
 
 export type DeUplcLink =
@@ -131,17 +144,29 @@ async function gzipToBase64Url(text: string): Promise<string> {
   return toBase64Url(buf);
 }
 
-/** Compressed hash URL: BASE/#d=<base64url(gzip(json fields))>. de-uplc-web decodes it natively. */
+function deUplcAnnotationFields(fields: { annotations?: Annotation<DeUplcTarget>[]; annotationFocus?: number }) {
+  return annotationPayload(fields.annotations, fields.annotationFocus, isDeUplcTarget);
+}
+
+/**
+ * Compressed hash URL: BASE/#d=<base64url(gzip(json fields))>. de-uplc-web decodes it natively.
+ * The JSON holds the launch fields, plus `ann` / `ann_focus` for annotations.
+ */
 export async function fieldsToCompressedUrl(
   fields: DeUplcFields,
   base = DE_UPLC_BASE_URL,
 ): Promise<string> {
-  const d = await gzipToBase64Url(JSON.stringify(fields));
+  const { annotations: _annotations, annotationFocus: _annotationFocus, ...launch } = fields;
+  const d = await gzipToBase64Url(JSON.stringify({ ...launch, ...deUplcAnnotationFields(fields) }));
   return `${base}/#d=${d}`;
 }
 
-/** Plain URL if it's comfortably small, otherwise the compressed form (handles large validators). */
+/**
+ * Plain URL if it's comfortably small, otherwise the compressed form (handles large validators).
+ * Always the compressed form when there are annotations: a plain URL cannot carry them.
+ */
 export async function fieldsToUrl(fields: DeUplcFields, base = DE_UPLC_BASE_URL): Promise<string> {
+  if (deUplcAnnotationFields(fields).ann) return fieldsToCompressedUrl(fields, base);
   const plain = fieldsToPlainUrl(fields, base);
   if (plain.length <= 6000) return plain;
   return fieldsToCompressedUrl(fields, base);
@@ -159,6 +184,15 @@ export interface DecompileFields {
   script: string;
   v?: "v1" | "v2" | "v3";
   purpose?: DecompilePurpose;
+  /**
+   * Decompiler options object the pseudocode lines of `annotations` refer to; the
+   * decompiler's default preset when absent. Passed through as is.
+   */
+  options?: Record<string, unknown>;
+  /** Decompiler annotations; written as `ann` in the `#d=` payload (invalid entries dropped). */
+  annotations?: Annotation<DeUplcTarget>[];
+  /** Index of the annotation to focus first; written as `ann_focus` when not 0. */
+  annotationFocus?: number;
 }
 
 const DECOMPILE_PURPOSE_FROM_TAG: Record<string, DecompilePurpose> = {
@@ -245,26 +279,70 @@ export function fieldsToDecompilePlainUrl(fields: DecompileFields, base = DE_UPL
   return `${base}/#${p.toString()}`;
 }
 
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/** Options worth sending: a non-empty object. */
+function decompileOptions(fields: DecompileFields): Record<string, unknown> | undefined {
+  return isPlainObject(fields.options) && Object.keys(fields.options).length > 0 ? fields.options : undefined;
+}
+
+/** `#d=` payload: `view: "decompiler"`, the launch fields, `options`, `ann` / `ann_focus`. */
 export async function fieldsToDecompileCompressedUrl(
   fields: DecompileFields,
   base = DE_UPLC_BASE_URL,
 ): Promise<string> {
-  const payload: { view: "decompiler"; script: string; v?: DecompileFields["v"]; purpose?: DecompilePurpose } = {
+  const payload: {
+    view: "decompiler";
+    script: string;
+    v?: DecompileFields["v"];
+    purpose?: DecompilePurpose;
+    options?: Record<string, unknown>;
+    ann?: Annotation<DeUplcTarget>[];
+    ann_focus?: number;
+  } = {
     view: "decompiler",
     script: fields.script,
   };
   if (fields.v) payload.v = fields.v;
   if (fields.purpose) payload.purpose = fields.purpose;
+  const options = decompileOptions(fields);
+  if (options) payload.options = options;
+  Object.assign(payload, deUplcAnnotationFields(fields));
   const d = await gzipToBase64Url(JSON.stringify(payload));
   return `${base}/#d=${d}`;
 }
 
+/** Plain `#decompile=` for small scripts; the `#d=` form for large ones, options or annotations. */
 export async function fieldsToDecompileUrl(
   fields: DecompileFields,
   base = DE_UPLC_BASE_URL,
 ): Promise<string> {
-  if (fields.script.length <= DECOMPILE_HEX_PLAIN_MAX) return fieldsToDecompilePlainUrl(fields, base);
+  const needsPayload = decompileOptions(fields) !== undefined || deUplcAnnotationFields(fields).ann !== undefined;
+  if (!needsPayload && fields.script.length <= DECOMPILE_HEX_PLAIN_MAX) {
+    return fieldsToDecompilePlainUrl(fields, base);
+  }
   return fieldsToDecompileCompressedUrl(fields, base);
+}
+
+export interface DeUplcPayloadAnnotations {
+  annotations: Annotation<DeUplcTarget>[];
+  /** Index into `annotations`, clamped to the list; 0 when absent or empty. */
+  annotationFocus: number;
+  /** The decompiler options object, when the payload has one. */
+  options?: Record<string, unknown>;
+}
+
+/**
+ * Read `ann`, `ann_focus` and `options` from a decoded `#d=` JSON payload. Unknown target
+ * kinds and malformed entries are dropped; a non-object `options` is ignored.
+ */
+export function readDeUplcAnnotations(json: unknown): DeUplcPayloadAnnotations {
+  if (!isPlainObject(json)) return { annotations: [], annotationFocus: 0 };
+  const out: DeUplcPayloadAnnotations = normalizeAnnotationList(json.ann, json.ann_focus, isDeUplcTarget);
+  if (isPlainObject(json.options)) out.options = json.options;
+  return out;
 }
 
 // ── High-level: resolve + encode all of a validated tx's links ──────────────────────────────────

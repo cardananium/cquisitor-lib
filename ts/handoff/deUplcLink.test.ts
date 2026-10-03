@@ -13,8 +13,12 @@ import {
   fieldsToDecompileUrl,
   decompilePurpose,
   plutusVersionFromScriptType,
+  fieldsToUrl,
+  readDeUplcAnnotations,
   type DeUplcFields,
+  type DecompileFields,
 } from "./deUplcLink.js";
+import type { Annotation, DeUplcTarget } from "../share/annotations.js";
 import { fromBase64Url } from "../share/base64url.js";
 
 // ── minimal typed mocks ──────────────────────────────────────────────────────────────────────────
@@ -393,5 +397,106 @@ describe("decompiler deep-link — not the debugger", () => {
     expect(payload).not.toHaveProperty("redeemer");
     expect(payload).not.toHaveProperty("datum");
     expect(payload).not.toHaveProperty("exUnits");
+  });
+});
+
+// ── annotations ──────────────────────────────────────────────────────────────────────────────────
+
+async function payloadOf(url: string): Promise<Record<string, unknown>> {
+  const d = parseHashParams(url).get("d");
+  expect(d).toBeTruthy();
+  return JSON.parse(await gunzipBase64Url(d!));
+}
+
+describe("de-uplc links with annotations", () => {
+  const ANN: Annotation<DeUplcTarget>[] = [
+    { target: { kind: "term", term_id: 12 }, label: "Fails here", hint: "error term", severity: "error" },
+    { target: { kind: "uplc_line", line: 3 } },
+  ];
+  const PSEUDO: Annotation<DeUplcTarget>[] = [
+    { target: { kind: "pseudo_line", line: 10, end_line: 14 }, hint: "datum check" },
+    { target: { kind: "pseudo_line", line: 20 } },
+  ];
+  const small: DeUplcFields = { script: "4e4d01000033222220051200120011", v: "v3", context: "d87980" };
+
+  test("a small debugger link stays plain without annotations", async () => {
+    expect(await fieldsToUrl(small)).toBe(fieldsToPlainUrl(small));
+  });
+
+  test("annotations switch a small debugger link to #d= and travel as ann / ann_focus", async () => {
+    const url = await fieldsToUrl({ ...small, annotations: ANN, annotationFocus: 1 });
+    expect(url).toContain("/#d=");
+    const json = await payloadOf(url);
+    expect(json).toEqual({ ...small, ann: ANN, ann_focus: 1 });
+    expect(readDeUplcAnnotations(json)).toEqual({ annotations: ANN, annotationFocus: 1 });
+  });
+
+  test("the compressed debugger payload never holds the field names, and focus 0 is omitted", async () => {
+    const json = await payloadOf(await fieldsToCompressedUrl({ ...small, annotations: ANN, annotationFocus: 0 }));
+    expect(json).toEqual({ ...small, ann: ANN });
+    expect("annotations" in json).toBe(false);
+    expect("annotationFocus" in json).toBe(false);
+  });
+
+  test("invalid annotations alone keep a small link plain", async () => {
+    const junk = [{ target: { kind: "tx_path", path: "x" } }] as unknown as Annotation<DeUplcTarget>[];
+    const fields = { ...small, annotations: junk };
+    expect(await fieldsToUrl(fields)).toBe(fieldsToPlainUrl(small));
+    expect(fieldsToPlainUrl(fields)).not.toContain("ann");
+  });
+
+  test("annotations switch a small decompiler link to #d=", async () => {
+    const fields: DecompileFields = { script: "4e4d01", v: "v3", purpose: "spend", annotations: PSEUDO, annotationFocus: 1 };
+    const url = await fieldsToDecompileUrl(fields);
+    expect(url).toContain("/#d=");
+    const json = await payloadOf(url);
+    expect(json).toEqual({ view: "decompiler", script: "4e4d01", v: "v3", purpose: "spend", ann: PSEUDO, ann_focus: 1 });
+  });
+
+  test("decompiler options switch to #d= and are carried as is", async () => {
+    const options = { preset: "readable", inlineLets: false, depth: 3 };
+    const url = await fieldsToDecompileUrl({ script: "4e4d01", options, annotations: PSEUDO });
+    const json = await payloadOf(url);
+    expect(json.options).toEqual(options);
+    expect(readDeUplcAnnotations(json)).toEqual({ annotations: PSEUDO, annotationFocus: 0, options });
+  });
+
+  test("an empty options object needs no payload", async () => {
+    const url = await fieldsToDecompileUrl({ script: "4e4d01", options: {} });
+    expect(url).toBe(fieldsToDecompilePlainUrl({ script: "4e4d01" }));
+  });
+
+  test("the plain decompiler URL cannot carry options or annotations", () => {
+    const url = fieldsToDecompilePlainUrl({ script: "4e4d01", options: { a: 1 }, annotations: PSEUDO });
+    expect(url).toBe(fieldsToDecompilePlainUrl({ script: "4e4d01" }));
+  });
+});
+
+describe("readDeUplcAnnotations", () => {
+  test("a payload without annotations has none", () => {
+    expect(readDeUplcAnnotations({ script: "00", v: "v3" })).toEqual({ annotations: [], annotationFocus: 0 });
+    expect(readDeUplcAnnotations(null)).toEqual({ annotations: [], annotationFocus: 0 });
+    expect(readDeUplcAnnotations("ann")).toEqual({ annotations: [], annotationFocus: 0 });
+  });
+
+  test("drops unknown kinds and malformed entries, clamps focus, ignores non-object options", () => {
+    const out = readDeUplcAnnotations({
+      ann: [
+        { target: { kind: "term", term_id: 1 } },
+        { target: { kind: "cbor_span", offset: 0, length: 1 } },
+        { target: { kind: "pseudo_line", line: 5, end_line: 2 } },
+        { target: { kind: "uplc_line", line: 9 }, severity: "warning", label: "x".repeat(200) },
+      ],
+      ann_focus: 50,
+      options: ["not", "an", "object"],
+    });
+    expect(out.annotations.length).toBe(2);
+    expect(out.annotations[1]).toEqual({
+      target: { kind: "uplc_line", line: 9 },
+      severity: "warning",
+      label: "x".repeat(80),
+    });
+    expect(out.annotationFocus).toBe(1);
+    expect(out.options).toBeUndefined();
   });
 });

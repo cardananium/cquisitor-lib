@@ -20,6 +20,7 @@ subpaths.
 - [`addWitnesses` (`add_witnesses_to_tx`)](#addwitnesses-add_witnesses_to_tx)
 - [Typed decoders](#typed-decoders)
 - [CBOR validation report](#cbor-validation-report)
+- [Link annotations](#link-annotations)
 
 ---
 
@@ -827,3 +828,79 @@ key), `byte_spans` / `anchor_spans` (positions in the CBOR) and
 - **An empty array** offered to a map, tag or scalar rule is a `mismatch` with
   `expected` set to the rule's type (`expected map { 1: uint }, got array(0
   items)`).
+
+---
+
+## Link annotations
+
+Share links into cquisitor (`/share`) and hand-off links into de-uplc-web
+(`/handoff`) can carry **annotations**: UI targets the app highlights until the
+user dismisses them, each with an optional hint. The focused one gets a hint
+card; a navigator cycles through the rest.
+
+```ts
+type AnnotationSeverity = "error" | "warning" | "info";
+
+interface Annotation<T> {
+  target: T;
+  label?: string;               // at most MAX_ANNOTATION_LABEL (80) chars
+  hint?: string;                // plain text, newlines allowed; at most MAX_ANNOTATION_HINT (2000) chars
+  severity?: AnnotationSeverity; // "info" when absent
+}
+```
+
+A link carries at most `MAX_ANNOTATIONS` (64) annotations and a focus index
+(the annotation shown first, 0 by default).
+
+### cquisitor targets (`CquisitorTarget`)
+
+| `kind` | fields | tab | meaning |
+|---|---|---|---|
+| `tx_path` | `path` | transaction-validator | dotted validator location, as in `ValidationPhase1Error.locations` (`transaction.body.outputs.0`) |
+| `diagnostic` | `index`, or `name` (+ `occurrence`, 0-based) | transaction-validator | an entry of the diagnostics list (phase-1 errors, phase-2 errors, phase-1 warnings, phase-2 warnings, in that order); `index` wins when both are given |
+| `redeemer` | `tag`, `index` | transaction-validator | a row of the Plutus results (`Spend[0]`) |
+| `cbor_span` | `offset`, `length` (at least 1) | general-cbor, cddl-validator | byte range of the hex input |
+| `cbor_path` | `path` | general-cbor, cddl-validator | CBOR path in the `/cddl/cborPath` grammar (`$`, `.ident`, `[n]`, `["str"]`) |
+| `cddl_range` | `start`, `end` (`end > start`) | cddl-validator | `[start, end)` character range of the schema |
+| `cddl_rule` | `name` | cddl-validator | the definition of a rule |
+
+Every encoder input (`ValidatorShareInput`, `CardanoCborShareInput`,
+`GeneralCborShareInput`, `CddlShareInput`) takes `annotations?` and
+`annotationFocus?`. Annotations need the rich payload, so with any present the
+link is always `v=1&e=j|b&d=…` (as `ann` / `ann_focus` in the payload's JSON):
+a `minimal` mode request becomes compressed (`e=b`) when a compressor is
+configured and readable (`e=j`) otherwise. `encodeValidatorLink` still includes
+the validation context only when `includeCtx` is set, a context is present and
+the requested mode is not `minimal`.
+
+Every `parse*Share` result has `annotations` (empty when the link has none) and
+`annotationFocus` (an index into `annotations`, clamped). Unknown target kinds
+and malformed entries are dropped, never fatal; the other fields of the link
+parse exactly as without annotations, and parsers that predate annotations
+ignore them.
+
+### de-uplc-web targets (`DeUplcTarget`)
+
+| `kind` | fields | view | meaning |
+|---|---|---|---|
+| `term` | `term_id` | debugger | normalised term id: `uniq_id` minus the smallest term uniq id of the program |
+| `uplc_line` | `line` (1-based) | debugger | line of the one-term-per-line UPLC listing |
+| `pseudo_line` | `line`, `end_line?` (1-based, `end_line >= line`) | decompiler | line range of the decompiled output made with the link's decompiler `options` (default preset when absent) |
+
+`DeUplcFields` and `DecompileFields` take `annotations?` and `annotationFocus?`;
+`DecompileFields` also takes `options?` (the decompiler options object, passed
+through as is). `fieldsToUrl` and `fieldsToDecompileUrl` switch to the
+compressed `#d=` form whenever there are annotations (or non-empty options),
+writing `ann`, `ann_focus` and `options` into its JSON; the plain
+`#script=` / `#decompile=` forms cannot carry them. `readDeUplcAnnotations(json)`
+reads those fields back from a decoded `#d=` payload.
+
+### Helpers
+
+- `isCquisitorTarget(value)`, `isDeUplcTarget(value)`: target guards.
+- `normalizeAnnotations(raw, isTarget)`: the valid annotations of an untrusted
+  array (first 64 entries; label and hint truncated; only the kind's own fields kept).
+- `normalizeAnnotationList(raw, rawFocus, isTarget)`: the same plus the focus,
+  mapped onto the kept entries.
+- `annotationPayload(annotations, focus, isTarget)`: the `{ ann, ann_focus }`
+  fields a payload gets (none when nothing is valid, `ann_focus` only when not 0).
